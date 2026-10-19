@@ -44,6 +44,20 @@ Meaningful changes by milestone. Format loosely follows
 - Test `translator.translated_code_size_is_bounded` pins the block count and an
   upper bound on generated words for a fixed guest loop.
 
+### Changed — Optimization 2: dead `rip` store elimination (BENCHMARKS.md §4.2.2)
+- `emit_one` gained a `write_rip` parameter. Translated blocks emit body
+  instructions with `write_rip=false` and write `rip` exactly once, at the
+  block exit; nothing inside a block reads `rip`, so the per-instruction
+  `movz`+`movk`+`str` was dead. The single-instruction translator keeps
+  `write_rip=true` (its caller reads `rip` back).
+- Generated code for the fixed workload **644 → 584 bytes (−9.3%)**; Tier 1 wall
+  time −4% in an interleaved A/B. Delta fully accounted for (5 body instructions
+  × 3 instructions). The differential suite compares the final `rip`, so a
+  misplaced write fails hard.
+- Tightened `translator.translated_code_size_is_bounded` from a loose `< 200`
+  word bound to an upper bound at the current count (148 words), so any future
+  growth fails CI while a reduction is still allowed.
+
 ### Docs
 - Split `STATUS.md` phase sections correctly (two headings both said "Phase 3";
   the earlier block is Phase 2). Corrected the stale claim that no translator

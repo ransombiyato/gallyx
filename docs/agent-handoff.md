@@ -172,7 +172,11 @@ exist and pass.
    differential suite green under `qemu-aarch64`. A deterministic code-size
    guard (`translator.translated_code_size_is_bounded`) now fails CI on an
    accidental code-size blow-up.
-5. **Next: register allocation (start small).** Every guest instruction is still
+5. ~~Optimization 2: dead `rip` stores~~ **Done & measured.** Blocks write `rip`
+   once at their exit instead of after every body instruction (nothing inside a
+   block reads it). Generated code **644 → 584 bytes (−9.3%)**, Tier 1 wall time
+   ≈ −4% (BENCHMARKS.md §4.2.2).
+6. **Next: register allocation (start small).** Every guest instruction is still
    a load/compute/store of `GuestState`. Keep the most-used guest registers in
    AArch64 registers *within* a block (load at entry, spill at exit). Keep the
    block signature and the authoritative-`rip` rule unchanged. Require the whole
@@ -180,11 +184,11 @@ exist and pass.
    record before/after in BENCHMARKS.md with an accept/reject verdict. Never
    change the baseline to make a candidate look good. Add a deterministic guard
    for whatever the change should move, since `qemu-user` timing is noisy.
-6. **Keep the oracle.** Run each multi-instruction program through both the
+7. **Keep the oracle.** Run each multi-instruction program through both the
    generated blocks and the interpreter's `run_program`, and require the final
    `GuestState` to match bit-for-bit. A mismatch must fail loudly; there is no
    tolerance for "close enough".
-7. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
+8. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
    pipeline builds the tests for AArch64, runs them under `qemu-user`, and runs
    the CLI smoke test with `HYPERION_EMULATOR`, so generated code is exercised in
    CI without the target device.

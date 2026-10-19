@@ -497,10 +497,13 @@ HYPERION_TEST("translator", "translated_code_size_is_bounded") {
     // lies inside the entry block's byte range.
     HYPERION_CHECK_EQ(cache.block_count(), std::size_t{3});
     const std::size_t words = cache.total_code_bytes() / 4;
-    // A loose upper bound so an accidental code-size blow-up fails CI. The
-    // exact count is reported by the benchmark, which is the place to notice
-    // gradual growth.
-    HYPERION_CHECK(words > 0 && words < 200);
+    // Exact count at the time of writing is 148 words (592 bytes). The guard is
+    // an upper bound so a *reduction* is allowed but any growth fails CI; a
+    // code-size regression is otherwise easy to miss under qemu-user timing
+    // noise. Update the bound deliberately when the count legitimately changes,
+    // and record the exact figure in BENCHMARKS.md.
+    HYPERION_CHECK_EQ(cache.total_code_bytes() % 4, std::size_t{0});
+    HYPERION_CHECK(words > 0 && words <= 148);
 }
 
 #else

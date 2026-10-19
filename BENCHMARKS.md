@@ -252,6 +252,38 @@ noise would hide it. The exact byte count is reported by the benchmark
 
 **Reproduce:** `scripts/bench-tier-qemu.sh --iterations 200000 --repeats 15`.
 
+#### 4.2.2 Optimization 2 — dead `rip` stores (Phase 5)
+
+**Hypothesis.** Every translated body instruction ended with
+`movz`+`movk`+`str` to advance `GuestState.rip`. But nothing *inside* a block
+reads `rip`: only the dispatcher does, after the block returns. Every
+intermediate store is therefore dead, and a block needs exactly one `rip` write
+at its exit.
+
+**Change.** `emit_one` gained a `write_rip` parameter. Body instructions in a
+block are emitted with `write_rip=false`; the block writes `rip` once, at
+whichever exit it takes (fall-through, `jmp`, `jcc`, `hlt`). The standalone
+single-instruction translator (`translate_instruction`) still passes
+`write_rip=true`, because that path is a whole "block" of one instruction and
+the caller reads `rip` back.
+
+**Evidence.**
+
+| Metric | Before (`b3dbcb6`) | After | Change |
+| --- | --- | --- | --- |
+| Generated AArch64 bytes (same workload) | 644 | 584 | **−9.3%** |
+| Tier 1 ns / guest instruction (interleaved A/B) | 31.3 | 29.8 | ≈ −4% |
+
+Again the delta is fully accounted for: the benchmark loop has five body
+instructions (two `add`, two `dec`, one `xor`), each dropping a 3-instruction
+`rip` write = 15 words = 60 bytes = exactly 644 − 584.
+
+**Correctness.** The differential suite compares the *final* `GuestState`,
+including `rip`, against the interpreter, so a missing or misplaced `rip` write
+is a hard failure. The single-instruction differential tests still cover the
+`write_rip=true` path. Cross suite green under `qemu-aarch64` (99 passed, 0
+failed).
+
 ### 4.3 Reference target device (Snapdragon 855)
 
 **unavailable.** The reference device is not present in this environment.

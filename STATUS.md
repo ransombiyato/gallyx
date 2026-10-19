@@ -22,10 +22,11 @@ works, what was last verified, and what to do next.
 | 1. Tier 0 vs Tier 1 benchmark harness | **Done** — `benchmarks/tier_bench.cpp`, `hyperion_tier_bench` |
 | 2. Reproducible baseline recorded before optimising | **Done** — BENCHMARKS.md §4.2, `scripts/bench-tier-qemu.sh` |
 | 3. Optimization 1: parity (PF) fast path | **Done & measured** — BENCHMARKS.md §4.2.1; −28.8% generated code for the fixed workload |
-| 4. Register allocation | **Not started** |
-| 5. Block chaining | **Not started** |
-| 6. Lower-overhead dispatch | **Not started** |
-| 7. Multi-tier compilation | **Not started** |
+| 4. Optimization 2: dead `rip` store elimination | **Done & measured** — BENCHMARKS.md §4.2.2; −9.3% generated code |
+| 5. Register allocation | **Not started** |
+| 6. Block chaining | **Not started** |
+| 7. Lower-overhead dispatch | **Not started** |
+| 8. Multi-tier compilation | **Not started** |
 
 **Baseline (must not be silently changed).** Fixed guest loop, 200,000
 iterations = 600,002 retired guest instructions, median of 7 samples under
@@ -44,6 +45,14 @@ full differential suite under `qemu-aarch64` (99 passed, 0 failed). The
 deterministic size is now a CI regression guard
 (`translator.translated_code_size_is_bounded`) because timing noise under
 `qemu-user` would hide a code-size regression.
+
+**Optimization 2 (dead `rip` stores) — accepted.** Nothing inside a translated
+block reads `GuestState.rip`, so the per-instruction `movz`+`movk`+`str` that
+advanced it was dead; the block now writes `rip` once at its exit. Generated
+code fell 644 → 584 bytes (−9.3%, fully accounted for: 5 body instructions ×
+3 instructions each) and Tier 1 wall time fell ~4% in an interleaved A/B
+(BENCHMARKS.md §4.2.2). The differential suite compares the final `rip`, so a
+misplaced write fails hard.
 
 ---
 
@@ -410,15 +419,15 @@ stable-vs-noisy discrimination case).
 ## 4. Immediate next task
 
 **Phase 4 is closed (exit criteria met, recorded, CI green). Phase 5 has begun,
-its baseline is recorded, and Optimization 1 (parity fast path) is complete and
-measured (BENCHMARKS.md §4.2.1).**
+its baseline is recorded, and Optimizations 1 and 2 are complete and measured
+(BENCHMARKS.md §4.2.1, §4.2.2).**
 
 Baseline to beat (AArch64 under `qemu-user`, fixed loop, median of 7):
 Tier 1 = **38.4 ns/guest-instruction**; Tier 0 = 491.9 ns/guest-instruction
 (ratio 0.078). After Optimization 1 the interleaved A/B gives Tier 1 =
-**31.5 ns/guest-instruction** and generated code **904 → 644 bytes**. Recorded
-in BENCHMARKS.md §4.2 and §4.2.1, reproducible with
-`scripts/bench-tier-qemu.sh`.
+**31.5 ns/guest-instruction**; after Optimization 2, **~29.8**. Generated code
+went **904 → 644 → 584 bytes**. Recorded in BENCHMARKS.md §4.2–§4.2.2,
+reproducible with `scripts/bench-tier-qemu.sh`.
 
 The single best next action:
 

@@ -253,14 +253,16 @@ const char* to_string(BlockExit exit) {
 // here, so they are rejected as unsupported by this helper.
 namespace {
 
-TranslateError emit_one(a64::Encoder& e, const Instruction& insn) {
+TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip) {
     const bool is32 = insn.dst.size == OperandSize::k32;
     const a64::Width w = is32 ? a64::Width::k32 : a64::Width::k64;
     const int bits = is32 ? 32 : 64;
 
     switch (insn.opcode) {
     case Opcode::kNop:
-        emit_advance_rip(e, insn);
+        if (write_rip) {
+            emit_advance_rip(e, insn);
+        }
         return TranslateError::kNone;
 
     case Opcode::kHlt:
@@ -273,7 +275,9 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn) {
             return err;
         }
         store_gpr(e, kA, insn.dst.reg);
-        emit_advance_rip(e, insn);
+        if (write_rip) {
+            emit_advance_rip(e, insn);
+        }
         return TranslateError::kNone;
     }
 
@@ -321,7 +325,9 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn) {
         if (insn.opcode != Opcode::kCmp) {
             store_gpr(e, kR, insn.dst.reg);
         }
-        emit_advance_rip(e, insn);
+        if (write_rip) {
+            emit_advance_rip(e, insn);
+        }
         return TranslateError::kNone;
     }
 
@@ -343,7 +349,9 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn) {
         emit_flags_from_nzcv(e, is_sub, kT2, kR);
         e.strb(kT0, kState, kCfOffset); // restore CF
         store_gpr(e, kR, insn.dst.reg);
-        emit_advance_rip(e, insn);
+        if (write_rip) {
+            emit_advance_rip(e, insn);
+        }
         return TranslateError::kNone;
     }
 
@@ -434,7 +442,7 @@ Translation translate_instruction(const Instruction& insn) {
         }
     }
 
-    const TranslateError err = emit_one(e, insn);
+    const TranslateError err = emit_one(e, insn, /*write_rip=*/true);
     if (err != TranslateError::kNone) {
         out.error = err;
         return out;
@@ -516,7 +524,10 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
             out.target = insn.address;
             break;
         }
-        const TranslateError emit_err = emit_one(e, insn);
+        // Body instructions do not write rip: nothing inside a block reads it,
+        // so the per-instruction store is dead. The block writes rip once, at
+        // its exit. See BENCHMARKS.md §4.2.2.
+        const TranslateError emit_err = emit_one(e, insn, /*write_rip=*/false);
         if (emit_err != TranslateError::kNone) {
             if (out.guest_instruction_count == 0) {
                 out.error = emit_err;
@@ -545,6 +556,7 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
     }
 
     if (out.exit == BlockExit::kFallThrough) {
+        emit_set_rip(e, out.target);
         emit_return(e, BlockResult::kOk);
     }
 

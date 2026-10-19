@@ -193,7 +193,62 @@ This is recorded as **D-013** in `DECISIONS.md`.
 
 ---
 
-## 6. Open questions deferred to later phases
+## 6. AArch64 UML: an attempted measurement
+
+The scope correction added an optional Phase 1 item: cross-build the AArch64
+UML port to test the "kernel-as-process" idea (running a real Linux kernel as a
+user-mode process, with no KVM and no root). An attempt was made. It did **not**
+succeed, and the reason is worth recording.
+
+**What was tried.** `zalexdev/linux-um-arm64` (branch `um-arm64`, Linux 7.2.0-rc4)
+was shallow-cloned and configured:
+
+```bash
+make ARCH=um SUBARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+make ARCH=um SUBARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j4
+```
+
+The port is real: `arch/arm64/um/` contains `os-Linux/registers.c`, `ptrace.c`,
+`setjmp_aarch64.S`, `stub_segv.c`, a vDSO and `asm/`, and there is a dedicated
+`arch/um/configs/arm64_defconfig`. Configuration succeeded.
+
+**What happened.** The build compiled a large number of objects and then failed:
+
+```
+././include/linux/compiler_attributes.h:44:41: error: expected ')' before '__attribute__'
+/usr/aarch64-linux-gnu/include/stdlib.h:673:6: error: expected ',' or ';' before ')' token
+make[4]: *** [scripts/Makefile.build:289: arch/arm64/um/os-Linux/registers.o] Error 1
+```
+
+**Root cause.** This is **not** an arm64-port defect and **not** a HYPERION
+defect. `include/linux/compiler_attributes.h` does not define
+`__attribute_alloc_size__`; it is expected to come from glibc's `sys/cdefs.h`.
+This Debian 13 glibc only defines it when a `__has_attribute(alloc_size)`
+probe succeeds, and the kernel's forced-include sequence does not provide that
+probe. The same failure occurs when the exact compiler flags are replayed
+against plain `#include <stdlib.h>`.
+
+**The decisive test.** Stock **x86-64** UML (`ARCH=um SUBARCH=x86_64`) was
+built from the same tree on the same host, and failed with the *identical*
+error at the identical header line. A failure that reproduces on the fully
+upstream, fully supported subarchitecture is a host-toolchain/upstream
+incompatibility, not anything specific to the AArch64 work.
+
+**Conclusion.** The AArch64 UML port is **plausible but unverified**. Its build
+is blocked by a host glibc/kernel-header mismatch that also blocks stock UML.
+Resolving it (older glibc, a distribution kernel toolchain, or a kernel-side
+patch) is out of scope for Phase 1 and was not pursued, because the R1 tier is
+optional and speculative. No claim is made that the port works.
+
+This is recorded rather than omitted because "we tried the optional item and
+here is precisely why it did not complete" is a more useful handoff than
+silence, and because the negative result is itself informative: the blocker is
+environmental and shared with upstream, so it is unlikely to be an artefact of
+the port.
+
+---
+
+## 7. Open questions deferred to later phases
 
 | Question | Phase | Note |
 | --- | --- | --- |

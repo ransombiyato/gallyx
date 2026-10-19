@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Project HYPERION - the `hyperion` command.
+#
+# Installed by install.sh. Reads its configuration from
+# <prefix>/share/hyperion/install.conf, which records the source checkout and
+# build tree chosen at install time.
+#
+# This is a thin, honest front end: every command either runs something that
+# really exists in the build tree, or says clearly that it does not exist yet.
+set -euo pipefail
+
+SELF="${BASH_SOURCE[0]}"
+while [ -L "${SELF}" ]; do
+    target="$(readlink "${SELF}")"
+    case "${target}" in
+        /*) SELF="${target}" ;;
+        *)  SELF="$(dirname "${SELF}")/${target}" ;;
+    esac
+done
+BIN_DIR="$(cd "$(dirname "${SELF}")" && pwd)"
+PREFIX="$(cd "${BIN_DIR}/.." && pwd)"
+
+CONF="${HYPERION_INSTALL_CONF:-${PREFIX}/share/hyperion/install.conf}"
+
+if [ -n "${HYPERION_SRC:-}" ]; then
+    SRC="${HYPERION_SRC}"
+elif [ -f "${CONF}" ]; then
+    SRC="$(sed -n 's/^HYPERION_SRC=//p' "${CONF}" | head -1)"
+else
+    # Running straight from a checkout: fall back to the repo this file is in.
+    SRC="$(cd "${BIN_DIR}/.." && pwd)"
+fi
+
+if [ -n "${HYPERION_BUILD_DIR:-}" ]; then
+    BUILD="${HYPERION_BUILD_DIR}"
+elif [ -f "${CONF}" ]; then
+    BUILD="$(sed -n 's/^HYPERION_BUILD_DIR=//p' "${CONF}" | head -1)"
+else
+    BUILD="${SRC}/build/dev"
+fi
+
+BENCH_BIN="${BUILD}/benchmarks/hyperion_bench"
+
+say() { printf '%s\n' "$*"; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+need_checkout() {
+    [ -d "${SRC}" ] || die "source checkout not found at '${SRC}' (re-run install.sh)"
+}
+
+need_build() {
+    need_checkout
+    [ -d "${BUILD}" ] || die "no build tree at '${BUILD}' (run: hyperion build)"
+}
+
+need_bench() {
+    need_build
+    [ -x "${BENCH_BIN}" ] || die "benchmark harness not built (run: hyperion build)"
+}
+
+cmd_help() {
+    cat <<'EOF'
+hyperion - experimental x86-64 -> AArch64 user-mode dynamic binary translator
+
+usage: hyperion <command> [options]
+
+status
+  status        what is implemented, and what is not
+  doctor        check the host, toolchain and install
+  version       print version and build information
+
+build and test
+  build         build the project (Release)
+  test          run the test suite
+  bench         run the benchmark harness
+  cross-test    build and run the AArch64 tests under qemu-user (if available)
+  clean         remove this install's build tree
+
+paths
+  src           print the source checkout path
+  build-dir     print the build tree path
+
+translator (not implemented yet)
+  run <exe>     run an x86-64 Linux program  [NOT IMPLEMENTED]
+  info <exe>    describe an x86-64 executable [NOT IMPLEMENTED]
+
+  help          show this message
+
+'hyperion bench --help' shows the benchmark options.
+EOF
+}
+
+cmd_version() {
+    if [ -x "${BUILD}/benchmarks/hyperion_bench" ]; then
+        "${BUILD}/benchmarks/hyperion_bench" --iterations 1 --repeats 2 --json 2>/dev/null \
+            | sed -n 's/.*"build": "\(.*\)",/build: \1/p'
+    fi
+    say "source: ${SRC}"
+    say "build:  ${BUILD}"
+}
+
+cmd_status() {
+    cat <<'EOF'
+Project HYPERION - status
+
+Phase 0  foundation                  COMPLETE
+Phase 1  baseline and benchmarks     IN PROGRESS
+
+IMPLEMENTED
+  - CMake build, CI, unit tests, cross tests, sanitizers
+  - host probe (arch, kernel, page size, cache line)
+  - benchmark harness with repeated-run statistics
+  - AArch64 cross-build + test under qemu-user
+
+NOT IMPLEMENTED
+  - x86-64 instruction decoding
+  - any code generation
+  - the translator itself
+
+There is no way to run an x86-64 program with this project yet. 'hyperion
+bench' measures the host machine, not any emulation. This is deliberate: the
+project is built in small, verified stages and the translator is Phase 3+.
+
+See STATUS.md and ROADMAP.md in the source checkout for the full picture.
+EOF
+}
+
+cmd_doctor() {
+    say "Project HYPERION - environment check"
+    say ""
+    say "install"
+    say "  prefix      : ${PREFIX}"
+    say "  config      : ${CONF} $( [ -f "${CONF}" ] && echo '(found)' || echo '(not found)' )"
+    say "  source      : ${SRC} $( [ -d "${SRC}" ] && echo '(found)' || echo '(MISSING)' )"
+    say "  build tree  : ${BUILD} $( [ -d "${BUILD}" ] && echo '(found)' || echo '(not built)' )"
+    say ""
+    say "host"
+    say "  os          : $(uname -s) $(uname -r)"
+    say "  arch        : $(uname -m)"
+    if [ -r /proc/cpuinfo ]; then
+        model="$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1)"
+        [ -n "${model}" ] && say "  cpu         : ${model}"
+        say "  logical cpus: $(grep -c '^processor' /proc/cpuinfo)"
+    fi
+    if [ -r /proc/meminfo ]; then
+        say "  memory      : $(sed -n 's/^MemTotal:[[:space:]]*//p' /proc/meminfo | head -1)"
+    fi
+    say ""
+    say "toolchain"
+    for t in cmake ninja c++ g++ clang++ aarch64-linux-gnu-g++ qemu-aarch64 git; do
+        if command -v "$t" >/dev/null 2>&1; then
+            say "  $(printf '%-22s' "${t}") $(command -v "$t")"
+        else
+            say "  $(printf '%-22s' "${t}") (not found)"
+        fi
+    done
+    say ""
+    say "notes"
+    if ! command -v aarch64-linux-gnu-g++ >/dev/null 2>&1; then
+        say "  - no AArch64 cross compiler: 'hyperion cross-test' is unavailable."
+        say "    This is expected on a target AArch64 device."
+    fi
+    if [ ! -x "${BENCH_BIN}" ]; then
+        say "  - benchmark harness not built: run 'hyperion build'."
+    fi
+    say "  - the translator does not exist yet; see 'hyperion status'."
+}
+
+cmd_build() {
+    need_checkout
+    say "Configuring ${BUILD} (Release)"
+    cmake -S "${SRC}" -B "${BUILD}" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release -DHYPERION_WARNINGS_AS_ERRORS=ON >/dev/null
+    say "Building"
+    cmake --build "${BUILD}"
+    say "Build complete."
+}
+
+cmd_test() {
+    need_build
+    ctest --test-dir "${BUILD}" --output-on-failure
+}
+
+cmd_bench() {
+    need_bench
+    exec "${BENCH_BIN}" "$@"
+}
+
+cmd_cross_test() {
+    need_checkout
+    command -v aarch64-linux-gnu-g++ >/dev/null 2>&1 \
+        || die "no AArch64 cross compiler; this command needs one (and qemu-user)"
+    command -v qemu-aarch64 >/dev/null 2>&1 \
+        || die "qemu-aarch64 not found; install qemu-user"
+    local dir="${SRC}/build/cross-test"
+    cmake -S "${SRC}" -B "${dir}" -G Ninja \
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DHYPERION_ENABLE_CROSS_TESTS=ON \
+        -DHYPERION_AARCH64_CXX=aarch64-linux-gnu-g++ \
+        -DHYPERION_QEMU_AARCH64=qemu-aarch64 \
+        -DHYPERION_BUILD_BENCHMARKS=OFF >/dev/null
+    cmake --build "${dir}"
+    ctest --test-dir "${dir}" --output-on-failure
+}
+
+cmd_clean() {
+    need_checkout
+    say "Removing ${BUILD}"
+    rm -rf "${BUILD}"
+}
+
+not_implemented() {
+    say "NOT IMPLEMENTED: $1"
+    say ""
+    say "There is no translator yet. Project HYPERION is being built in small,"
+    say "verified stages; instruction decoding is Phase 2 and native code"
+    say "generation is Phase 3. See ROADMAP.md."
+    exit 2
+}
+
+case "${1:-}" in
+    ""|-h|--help|help)  cmd_help ;;
+    status)             cmd_status ;;
+    version)            cmd_version ;;
+    doctor)             cmd_doctor ;;
+    build)              cmd_build ;;
+    test)               cmd_test ;;
+    bench)              shift; cmd_bench "$@" ;;
+    cross-test)         cmd_cross_test ;;
+    clean)              cmd_clean ;;
+    src)                say "${SRC}" ;;
+    build-dir)          say "${BUILD}" ;;
+    run)                not_implemented "running x86-64 programs" ;;
+    info)               not_implemented "inspecting x86-64 executables" ;;
+    *)                  printf 'error: unknown command %s\n\n' "$1" >&2; cmd_help >&2; exit 1 ;;
+esac

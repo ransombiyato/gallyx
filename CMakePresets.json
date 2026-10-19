@@ -1,0 +1,63 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "inherits": "base",
+      "displayName": "Debug (gcc)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "displayName": "RelWithDebInfo (gcc)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+    },
+    {
+      "name": "sanitize",
+      "inherits": "base",
+      "displayName": "Debug + ASan/UBSan (gcc)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "HYPERION_ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "cross-aarch64",
+      "inherits": "base",
+      "displayName": "AArch64 cross build for qemu-user validation",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "HYPERION_BUILD_BENCHMARKS": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "sanitize", "configurePreset": "sanitize" },
+    { "name": "cross-aarch64", "configurePreset": "cross-aarch64" }
+  ],
+  "testPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

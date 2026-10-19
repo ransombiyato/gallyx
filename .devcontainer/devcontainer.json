@@ -1,0 +1,21 @@
+{
+  "name": "hyperion-dev",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": ".."
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "llvm-vs-code-extensions.vscode-clangd",
+        "ms-vscode.cmake-tools",
+        "editorconfig.editorconfig"
+      ],
+      "settings": {
+        "cmake.configureOnOpen": false,
+        "C_Cpp.intelliSenseEngine": "disabled"
+      }
+    }
+  },
+  "postCreateCommand": "scripts/dev.sh bootstrap && scripts/dev.sh build && scripts/dev.sh test"
+}

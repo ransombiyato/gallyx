@@ -1,0 +1,150 @@
+# SPDX-License-Identifier: Apache-2.0
+# Project HYPERION continuous integration.
+#
+# Jobs:
+#   build-and-test : compile with GCC and Clang (-Werror) and run the suite
+#   cross-tests    : cross-compile to AArch64 and run the suite under qemu-user
+#   sanitizers     : ASan/UBSan test run
+#   format         : clang-format --dry-run --Werror
+name: ci
+
+on:
+  push:
+    branches: [main, "phase-*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: CI only needs to read the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 4
+
+jobs:
+  build-and-test:
+    name: build & test (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        include:
+          - compiler: gcc
+            cxx: g++
+          - compiler: clang
+            cxx: clang++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build clang
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DHYPERION_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: CLI smoke
+        run: |
+          ./build/hyperion version
+          ./build/hyperion probe
+
+  cross-tests:
+    name: AArch64 cross tests (qemu-user)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross toolchain and qemu
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            cmake ninja-build \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            qemu-user
+
+      - name: Verify cross toolchain
+        run: |
+          aarch64-linux-gnu-g++ --version | head -1
+          qemu-aarch64 --version | head -1
+
+      - name: Configure (with cross tests enabled)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DHYPERION_ENABLE_CROSS_TESTS=ON \
+            -DHYPERION_AARCH64_CXX=aarch64-linux-gnu-g++ \
+            -DHYPERION_QEMU_AARCH64=qemu-aarch64 \
+            -DHYPERION_BUILD_BENCHMARKS=OFF
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test (native + AArch64 under qemu)
+        run: ctest --test-dir build --output-on-failure
+
+      - name: AArch64 probe report
+        run: qemu-aarch64 ./build/cross-aarch64/hyperion probe
+
+  sanitizers:
+    name: ASan/UBSan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build clang
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DHYPERION_ENABLE_SANITIZERS=ON \
+            -DHYPERION_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  format:
+    name: clang-format
+    runs-on: ubuntu-24.04
+    env:
+      # Pinned so CI matches the documented formatting version exactly.
+      # Formatting rules change between clang-format releases; drift here
+      # produces spurious failures.
+      CLANG_FORMAT_VERSION: 19.1.7
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned clang-format
+        run: |
+          python3 -m pip install --user "clang-format==${CLANG_FORMAT_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Check formatting
+        run: |
+          clang-format --version
+          find src include tests benchmarks -name '*.cpp' -o -name '*.hpp' \
+            | xargs clang-format --dry-run --Werror

@@ -60,6 +60,10 @@ execution.** No instruction is decoded, interpreted or translated.
 - `unit.native` and `bench.smoke`: pass.
 - `cross.aarch64_tests`: pass; AArch64 unit tests 8/8 under `qemu-aarch64`.
 - AArch64 probe correctly reports `arch: aarch64` and `assume W^X: yes`.
+- Pushed to `origin` as branch `phase-0-foundation`; GitHub Actions run
+  `39244780989` (commit `460629a`) concluded `success` for all jobs: gcc build
+  and tests, clang build and tests, AArch64 cross tests under `qemu-user`,
+  ASan/UBSan, and clang-format. Pull request #1 opened against `main`.
 
 ### Known limitations
 - No instruction decoding, interpretation or translation.

@@ -38,6 +38,21 @@ CMake 3.31.6, Ninja 1.12.1, qemu-aarch64 10.0.13.
 | AArch64 probe correctness | `qemu-aarch64 .../hyperion probe` | ✅ reports `arch: aarch64`, `assume W^X: yes`, cache line 32 |
 | Benchmark harness | `hyperion_bench --iterations 100000 --json` | ✅ valid JSON, guest metrics `available:false` |
 
+### Remote verification (GitHub Actions)
+
+Phase 0 was pushed as branch `phase-0-foundation` and validated by CI on the
+GitHub runner (run `39244780989`, commit `460629a`): **conclusion `success`**.
+
+| CI job | Result |
+| --- | --- |
+| `build & test (gcc)` | ✅ success |
+| `build & test (clang)` | ✅ success |
+| `AArch64 cross tests (qemu-user)` | ✅ success (incl. AArch64 probe report) |
+| `ASan/UBSan` | ✅ success |
+| `clang-format` | ✅ success |
+
+Pull request: <https://github.com/ransombiyato/hyperion-dbt/pull/1>
+
 Unit tests currently cover: version string well-formedness, build-summary
 content, host-probe architecture agreement with compile-time arch, plausible
 CPU/page-size reporting, W^X assumption per architecture, and report formatting.

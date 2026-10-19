@@ -139,6 +139,24 @@ The core correctness strategy:
 A test that only checks a subset of state is not a differential test. Record
 which state fields are compared.
 
+### Verifying AArch64 encodings against binutils
+
+The AArch64 encoder's tests use expected words taken from GNU `as`/`objdump`,
+not values written from memory. To add or re-check an encoding, assemble the
+instruction and read the word out of the disassembly:
+
+```sh
+printf '.text\nadd x3, x4, x5\n' > /tmp/ref.s
+aarch64-linux-gnu-as -o /tmp/ref.o /tmp/ref.s
+aarch64-linux-gnu-objdump -d /tmp/ref.o | tail -n +8
+#   0:   8b050083        add     x3, x4, x5
+```
+
+Paste the hex word into the test with a comment naming the instruction it came
+from. If the encoder and the test disagree, one of them is wrong — find out
+which before changing either. Never "fix" a test by copying the encoder's
+output; that makes the test tautological and worthless.
+
 ---
 
 ## 8. Fuzzing (Phase 2+)

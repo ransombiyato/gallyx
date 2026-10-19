@@ -1,0 +1,126 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Project HYPERION contributors
+//
+// Executable-memory tests. On an AArch64 host these actually run generated
+// code, which is the real proof that the encoder plus the W^X/I-cache path
+// works end to end. On a non-AArch64 host they verify the API contract and
+// SKIP the execution, rather than pretending a different-ISA test passed.
+#include <cstdint>
+#include <stdexcept>
+#include <vector>
+
+#include "harness/test_harness.hpp"
+#include "hyperion/aarch64_encoder.hpp"
+#include "hyperion/exec_mem.hpp"
+
+using hyperion::ExecMem;
+using hyperion::a64::Encoder;
+using hyperion::a64::Reg;
+using hyperion::a64::Width;
+
+HYPERION_TEST("exec_mem", "write_then_finalize_then_read_contract") {
+    ExecMem mem(64);
+    HYPERION_CHECK(mem.size() >= 64ULL);
+    const std::uint8_t data[4] = {0xAA, 0xBB, 0xCC, 0xDD};
+    mem.write(0, data, 4);
+    // Before finalize the region is writable and the bytes are visible.
+    HYPERION_CHECK_EQ(mem.writable()[0], 0xAAu);
+    mem.finalize();
+    // Writing after finalize must be refused, not silently corrupt code.
+    bool threw = false;
+    try {
+        mem.write(0, data, 4);
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    HYPERION_CHECK(threw);
+}
+
+HYPERION_TEST("exec_mem", "entry_requires_finalize") {
+    ExecMem mem(64);
+    bool threw = false;
+    try {
+        (void)mem.entry();
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    HYPERION_CHECK(threw);
+}
+
+HYPERION_TEST("exec_mem", "write_past_end_is_rejected") {
+    ExecMem mem(64);
+    const std::uint8_t data[8] = {};
+    bool threw = false;
+    try {
+        mem.write(mem.size() - 4, data, 8);
+    } catch (const std::out_of_range&) {
+        threw = true;
+    }
+    HYPERION_CHECK(threw);
+}
+
+HYPERION_TEST("exec_mem", "runs_generated_aarch64_code") {
+#if defined(__aarch64__)
+    // Generate: add x0, x0, x1 ; ret   -- i.e. f(a, b) = a + b, with the two
+    // arguments arriving in x0 and x1 per the AArch64 calling convention.
+    Encoder e;
+    e.add(Width::k64, 0, 0, 1);
+    e.ret();
+    const auto code = e.bytes();
+
+    ExecMem mem(code.size());
+    mem.write(0, code.data(), code.size());
+    mem.finalize();
+
+    using AddFn = std::uint64_t (*)(std::uint64_t, std::uint64_t);
+    // Reinterpret the RX region as a function pointer. This is the one place
+    // the project converts data to a function pointer, and it is deliberate.
+    auto fn = reinterpret_cast<AddFn>(mem.entry());
+    HYPERION_CHECK_EQ(fn(2, 3), 5ULL);
+    HYPERION_CHECK_EQ(fn(0xFFFFFFFFFFFFFFFFULL, 1ULL), 0ULL); // wraps, as ADD does
+#else
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+#endif
+}
+
+HYPERION_TEST("exec_mem", "runs_generated_loop") {
+#if defined(__aarch64__)
+    // Sum 1..n with a loop, exercising a backward branch in generated code:
+    //   mov x0, #0        ; acc = 0
+    //   mov x3, x0(orig)  ; n  (passed in x0 on entry -> move to x3 first)
+    // loop:
+    //   cbz x3, done
+    //   add x0, x0, x3
+    //   sub x3, x3, #1
+    //   b loop
+    // done:
+    //   ret
+    // cbz is not in the encoder yet, so use cmp + b.eq instead.
+    Encoder e;
+    const auto loop = e.new_label();
+    const auto done = e.new_label();
+    e.mov_reg(Width::k64, 3, 0); // x3 = n
+    e.movz(Width::k64, 0, 0);    // x0 = 0 (acc)
+    e.bind(loop);
+    e.cmp_imm(Width::k64, 3, 0); // compare n with 0
+    e.b_cond(hyperion::a64::Cond::kEq, done);
+    e.add(Width::k64, 0, 0, 3);     // acc += n
+    e.sub_imm(Width::k64, 3, 3, 1); // n -= 1
+    e.b(loop);
+    e.bind(done);
+    e.ret();
+    const auto code = e.bytes();
+
+    ExecMem mem(code.size());
+    mem.write(0, code.data(), code.size());
+    mem.finalize();
+
+    using SumFn = std::uint64_t (*)(std::uint64_t);
+    auto fn = reinterpret_cast<SumFn>(mem.entry());
+    HYPERION_CHECK_EQ(fn(10), 55ULL); // 1+2+...+10
+    HYPERION_CHECK_EQ(fn(0), 0ULL);
+    HYPERION_CHECK_EQ(fn(100), 5050ULL);
+#else
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+#endif
+}

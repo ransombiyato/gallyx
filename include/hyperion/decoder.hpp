@@ -96,7 +96,7 @@ enum class Opcode : std::uint8_t {
     kRet,  // RET
     kHlt,  // HLT
     kJmp,  // JMP rel32
-    kJcc,  // Jcc rel32 (condition in the low nibble of the opcode)
+    kJcc,  // Jcc rel8 (condition in the low nibble of the opcode)
     kPush, // PUSH r64
     kPop,  // POP  r64
 };

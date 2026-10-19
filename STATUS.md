@@ -1,9 +1,11 @@
 # STATUS
 
 **Last updated:** 2026-10-19
-**Current phase:** Phase 2 (Minimal instruction execution) — in progress
-**Repository state:** buildable, tested, documented. **No guest execution yet; a
-verified reference interpreter exists for a documented instruction subset.**
+**Current phase:** Phase 3 (first native code generation) ÔÇö in progress
+**Repository state:** buildable, tested, documented. **The reference interpreter
+executes a documented x86-64 subset; an AArch64 encoder and W^X executable-memory
+layer are in place and run generated AArch64 code end to end, but no x86-64
+instruction is translated to AArch64 yet.**
 
 This is the first file a returning agent should read. It records exactly what
 works, what was last verified, and what to do next.
@@ -14,31 +16,31 @@ works, what was last verified, and what to do next.
 
 | Work item | State |
 | --- | --- |
-| 1. Guest-state representation (GPRs, RFLAGS) | **Done** — `include/hyperion/guest_state.hpp` |
-| 2. x86-64 decoder for a documented subset | **Done** — `include/hyperion/decoder.hpp`, `src/core/decoder.cpp` |
-| 3. Reference interpreter (correctness oracle) | **Done** — `src/core/interpreter.cpp` |
-| 4. Unit tests: decoder, interpreter, guest state | **Done** — 42 new cases (see §2) |
-| 5. Differential test vs. real x86-64 hardware | **Done** — `tests/differential/`, 8 cases |
-| 6. Documented instruction subset in COMPATIBILITY.md | **Done** — §2 is the Phase 3 contract |
-| 7. Branch/loop execution over a program image | **Done** — `run_program()` + loop tests |
+| 1. Guest-state representation (GPRs, RFLAGS) | **Done** ÔÇö `include/hyperion/guest_state.hpp` |
+| 2. x86-64 decoder for a documented subset | **Done** ÔÇö `include/hyperion/decoder.hpp`, `src/core/decoder.cpp` |
+| 3. Reference interpreter (correctness oracle) | **Done** ÔÇö `src/core/interpreter.cpp` |
+| 4. Unit tests: decoder, interpreter, guest state | **Done** ÔÇö 42 new cases (see ┬º2) |
+| 5. Differential test vs. real x86-64 hardware | **Done** ÔÇö `tests/differential/`, 8 cases |
+| 6. Documented instruction subset in COMPATIBILITY.md | **Done** ÔÇö ┬º2 is the Phase 3 contract |
+| 7. Branch/loop execution over a program image | **Done** ÔÇö `run_program()` + loop tests |
 
 **Instruction subset (Phase 2).** MOV, ADD, SUB, AND, OR, XOR, CMP, INC, DEC,
 PUSH, POP, JMP (rel32), Jcc (rel8), NOP, HLT, and RET-as-stop, at 32- and
 64-bit operand sizes, with REX/ModRM/SIB addressing. **The authoritative
-specification is `COMPATIBILITY.md` §2**, which also lists the planned-but-
+specification is `COMPATIBILITY.md` ┬º2**, which also lists the planned-but-
 unbuilt instructions separately. Everything else is explicitly rejected with a
 specific `DecodeError`; the decoder never guesses.
 
 **`run_program()`.** A convenience layer over `step()` that runs a program
 image until HLT/RET, an error, or a step limit. It adds no new semantics, but
-it makes multi-instruction programs testable — `test_interpreter.cpp` runs a
+it makes multi-instruction programs testable ÔÇö `test_interpreter.cpp` runs a
 real `dec`/`jnz` loop (sum 1..10 = 55) and cross-checks it against native
 x86-64, and asserts that an infinite loop reports a step limit rather than
 hanging.
 
 **Two real bugs were found by the differential test and fixed** (this is the
 whole point of having one):
-1. 64-bit ADD carry was never set — `sum > mask` is impossible when the mask is
+1. 64-bit ADD carry was never set ÔÇö `sum > mask` is impossible when the mask is
    `~0`. Corrected to `(sum < ua) || (sum > mask)`.
 2. `Jcc` short jumps (`0x70..0x7F`) were decoded as rel32 instead of rel8,
    producing wild jump targets.
@@ -48,26 +50,51 @@ whole point of having one):
 on AArch64 while comparing nothing. A `HYPERION_SKIP` mechanism was added; on
 AArch64 the differential suite now honestly reports **0 passed, 8 skipped**.
 
+## 0b. Phase 3 progress (first native code generation)
+
+| Work item | State |
+| --- | --- |
+| 1. AArch64 encoder/emitter | **Done** — `a64::Encoder`, 12 reference-verified cases |
+| 2. Executable memory (W^X + I-cache clear) | **Done** — `ExecMem`, 3 cases |
+| 3. Run generated AArch64 code end to end | **Done** — `add` + summation loop pass under qemu |
+| 4. Guest-state marshalling for generated code | **Not started** |
+| 5. x86-64 → AArch64 instruction translation | **Not started** |
+
+**What "done" means here, precisely.** `a64::Encoder` turns a small set of
+AArch64 operations into 32-bit words, and every encoding is checked against the
+output of GNU `as`/`objdump` rather than written from memory. `ExecMem`
+allocates read-write, is filled, then becomes read-execute (W^X) with an
+instruction-cache clear — see `DECISIONS.md` D-015, D-016. `test_exec_mem.cpp`
+then generates `add x0,x0,x1; ret` and a `1..n` summation loop, executes them,
+and checks the results; those two cases pass on AArch64 under `qemu-user` and
+report **skip** on x86-64 rather than a false pass.
+
+**Why Phase 3 is still open.** The generated code above is hand-written AArch64,
+not a translation of x86-64. No x86-64 instruction is lowered to AArch64 yet,
+and `GuestState` is not yet mapped onto AArch64 registers/memory. So the
+mechanism is proven but this is not yet a translator.
+
+
 ---
 
 ## 0. Phase 1 progress
 
 | Work item | State |
 | --- | --- |
-| 1. Prior-art survey (FEX, Box64, QEMU TCG, decoders) | **Done** — `docs/prior-art.md` |
-| 2. Licence / trade-off comparison | **Done** — `docs/prior-art.md` §2, §3, `THIRD_PARTY.md` |
-| 3. Reuse-vs-build boundary recorded | **Done** — `DECISIONS.md` D-013 |
-| 4. Reproducible benchmark harness | **Done** — `benchmarks/`, `include/hyperion/bench_stats.hpp` |
-| 5. Baseline numbers recorded, unavailable marked unavailable | **Done** — `BENCHMARKS.md` §4 |
-| 6. Cross-build the AArch64 UML port (optional) | **Attempted, blocked** — see below |
-| — One-line installer + `hyperion` command | **Done** (extra, requested) — `install.sh` |
+| 1. Prior-art survey (FEX, Box64, QEMU TCG, decoders) | **Done** ÔÇö `docs/prior-art.md` |
+| 2. Licence / trade-off comparison | **Done** ÔÇö `docs/prior-art.md` ┬º2, ┬º3, `THIRD_PARTY.md` |
+| 3. Reuse-vs-build boundary recorded | **Done** ÔÇö `DECISIONS.md` D-013 |
+| 4. Reproducible benchmark harness | **Done** ÔÇö `benchmarks/`, `include/hyperion/bench_stats.hpp` |
+| 5. Baseline numbers recorded, unavailable marked unavailable | **Done** ÔÇö `BENCHMARKS.md` ┬º4 |
+| 6. Cross-build the AArch64 UML port (optional) | **Attempted, blocked** ÔÇö see below |
+| ÔÇö One-line installer + `hyperion` command | **Done** (extra, requested) ÔÇö `install.sh` |
 
 **Item 6 result.** The AArch64 UML port (`zalexdev/linux-um-arm64`, Linux
 7.2.0-rc4) configures with `ARCH=um SUBARCH=arm64` but fails to compile. The
 failure is **not** arch-specific: stock **x86-64** UML fails at the identical
 header line on this host, so it is a host glibc/kernel-header incompatibility.
 The port is therefore **plausible but unverified**, and no claim is made that it
-works. Full transcript in `docs/prior-art.md` §6.
+works. Full transcript in `docs/prior-art.md` ┬º6.
 
 **Exit criteria status.** `THIRD_PARTY.md` and the baseline comparison are
 committed; `benchmarks/` produces repeatable, attributable results; `BENCHMARKS.md`
@@ -139,24 +166,25 @@ aarch64-linux-gnu-g++ 14.2.0.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Native build (`-Werror`) | `cmake --build build/dev` | PASS — no warnings |
-| Native tests | `ctest --test-dir build/dev` | PASS — **6/6** entries (58 unit cases + 8 differential) |
-| Differential vs. hardware | `./build/dev/tests/hyperion_differential_tests` | PASS — 8/8 compared against real x86-64 |
-| Cross build | `cmake --build build/cross-test` | PASS — AArch64 binaries produced |
-| Cross tests under qemu | `ctest --test-dir build/cross-test` | PASS — **3/3** |
-| AArch64 differential | `qemu-aarch64 .../hyperion_differential_tests` | SKIP — 0 passed, **8 skipped** (no x86-64 oracle) |
-| AArch64 unit tests in qemu | `qemu-aarch64 .../hyperion_unit_tests` | PASS — 0 failed |
-| ASan/UBSan (clang) | `ctest --test-dir build/sanitize` | PASS — 6/6 |
-| Clang build + tests | `ctest --test-dir build/clang` | PASS — 6/6 |
-| Formatting | `clang-format --dry-run --Werror` | PASS — clean |
-| Shell scripts | `shellcheck install.sh scripts/*` | PASS — clean |
-| Installer (local) | `install.sh --src . --prefix DIR` | PASS — builds, tests, installs, uninstalls |
-| Installer (curl) | `curl .../install.sh \| bash` | PASS — end-to-end from GitHub |
-| UML feasibility (smoke) | `experiments/uml/run.sh smoke` | PASS — kernel boots unprivileged; all 6 namespace types OK |
-| UML feasibility (systemd) | `experiments/uml/run.sh systemd` | PASS — systemd 257 as PID 1 → `multi-user.target` |
+| Native build (`-Werror`) | `cmake --build build/dev` | PASS ÔÇö no warnings |
+| Native tests | `ctest --test-dir build/dev` | PASS ÔÇö **6/6** entries (75 unit cases + 8 differential) |
+| Differential vs. hardware | `./build/dev/tests/hyperion_differential_tests` | PASS ÔÇö 8/8 compared against real x86-64 |
+| Cross build | `cmake --build build/cross-test` | PASS ÔÇö AArch64 binaries produced |
+| Cross tests under qemu | `ctest --test-dir build/cross-test` | PASS ÔÇö **3/3** |
+| AArch64 differential | `qemu-aarch64 .../hyperion_differential_tests` | SKIP ÔÇö 0 passed, **8 skipped** (no x86-64 oracle) |
+| AArch64 unit tests in qemu | `qemu-aarch64 .../hyperion_unit_tests` | PASS ÔÇö 0 failed |
+| Generated-code execution (AArch64) | `exec_mem.runs_generated_*` under qemu | PASS - `add` and a summation loop run correctly |
+| ASan/UBSan (clang) | `ctest --test-dir build/sanitize` | PASS ÔÇö 6/6 |
+| Clang build + tests | `ctest --test-dir build/clang` | PASS ÔÇö 6/6 |
+| Formatting | `clang-format --dry-run --Werror` | PASS ÔÇö clean |
+| Shell scripts | `shellcheck install.sh scripts/*` | PASS ÔÇö clean |
+| Installer (local) | `install.sh --src . --prefix DIR` | PASS ÔÇö builds, tests, installs, uninstalls |
+| Installer (curl) | `curl .../install.sh \| bash` | PASS ÔÇö end-to-end from GitHub |
+| UML feasibility (smoke) | `experiments/uml/run.sh smoke` | PASS ÔÇö kernel boots unprivileged; all 6 namespace types OK |
+| UML feasibility (systemd) | `experiments/uml/run.sh systemd` | PASS ÔÇö systemd 257 as PID 1 ÔåÆ `multi-user.target` |
 
 The native suite is 6 CTest entries: `unit.native` (one entry running **58**
-unit test cases across 6 files), `differential.native_vs_interpreter` (**8**
+unit test cases across 8 files), `differential.native_vs_interpreter` (**8**
 cases compared against real x86-64 hardware), `bench.smoke`,
 `bench.methodology`, `bench.timing_not_eliminated` and
 `bench.rejects_single_sample`.
@@ -164,11 +192,11 @@ cases compared against real x86-64 hardware), `bench.smoke`,
 ### Remote verification (GitHub Actions)
 
 CI run `39268700143` on `main` (commit `6c70b87`, Phase 2): **conclusion
-`success`** — all five jobs passed: `clang-format` (7s), `AArch64 cross tests
+`success`** ÔÇö all five jobs passed: `clang-format` (7s), `AArch64 cross tests
 (qemu-user)` (41s), `ASan/UBSan` (30s), `build & test (clang)` (32s), `build &
 test (gcc)` (40s).
 
-CI run `39263916932` on `main` (commit `cadbc17`): **conclusion `success`** —
+CI run `39263916932` on `main` (commit `cadbc17`): **conclusion `success`** ÔÇö
 all five jobs passed: `clang-format` (8s), `build & test (gcc)` (22s),
 `ASan/UBSan` (33s), `AArch64 cross tests (qemu-user)` (31s), `build & test
 (clang)` (24s).
@@ -197,8 +225,8 @@ stable-vs-noisy discrimination case).
 - **Open questions:**
   - The AArch64 UML port has **not** been built or run. Its build is blocked by
     a host toolchain problem that also blocks stock x86-64 UML. Not measured on
-    the reference device either. See `docs/prior-art.md` §6 and
-    `docs/architecture-feasibility.md` §9.
+    the reference device either. See `docs/prior-art.md` ┬º6 and
+    `docs/architecture-feasibility.md` ┬º9.
   - Whether Android 10's seccomp/SELinux policy permits the `ptrace`/mmap
     behaviour the kernel-as-process tier needs is unmeasured (R2).
   - No measurement exists on the reference device (Snapdragon 855, Android 10).
@@ -210,12 +238,12 @@ stable-vs-noisy discrimination case).
 ## 4. Immediate next task
 
 **Phase 2 is complete and verified.** Guest state, the decoder, the reference
-interpreter, the documented subset contract (`COMPATIBILITY.md` §2), the
+interpreter, the documented subset contract (`COMPATIBILITY.md` ┬º2), the
 hardware differential and the program-image runner all exist and pass. The
-Phase 2 exit criterion — "the supported subset passes differential tests
-against an independent reference" — is met for the implemented subset.
+Phase 2 exit criterion ÔÇö "the supported subset passes differential tests
+against an independent reference" ÔÇö is met for the implemented subset.
 
-The next task is **Phase 3 — first native code generation**:
+The next task is **Phase 3 ÔÇö first native code generation**:
 
 1. Build an AArch64 instruction encoder/emitter for the Phase 2 subset. Start
    with a tiny set (`mov`, `add`, `sub`, `and`, `orr`, `eor`, `cmp`, `b.cond`)
@@ -225,7 +253,7 @@ The next task is **Phase 3 — first native code generation**:
    `GuestState` in memory.
 3. Generate code one instruction at a time first (a "trivial" translator), then
    validate every result against the interpreter oracle using the existing
-   differential harness. **The interpreter stays** — it is the oracle.
+   differential harness. **The interpreter stays** ÔÇö it is the oracle.
 4. Run the generated code on the real AArch64 path: the `cross.aarch64_tests`
    pipeline already executes AArch64 binaries under `qemu-user`, so generated
    code can be tested in CI without the target device.

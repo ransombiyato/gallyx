@@ -156,17 +156,32 @@ stepping semantics already exist.
 
 ---
 
-## Phase 3 — First native code generation ⬜
+## Phase 3 — First native code generation 🟡
 
 **Objective.** Execute the Phase 2 subset through generated AArch64 code.
 
-**Work items.** AArch64 encoder/emitter; executable memory management; cache
-maintenance; guest-state marshalling; error reporting. Keep the interpreter as
-oracle.
+**Work items.**
+1. AArch64 encoder/emitter — **Done.** `a64::Encoder`
+   (`include/hyperion/aarch64_encoder.hpp`), every encoding reference-verified
+   against GNU as/objdump (12 unit cases).
+2. Executable memory management — **Done.** `ExecMem`
+   (`include/hyperion/exec_mem.hpp`), W^X write-then-execute plus I-cache
+   clear.
+3. Executing generated code end to end — **Done for the encoder's subset.**
+   `test_exec_mem.cpp` generates and *runs* `add` and a summation loop; both
+   pass on AArch64 under `qemu-user` (and in CI's cross job), and skip
+   honestly on x86-64.
+4. Guest-state marshalling — **Not started.** The generated code above uses the
+   native AArch64 calling convention directly; mapping `GuestState` to
+   AArch64 registers/memory is the next step.
+5. Translating decoded x86 instructions to AArch64 — **Not started.** This is
+   the remaining bulk of Phase 3.
 
 **Exit criteria.** Verified test programs execute correctly through generated
 AArch64 code, validated under `qemu-user` on x86-64 hosts and natively on
-AArch64 hosts.
+AArch64 hosts. **Partially met:** the code-generation *mechanism* is proven
+end to end, but no x86-64 instruction has yet been translated, so the Phase 3
+exit criterion is not yet satisfied.
 
 ---
 

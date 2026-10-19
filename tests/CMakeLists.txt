@@ -16,6 +16,8 @@ add_executable(hyperion_unit_tests
     unit/test_bench_stats.cpp
     unit/test_guest_state.cpp
     unit/test_decoder.cpp
+    unit/test_aarch64_encoder.cpp
+    unit/test_exec_mem.cpp
     unit/test_interpreter.cpp)
 target_link_libraries(hyperion_unit_tests PRIVATE hyperion_test_harness)
 

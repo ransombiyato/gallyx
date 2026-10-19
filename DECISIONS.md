@@ -294,3 +294,63 @@ deliberately rather than inherited.
 
 **Supersedes:** nothing. This is the Phase 1 reuse-vs-build boundary required by
 `ROADMAP.md` and anticipated by D-002.
+
+---
+
+## D-014 — The decoder contract is the subset boundary; no implicit widening
+
+**Date:** Phase 2.
+**Status:** Accepted.
+
+**Context.** A translator is only as trustworthy as its definition of what it
+claims to handle. The temptation is to decode "most" of an opcode and treat the
+rest as close enough, which produces silently wrong execution.
+
+**Decision.** `COMPATIBILITY.md` §2 is the single normative statement of the
+supported subset. The decoder accepts exactly those encodings and rejects
+everything else with a specific `DecodeError`. Where an encoding is *related*
+to a supported one but not implemented (byte forms `0x88`/`0x8A`, rel32 `Jcc`,
+RIP-relative addressing), it is rejected, not approximated.
+
+**Consequences.** Some common encodings are refused for now, which is visible
+and testable. In exchange, "it decoded" means "we implement it", which is the
+property the differential tests depend on.
+
+---
+
+## D-015 — AArch64 code is emitted by a checked encoder, never hand-computed
+
+**Date:** Phase 3.
+**Status:** Accepted.
+
+**Context.** The first temptation in a code generator is to write raw 32-bit
+instruction words with comments. That is unverifiable, and a single wrong bit
+produces an exception or, worse, silent wrong answers.
+
+**Decision.** All AArch64 emission goes through `a64::Encoder`, which builds
+words from named fields and throws on an out-of-range register or immediate.
+Every encoding in the encoder has a unit test whose expected word is the output
+of GNU `as`/`objdump` for the same instruction, not a value written from memory.
+
+**Consequences.** Encodings are independently checked. Adding an instruction
+requires capturing a binutils reference, which is a deliberate friction.
+
+---
+
+## D-016 — Executable memory is W^X: write, then execute, never both
+
+**Date:** Phase 3.
+**Status:** Accepted.
+
+**Context.** Generated code must live in executable memory. The simple approach
+is one `mmap(PROT_READ|PROT_WRITE|PROT_EXEC)` region. That is exactly what W^X
+policy (and, on Android, SELinux) exists to prevent.
+
+**Decision.** `ExecMem` allocates read-write, is filled through a checked
+`write()`, and is then made read-execute by `finalize()`, which also clears the
+instruction cache. After `finalize()` the region is immutable through this API.
+
+**Consequences.** The project does not need to weaken W^X to run its own code.
+The cost is that code cannot be patched in place, which matters later for
+self-modifying-code support (Phase 7) and will need a deliberate re-decision
+then. See also D-010.

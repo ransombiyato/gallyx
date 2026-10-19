@@ -5,6 +5,37 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 3
+
+### Added — AArch64 encoder and executable memory
+- `include/hyperion/aarch64_encoder.hpp`, `src/core/aarch64_encoder.cpp`:
+  `a64::Encoder`, a checked AArch64 emitter for the operations the Phase 3
+  translator needs first — add/sub/and/orr/eor (register and immediate forms),
+  cmp/cmp-imm, mov/movz/movk/mov-imm64, b/b.cond/ret/nop, and label-based
+  branch fixups. It throws on an out-of-range register or immediate instead of
+  emitting a wrong word. **Every encoding is verified against GNU as/objdump**;
+  the expected words in `tests/unit/test_aarch64_encoder.cpp` are binutils
+  output, not values written from memory.
+- `include/hyperion/exec_mem.hpp`, `src/core/exec_mem.cpp`: `ExecMem`, a
+  page-aligned region that is written read-write, then made read-execute with an
+  instruction-cache clear (`W^X`, per `DECISIONS.md` D-016). Writing after
+  `finalize()` is refused rather than silently corrupting code.
+- `tests/unit/test_exec_mem.cpp`: on AArch64 (including under `qemu-user` in
+  CI) these generate and **execute** real code — `add x0,x0,x1; ret` and a
+  `1..n` summation loop — and check the results. On x86-64 they report **skip**,
+  not a false pass.
+
+### Fixed
+- `include/hyperion/decoder.hpp`: the `kJcc` comment said "rel32"; the decoder
+  implements rel8 short forms only. Comment corrected to match the code and
+  `COMPATIBILITY.md` §2.
+
+### Decisions
+- D-014 (decoder contract is the subset boundary), D-015 (checked encoder),
+  D-016 (W^X executable memory).
+
+---
+
 ## [Unreleased] — Phase 2
 
 ### Added — guest state, decoder, reference interpreter

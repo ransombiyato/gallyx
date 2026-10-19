@@ -207,15 +207,14 @@ vendored until that analysis is committed.
 
 | Directory | Component | Phase introduced |
 | --- | --- | --- |
-| `src/core/` | shared services (version, host probe, logging) | 0 |
+| `src/core/` | all core code today: version, host probe, guest state, decoder, interpreter, AArch64 encoder, executable memory | 0–3 |
 | `src/cli/` | user interface | 0 |
-| `src/decoder/` | x86-64 decoding | 2 |
-| `src/ir/` | intermediate representation | 2 |
-| `src/interp/` | reference interpreter | 2 |
-| `src/codegen/` | AArch64 code generation | 3 |
-| `src/runtime/` | code cache, dispatch, memory | 4 |
-| `src/syscall/` | Linux ABI layer | 6 |
 | `tests/`, `benchmarks/` | verification | 0 |
 
-Directories are created only when their phase begins, to keep the tree honest
-about what exists.
+**Reality note.** The component table in §2 names the logical components; the
+tree currently keeps all of them in `src/core/` (`decoder.cpp`,
+`interpreter.cpp`, `aarch64_encoder.cpp`, `exec_mem.cpp`). Splitting into
+`src/decoder/`, `src/codegen/` etc. was the original plan but was not done, and
+the project does not pretend otherwise. The split is deferred until the
+translator lands and the boundaries are exercised enough to place the cut well;
+until then a flat tree is easier to navigate than a premature one.

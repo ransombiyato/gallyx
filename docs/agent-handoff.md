@@ -33,9 +33,18 @@ subset** that explicitly rejects everything else, and a **reference
 interpreter** that is the correctness oracle for Phase 3. The interpreter is
 validated by a **hardware differential test**: the same operations are executed
 natively on the x86-64 host and compared against the interpreter's results
-(`tests/differential/`). **There is still no AArch64 code generator, no
-translation cache and no syscall layer**; guest code runs one instruction at a
-time, in the interpreter only.
+(`tests/differential/`).
+
+**Phase 3 has started and proved its riskiest mechanism.** An AArch64 encoder
+(`include/hyperion/aarch64_encoder.hpp`) emits a first set of operations with
+every encoding checked against GNU as/objdump, and an executable-memory layer
+(`include/hyperion/exec_mem.hpp`) writes code, makes it read-execute (W^X), and
+clears the instruction cache. Generated AArch64 code is now actually executed:
+`tests/unit/test_exec_mem.cpp` runs `add` and a summation loop under
+`qemu-user` in CI. **What is still missing is the translator itself** — no
+x86-64 instruction is lowered to AArch64 yet, there is no translation cache and
+no syscall layer, and `GuestState` is not yet mapped onto AArch64 registers or
+memory.
 
 **Scope was corrected on 2026-10-19.** Kernel/system-mode emulation is no longer
 an explicit non-goal (`DECISIONS.md` D-011). Kernel-level compatibility is in
@@ -112,16 +121,24 @@ state, the decoder, the reference interpreter, the subset contract
 (`COMPATIBILITY.md` §2), the hardware differential and the program-image runner
 all exist and pass.
 
-1. Build an AArch64 instruction encoder/emitter for the Phase 2 subset. Start
-   with `mov`, `add`, `sub`, `and`, `orr`, `eor`, `cmp`, `b.cond` and grow it.
-2. Add executable-code management (an `mmap`'d W^X region and
-   `__builtin___clear_cache`) and a convention for entering/leaving generated
-   code with the `GuestState` in memory.
-3. Translate one instruction at a time at first, then validate every result
-   against the interpreter oracle through the existing differential harness.
-4. Test the generated code on the real AArch64 path — the `cross.aarch64_tests`
-   pipeline already runs AArch64 binaries under `qemu-user`, so no target device
-   is needed for CI.
+1. ~~Build an AArch64 encoder~~ **Done** (`a64::Encoder`). ~~Add executable-code
+   management~~ **Done** (`ExecMem`). The encoder currently covers
+   add/sub/and/orr/eor (reg + imm), cmp/cmp-imm, mov/movz/movk/mov-imm64,
+   b/b.cond/ret/nop. Add instructions to it as the translator needs them, each
+   with a binutils-verified test.
+2. **Next: define the generated-code calling convention and marshall
+   `GuestState`.** Decide which AArch64 registers hold which guest registers
+   (a fixed mapping is fine for the first translator), where the guest `rip` and
+   flags live, and how a translated block is entered and left. Keep it simple and
+   documented; optimisation comes later.
+3. **Then: translate the Phase 2 subset one instruction at a time.** Lower a
+   decoded `hyperion::Instruction` to `a64::Encoder` calls, run it, and compare
+   the resulting `GuestState` against the interpreter oracle (extend
+   `tests/differential/` or add a translator-vs-interpreter differential). A
+   mismatch must fail loudly; there is no tolerance for "close enough".
+4. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
+   pipeline already builds the tests for AArch64 and runs them under `qemu-user`
+   in CI, so generated code is exercised without the target device.
 
 **The interpreter stays.** It is the oracle. Do not weaken it to make the code
 generator look correct.

@@ -73,6 +73,17 @@ against regression.
 
 ---
 
+## Rejected optimization candidates
+
+Recorded so a future agent does not repeat a dead end.
+
+| ID | Candidate | Verdict |
+| --- | --- | --- |
+| OPT-001 | Clear CF/OF/AF in `emit_flags_logical` by storing the AArch64 **zero register** (`strb wzr, …`) instead of `movz kT1, #0` + three `strb`s. | **Rejected — not encodable.** `strb w31, [x8, #7]` is an assembler error: the zero register is not a valid *source* for a store. Verified against `aarch64-linux-gnu-as`. No instruction saved. |
+| OPT-002 | Invert PF in `emit_parity` with a logical-immediate `eor w3, w3, #1` instead of `movz kT1, #1` + `eor`. | **Deferred — not worth the cost.** The encoding exists (`eor w3, w3, #1` = `0x52000063`) but Hyperion has no logical-immediate encoder, so it needs a `BitMasks` decoder (~40 lines) plus tests for a single-instruction saving on a cold path. Low value; revisit only if PF generation shows up hot in a profile. |
+
+---
+
 ## Open questions
 
 | ID | Question | Impact |

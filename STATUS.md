@@ -213,6 +213,12 @@ cases compared against real x86-64 hardware), `bench.smoke`,
 
 ### Remote verification (GitHub Actions)
 
+CI run `39281904991` on `main` (commit `f1feee1`, Phase 3 translator):
+**conclusion `success`** — all five jobs passed: `AArch64 cross tests (qemu-user)`
+(1m18s), `build & test (gcc)` (49s), `clang-format` (44s), `ASan/UBSan` (39s),
+`build & test (clang)` (24s). The AArch64 job is the one that executes the
+translated blocks and runs `translator.differential_*` under `qemu-user`.
+
 CI run `39272332010` on `main` (commit `d676695`, Phase 3 encoder + exec
 memory): **conclusion `success`** — all five jobs passed: `AArch64 cross tests
 (qemu-user)` (42s), `ASan/UBSan` (31s), `clang-format` (6s), `build & test

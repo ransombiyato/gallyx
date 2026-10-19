@@ -18,14 +18,15 @@ no KVM. Development often happens on x86-64 Linux hosts.
 
 ## 2. Current state in one paragraph
 
-**Phases 0, 1, 2 and 3 are complete.** The repository
-builds clean with `-Werror`, has a dependency-free unit-test suite wired into
-CTest, and has a **verified cross-architecture validation pipeline** that
-cross-compiles the test suite to AArch64 and runs it under `qemu-user`. A host
-capability probe measures architecture/page size/cache line/W^X rather than
-assuming them, and a benchmark harness reports repeated-run statistics with
-guest-execution metrics marked unavailable. The project installs with a single
-`curl | bash` command that builds, tests and installs a `hyperion` command.
+**Phases 0, 1, 2 and 3 are complete; Phase 4's core is implemented and
+verified.** The repository builds clean with `-Werror`, has a dependency-free
+unit-test suite wired into CTest, and has a **verified cross-architecture
+validation pipeline** that cross-compiles the test suite to AArch64 and runs it
+under `qemu-user`. A host capability probe measures architecture/page size/cache
+line/W^X rather than assuming them, and a benchmark harness reports repeated-run
+statistics with guest-execution metrics marked unavailable. The project installs
+with a single `curl | bash` command that builds, tests and installs a `hyperion`
+command.
 
 **Phase 2 added the first executable core.** There is a guest-state model
 (`include/hyperion/guest_state.hpp`), an **x86-64 decoder for a documented
@@ -44,15 +45,33 @@ layer (`include/hyperion/exec_mem.hpp`) writes code, makes it read-execute
 self-contained `BlockResult block(GuestState*)` AArch64 block. It handles `mov`,
 `add`, `sub`, `and`, `or`, `xor`, `cmp`, `inc`, `dec`, `nop`, `hlt` with
 register/immediate operands, and computes all six x86 flags in generated code
-(`DECISIONS.md` D-017). `tests/unit/test_translator.cpp` executes the generated
-blocks under `qemu-user` and compares every register and flag against the
-interpreter (a fixed set plus an 847-case operand sweep).
+(`DECISIONS.md` D-017).
 
-**What is still missing is program-level translation.** No basic block or
-translation cache exists, so a whole guest program cannot run: control flow
-(`jmp`/`jcc`/`ret`), the stack (`push`/`pop`) and memory operands are *refused
-explicitly* rather than miscompiled. That work is Phase 4, and `STATUS.md` §4
-lists the concrete steps.
+**Phase 4 turns that into a basic dynamic binary translator.** `translate_block`
+lowers a whole basic block — it decodes from a guest PC to a terminator and
+lowers `jmp` (rel32 and rel8) and `jcc` (rel8), writing the authoritative next
+`rip`. `TranslationCache` (`include/hyperion/translation_cache.hpp`) is the
+dispatcher: it translates each guest PC once, caches the block, and runs blocks
+until the program halts, an unsupported instruction is reached, or a
+guest-instruction step limit is hit. It **never executes an instruction the
+translator refused**. Whole-program differentials (a counted loop; taken and
+not-taken branches) run under `qemu-user` and match the interpreter on final
+state and step count. `hyperion run <file> --tier=0|1` runs a raw x86-64 blob
+through either tier and the two must agree (`tests/cli/cli_smoke.sh`).
+
+**What is still missing.** No block chaining, no register allocation (guest
+registers stay in memory), no cache invalidation (self-modifying code would run
+stale translations — a documented boundary), and no syscall layer. The guest
+stack (`push`/`pop`/`ret`) and memory operands are still *refused explicitly*
+rather than miscompiled, because they need a guest address space (Phase 6). The
+interpreter remains the only *complete* execution path. Phase 5 (performance
+measurement and optimization) is next; `STATUS.md` §4 lists the steps.
+
+**Two real defects were found and fixed in Phase 4**, both by testing: a block
+whose *first* instruction was unsupported was emitted empty and made the
+dispatcher loop forever (now reported as an error), and the code-fetch window
+shrank only to 15 bytes so a 13-byte program could not be translated (now
+shrinks to one byte).
 
 **Scope was corrected on 2026-10-19.** Kernel/system-mode emulation is no longer
 an explicit non-goal (`DECISIONS.md` D-011). Kernel-level compatibility is in
@@ -124,43 +143,49 @@ Expected test names: `unit.native`, `bench.smoke`, `bench.methodology`,
 
 ## 5. Your next task
 
-**Phase 3 is complete at its stated scope. Start Phase 4 — basic dynamic binary
-translation.** Guest state, the decoder, the reference interpreter, the subset
-contract (`COMPATIBILITY.md` §2), the hardware differential, the AArch64 encoder,
-executable memory and single-instruction translation all exist and pass.
+**Phase 4's core is implemented and verified. Close it out, then start Phase 5
+— performance measurement and optimization.** Guest state, the decoder, the
+reference interpreter, the subset contract (`COMPATIBILITY.md` §2), the hardware
+differential, the AArch64 encoder, executable memory, single-instruction
+translation, whole-block translation and the translation-cache dispatcher all
+exist and pass.
 
 1. ~~Build an AArch64 encoder~~ **Done** (`a64::Encoder`). ~~Add executable-code
    management~~ **Done** (`ExecMem`). ~~Marshall `GuestState` and translate one
-   instruction~~ **Done** (`translate_instruction`). Add encoder instructions to
-   it as the translator needs them, each with a binutils-verified test.
-2. **Next: translate a basic block, not a single instruction.** Starting at a
-   guest PC, decode until a terminator or an unsupported instruction, emit one
-   AArch64 block for the whole sequence, and make the block report its exit
-   reason (fall-through vs. branch vs. halt) so a dispatcher can pick the next
-   block. Get the guest `rip` right at the exit — this is the part that is easy
-   to get subtly wrong and is exactly what the differential test exists to catch.
-3. **Then: a translation cache and dispatcher** keyed by guest PC, holding
-   translated blocks, with an explicit "unsupported" result that stops the run
-   rather than executing something wrong. Trivial invalidation (never) is fine
-   for the first version, but document the boundary.
-4. **Compare against the oracle.** Run each multi-instruction program through
-   both the generated blocks and the interpreter's `run_program`, and require the
-   final `GuestState` to match bit-for-bit. A mismatch must fail loudly; there is
-   no tolerance for "close enough".
+   instruction~~ **Done** (`translate_instruction`). ~~Translate a basic block~~ **Done**
+   (`translate_block`). ~~Add a translation cache and dispatcher~~ **Done**
+   (`TranslationCache`). Add encoder instructions as the translator needs them,
+   each with a binutils-verified test.
+2. **Next: close Phase 4 out.** Commit and push this milestone, watch CI go
+   green, record the run in `STATUS.md` §2, and update `ROADMAP.md`/`CHANGELOG.md`.
+   The exit criterion ("a repeatable suite of small guest programs runs correctly
+   under the translator") is met; a few more guest programs (a nested loop, a
+   branch inside a loop, a block longer than the fetch window) would strengthen
+   it if budget allows.
+3. **Then: Phase 5 begins with measurement, not optimization.** Build a
+   Tier-1-vs-Tier-0 timing harness on the existing benchmark infrastructure so
+   every later change (register allocation, chaining, dispatch) is judged
+   against a fixed, reproducible baseline. Do not optimize before that baseline
+   exists.
+4. **Keep the oracle.** Run each multi-instruction program through both the
+   generated blocks and the interpreter's `run_program`, and require the final
+   `GuestState` to match bit-for-bit. A mismatch must fail loudly; there is no
+   tolerance for "close enough".
 5. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
-   pipeline already builds the tests for AArch64 and runs them under `qemu-user`
-   in CI, so generated code is exercised without the target device.
+   pipeline builds the tests for AArch64, runs them under `qemu-user`, and runs
+   the CLI smoke test with `HYPERION_EMULATOR`, so generated code is exercised in
+   CI without the target device.
 
 **The interpreter stays.** It is the oracle. Do not weaken it to make the code
 generator look correct.
 
-Full Phase 4 acceptance criteria are in `ROADMAP.md`; the concrete first steps
+Full Phase 5 acceptance criteria are in `ROADMAP.md`; the concrete first steps
 are in `STATUS.md` §4.
 
 **Do not** write kernel-level code — the tier is unvalidated on the reference
 device.
 
-Optional Phase 1 leftovers, neither blocking Phase 4: unblocking the AArch64 UML
+Optional Phase 1 leftovers, neither blocking Phase 5: unblocking the AArch64 UML
 build (a host glibc/kernel-header problem, see `docs/prior-art.md` §6), and a
 first CI performance-trend baseline.
 

@@ -19,10 +19,20 @@ add_executable(hyperion_unit_tests
     unit/test_aarch64_encoder.cpp
     unit/test_exec_mem.cpp
     unit/test_translator.cpp
+    unit/test_translation_cache.cpp
     unit/test_interpreter.cpp)
 target_link_libraries(hyperion_unit_tests PRIVATE hyperion_test_harness)
 
 add_test(NAME unit.native COMMAND hyperion_unit_tests)
+
+# --- CLI smoke test ---------------------------------------------------------
+#
+# Drives the real `hyperion run` binary through both execution tiers. On an
+# AArch64 host tier 1 executes generated code; on an x86-64 host it falls back
+# to the interpreter. Either way both tiers must agree.
+add_test(NAME cli.smoke
+    COMMAND ${CMAKE_COMMAND} -E env bash
+            "${CMAKE_CURRENT_SOURCE_DIR}/cli/cli_smoke.sh" $<TARGET_FILE:hyperion>)
 
 # --- Differential tests (interpreter vs. real x86-64 hardware) ---------------
 #

@@ -46,6 +46,8 @@ Presets are also provided: `cmake --preset debug`, `release`, `sanitize`,
 | --- | --- |
 | `tests/harness/` | dependency-free harness (`HYPERION_TEST`, `HYPERION_CHECK`) |
 | `tests/unit/` | unit tests, one file per component |
+| `tests/differential/` | interpreter vs. real x86-64 hardware |
+| `tests/cli/` | end-to-end CLI smoke test (`cli_smoke.sh`) |
 | `tests/run_cross_tests.cmake` | cross-arch configure/build/run driver |
 | `benchmarks/` | harness smoke test (`bench.smoke`) |
 
@@ -54,8 +56,17 @@ Registered CTest tests:
 | Test | What it proves |
 | --- | --- |
 | `unit.native` | core components behave correctly on the host |
+| `differential.native_vs_interpreter` | the interpreter agrees with real x86-64 |
+| `cli.smoke` | `hyperion run` executes through both tiers and they agree |
 | `bench.smoke` | the benchmark harness runs and emits valid output |
 | `cross.aarch64_tests` | the suite passes when compiled for AArch64 and run under `qemu-user` |
+
+`tests/cli/cli_smoke.sh` writes a small x86-64 blob, runs it through tier 0 and
+tier 1, and requires the same status and step count. On a host that cannot
+execute generated code, tier 1 falls back to the interpreter (and says so); the
+cross pipeline runs the same script with `HYPERION_EMULATOR` set to `qemu-aarch64`
+and additionally requires tier 1 to have translated a non-zero number of blocks,
+so a vacuous "ok" cannot pass.
 
 ### Writing a test
 
@@ -92,12 +103,22 @@ the pipeline without qemu.
 
 **Translator differential.** `tests/unit/test_translator.cpp` uses this pipeline
 directly. Its scope tests (which instructions are accepted and which are refused)
-run on any host; its differential tests execute the *generated AArch64* for one
-instruction and compare every register and all six flags against the reference
-interpreter. Those differential cases compile only under `__aarch64__` and
-report `SKIP` on x86-64 rather than a false pass. The suite also sweeps 847
-operand pairs through the flag-setting operations to cover carry/overflow/parity
-boundaries.
+run on any host; its differential tests execute the *generated AArch64* and
+compare against the reference interpreter. Those differential cases compile only
+under `__aarch64__` and report `SKIP` on x86-64 rather than a false pass. There
+are two levels:
+
+- **Single-instruction** — one instruction, every register and all six flags
+  compared; plus an 847-case operand sweep over carry/overflow/parity boundaries.
+- **Whole-program** — a counted loop and taken/not-taken branches run through
+  `TranslationCache` and compared against `run_program` on final `GuestState`
+  and step count. `translator.dispatcher_*` additionally proves an unsupported
+  instruction stops the run (leaving `rip` on it) and an infinite loop is
+  reported as a step limit rather than hanging.
+
+`tests/unit/test_translation_cache.cpp` covers the cache directly: it must
+refuse to run when the host cannot execute generated code, and on AArch64 it
+must cache blocks (not re-translate each visit) and agree with the interpreter.
 
 ---
 

@@ -5,6 +5,60 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 4
+
+### Added — basic dynamic binary translator
+- `include/hyperion/translation_cache.hpp`, `src/core/translation_cache.cpp`:
+  `TranslationCache`, the Tier 1 dispatcher. It looks up the block for
+  `state.rip`, translates it on first sight, executes it, and repeats until the
+  program halts, an unsupported instruction is reached, or a guest-instruction
+  step limit is hit. It **never executes an instruction the translator refused**:
+  an unsupported instruction stops the run with `RunStatus::kUnsupported` and
+  leaves `rip` on the offending instruction.
+- `translate_block` (`src/core/translator.cpp`) lowers a whole basic block:
+  it decodes from a guest PC until a terminator (`jmp`/`jcc`/`hlt`), the end of
+  the buffer, or an untranslatable instruction. It returns the generated code,
+  a `BlockExit` (fall-through / jmp / jcc / halted), a target/fall-through hint,
+  and the number of guest instructions covered. The authoritative next PC is
+  always the `rip` field the generated block writes.
+- `include/hyperion/run.hpp`: `RunStatus`/`RunResult` extracted from
+  `interpreter.hpp` so both execution tiers report through the same types and
+  can be compared directly.
+
+### Added — `hyperion run`
+- `src/cli/main.cpp`: `hyperion run <file> [--tier=0|1] [--max-steps=N] [--dump]`
+  executes a raw x86-64 code blob through the reference interpreter (tier 0) or
+  the AArch64 translator (tier 1). On a host that cannot execute generated
+  AArch64 code, tier 1 falls back to the interpreter and says so on stderr.
+
+### Added — decoder
+- `0xEB` (`jmp rel8`): short unconditional jump, the companion to the
+  `0x70..0x7F` short `jcc`. Decoder test `decoder.jmp_short_rel8`.
+
+### Added — tests
+- `tests/unit/test_translator.cpp`: block-formation scope tests (terminator,
+  unsupported cut, buffer-end cut), whole-program differentials against
+  `run_program` (counted loop; taken/not-taken branches across flag states), and
+  dispatcher tests (stops at unsupported; infinite loop → step limit).
+- `tests/unit/test_translation_cache.cpp`: the cache refuses to run when the
+  host cannot execute generated code; caches blocks and agrees with the
+  interpreter on AArch64.
+- `tests/cli/cli_smoke.sh` + CTest entry `cli.smoke`: runs the real CLI through
+  both tiers and requires them to agree. The cross pipeline runs it under
+  `qemu-user` with `HYPERION_EMULATOR`, requiring tier 1 to have translated a
+  non-zero number of blocks.
+
+### Fixed
+- **Infinite loop on an unsupported first instruction.** A block whose first
+  instruction was unsupported was emitted as a zero-instruction fall-through
+  block, so the dispatcher re-entered the same PC forever. `translate_block` now
+  reports the error when the block would be empty.
+- **Short program images failed to translate.** The dispatcher's code-fetch
+  window shrank only to 15 bytes, so a 13-byte blob could not be read. The window
+  now shrinks to a single byte.
+
+---
+
 ## [Unreleased] — Phase 3
 
 ### Added — x86-64 to AArch64 translator (increment 1)

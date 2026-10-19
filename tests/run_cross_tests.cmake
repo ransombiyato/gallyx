@@ -87,4 +87,26 @@ if(NOT diff_output MATCHES "0 passed")
         "it must SKIP every case. Output:\n${diff_output}")
 endif()
 
+# Also run the CLI smoke test against the cross-built binary, under qemu. This
+# is the end-to-end check that tier 1 generates AArch64 code and executes it:
+# the script requires tier 1 to have translated a non-zero number of blocks and
+# to agree with the interpreter on the step count.
+set(cli_script "${HYPERION_SOURCE_DIR}/tests/cli/cli_smoke.sh")
+set(cli_binary "${HYPERION_CROSS_BINARY_DIR}/hyperion")
+if(NOT EXISTS "${cli_binary}")
+    message(FATAL_ERROR "cross tests: CLI binary not found at ${cli_binary}")
+endif()
+
+execute_process(
+    COMMAND ${CMAKE_COMMAND} -E env
+        "HYPERION_EMULATOR=${HYPERION_QEMU}"
+        bash "${cli_script}" "${cli_binary}"
+    RESULT_VARIABLE cli_result
+    OUTPUT_VARIABLE cli_output
+    ERROR_VARIABLE cli_error)
+message(STATUS "AArch64 CLI smoke output:\n${cli_output}${cli_error}")
+if(NOT cli_result EQUAL 0)
+    message(FATAL_ERROR "AArch64 CLI smoke failed (exit ${cli_result})")
+endif()
+
 message(STATUS "cross-architecture validation pipeline OK")

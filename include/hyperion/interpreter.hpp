@@ -19,6 +19,7 @@
 
 #include "hyperion/decoder.hpp"
 #include "hyperion/guest_state.hpp"
+#include "hyperion/run.hpp"
 
 namespace hyperion {
 
@@ -108,22 +109,9 @@ void set_szp(std::uint64_t result, int width, Flags& flags);
 
 } // namespace alu
 
-// Result of running a program image to completion.
-enum class RunStatus {
-    kOk,          // program halted (HLT/RET) normally
-    kStepLimit,   // max_steps reached without halting
-    kFault,       // memory fault during execution
-    kUnsupported, // hit an instruction outside the supported subset
-};
-
-struct RunResult {
-    RunStatus status = RunStatus::kOk;
-    std::uint64_t steps = 0; // instructions retired
-    std::string message;     // human-readable reason on non-kOk
-    // The final architectural state, valid when status == kOk or kStepLimit.
-    GuestState state;
-};
-
+// Result of running a program image to completion. (Defined in run.hpp and
+// shared with the Tier 1 translator.)
+//
 // Run `code` placed at `base` until the program halts (HLT/RET), an error
 // occurs, or `max_steps` is exceeded. This is a convenience layer over step();
 // it adds no new semantics, but it makes multi-instruction programs (with

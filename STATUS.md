@@ -1,18 +1,72 @@
 # STATUS
 
 **Last updated:** 2026-10-19
-**Current phase:** Phase 3 (first native code generation) — in progress
-**Repository state:** buildable, tested, documented. **The reference interpreter
-executes a documented x86-64 subset; an AArch64 encoder and W^X executable-memory
-layer are in place and run generated AArch64 code end to end, but no x86-64
-instruction is translated to AArch64 yet.**
+**Current phase:** Phase 4 (basic dynamic binary translator) — in progress
+**Repository state:** buildable, tested, documented. **Two execution tiers now
+exist: the reference interpreter (Tier 0) and a translation cache that runs
+whole programs through generated AArch64 code (Tier 1). Multi-instruction
+programs with `jmp`/`jcc` control flow run correctly through Tier 1 and are
+checked bit-for-bit against the interpreter. The guest subset remains small;
+see COMPATIBILITY.md.**
 
 This is the first file a returning agent should read. It records exactly what
 works, what was last verified, and what to do next.
 
 ---
 
-## 0a. Phase 2 progress (minimal instruction execution)
+## 0c. Phase 4 progress (basic dynamic binary translator)
+
+| Work item | State |
+| --- | --- |
+| 1. Basic-block formation (decode to a terminator) | **Done** — `translate_block` |
+| 2. Block exit reporting (`BlockExit`, `BlockResult`) | **Done** — `include/hyperion/translator.hpp` |
+| 3. Control-flow lowering (`jmp` rel32/rel8, `jcc` rel8) | **Done** — writes authoritative `rip` |
+| 4. Translation cache + dispatcher | **Done** — `include/hyperion/translation_cache.hpp`, `src/core/translation_cache.cpp` |
+| 5. `hyperion run --tier=0|1` CLI | **Done** — `src/cli/main.cpp` |
+| 6. Whole-program differential tests | **Done** — loops and branches vs `run_program` |
+| 7. Block chaining / hot-path optimization | **Not started** — Phase 5 |
+| 8. Cache invalidation (self-modifying code) | **Not started** — the cache never invalidates; documented boundary |
+| 9. Guest stack (`push`/`pop`/`ret`) | **Refused** — needs a guest address space (Phase 6) |
+
+**What "done" means here, precisely.** `translate_block` decodes from a guest
+PC until it reaches a terminator (`jmp`/`jcc`/`hlt`), the end of the supplied
+buffer, or an instruction it cannot translate. It returns the generated code,
+the exit kind, a fall-through/target hint, and the number of guest instructions
+the block covers. The authoritative next PC is always the `rip` field that the
+generated block writes into `GuestState`; the cache is only a lookup
+accelerator.
+
+`TranslationCache::run` is the dispatcher: it looks up the block for
+`state.rip`, translates it on first sight, executes it, and repeats until the
+program halts, an unsupported instruction is reached, or a guest-instruction
+step limit is hit. It never executes an instruction the translator refused.
+
+**Two real bugs were found by testing this increment and fixed:**
+
+1. **Infinite loop on an unsupported first instruction.** A block whose *first*
+   instruction is unsupported was emitted as a zero-instruction fall-through
+   block, so the dispatcher re-entered the same PC forever. `translate_block`
+   now reports `kUnsupportedOpcode` when the block would be empty. (This is the
+   "never silently execute incorrect code" rule, and the reason the block cutter
+   distinguishes "cut before an unsupported instruction" from "the first
+   instruction is unsupported".)
+2. **Short program images failed to translate.** The dispatcher's code-fetch
+   window shrank only down to 15 bytes, so a 13-byte blob (the CLI smoke
+   program) could not be read at all. The window now shrinks to a single byte.
+
+**Decoder addition.** `0xEB` (`jmp rel8`) was added — a very common real-world
+encoding and the natural companion to the `0x70..0x7F` short `jcc`. It has a
+decoder test (`decoder.jmp_short_rel8`).
+
+**Why the guest subset is still small.** Phase 4's exit criterion is that a
+repeatable suite of small guest programs runs correctly under the translator,
+not that the instruction set is large. The subset is unchanged from Phase 3
+plus control flow; `push`/`pop`/`ret` and memory operands stay refused because
+they need a guest address space (Phase 6).
+
+---
+
+## 0b. Phase 3 progress (first native code generation)
 
 | Work item | State |
 | --- | --- |
@@ -138,11 +192,18 @@ Phase 3 added the first code generation: a **checked AArch64 encoder**
 (binutils-verified), **W^X executable memory**, and a **translator** that lowers
 a subset of decoded x86-64 instructions to generated AArch64. Generated blocks
 run under `qemu-user` in CI and are checked bit-for-bit against the interpreter,
-including all six x86 flags. The translator currently handles single instructions
-with register/immediate operands; there is still **no translation cache, no
-block chaining, no multi-instruction program translation and no syscall layer**.
-Control flow, the stack and memory operands are refused explicitly rather than
-miscompiled, and the interpreter remains the only complete execution path.
+including all six x86 flags.
+
+Phase 4 turns that into a **basic dynamic binary translator**: `translate_block`
+lowers a whole basic block (decode to a terminator, lower `jmp`/`jcc`, write the
+authoritative next `rip`), and a **translation cache / dispatcher** runs complete
+guest programs block by block, keyed by guest PC. The `hyperion run --tier=0|1`
+command runs a raw x86-64 blob through either tier, and the two tiers are
+required to agree. Whole-program differentials (a counted loop, taken and
+not-taken conditional branches) pass under `qemu-user`. There is still **no
+block chaining, no register allocation, no cache invalidation and no syscall
+layer**. The guest stack and memory operands are refused explicitly rather than
+miscompiled, and the interpreter remains the only *complete* execution path.
 
 The project also installs with a single command:
 
@@ -150,9 +211,11 @@ The project also installs with a single command:
 curl -fsSL https://raw.githubusercontent.com/ransombiyato/hyperion-dbt/main/install.sh | bash
 ```
 
-which builds, tests and installs a `hyperion` command. `hyperion run` exists but
-deliberately refuses to do anything: there is no translator yet, and a command
-that silently did nothing would be worse than an honest refusal.
+which builds, tests and installs a `hyperion` command. `hyperion run <file>`
+executes a raw x86-64 code blob through the reference interpreter (`--tier=0`)
+or the AArch64 translator (`--tier=1`). On a host that cannot execute generated
+AArch64 code (an x86-64 development host), tier 1 refuses and says so rather
+than pretending.
 
 Two things changed in an earlier session, and both matter more than the code:
 
@@ -188,16 +251,19 @@ aarch64-linux-gnu-g++ 14.2.0.
 | Check | Command | Result |
 | --- | --- | --- |
 | Native build (`-Werror`) | `cmake --build build/dev` | PASS — no warnings |
-| Native tests | `ctest --test-dir build/dev` | PASS — **6/6** entries (86 unit cases + 8 differential) |
+| Native tests | `ctest --test-dir build/dev` | PASS — **7/7** entries (96 unit cases + 8 differential) |
 | Differential vs. hardware | `./build/dev/tests/hyperion_differential_tests` | PASS — 8/8 compared against real x86-64 |
-| Cross build | `cmake --build build/cross-test` | PASS — AArch64 binaries produced |
-| Cross tests under qemu | `ctest --test-dir build/cross-test` | PASS — **3/3** |
+| CLI smoke (both tiers) | `ctest --test-dir build/dev -R cli.smoke` | PASS — tiers agree, `steps=17` |
+| Cross build | `cmake --build build/cross-aarch64` | PASS — AArch64 binaries produced |
+| Cross tests under qemu | `qemu-aarch64 .../hyperion_unit_tests` | PASS — **94 passed, 0 failed, 2 skipped** |
 | AArch64 differential | `qemu-aarch64 .../hyperion_differential_tests` | SKIP — 0 passed, **8 skipped** (no x86-64 oracle) |
-| AArch64 unit tests in qemu | `qemu-aarch64 .../hyperion_unit_tests` | PASS — 85 passed, 0 failed |
-| Generated-code execution (AArch64) | `exec_mem.runs_generated_*` under qemu | PASS - `add` and a summation loop run correctly |
-| Translator vs. interpreter (AArch64) | `translator.differential_*` under qemu | PASS — 847 operand cases, all registers + all 6 flags match |
-| ASan/UBSan (clang) | `ctest --test-dir build/sanitize` | PASS — 6/6 |
-| Clang build + tests | `ctest --test-dir build/clang` | PASS — 6/6 |
+| Translator blocks vs. interpreter (AArch64) | `translator.block_*` under qemu | PASS — block cuts at terminators/unsupported/buffer end |
+| Whole-program differentials (AArch64) | `translator.differential_program_*` under qemu | PASS — counted loop + branch directions match `run_program` |
+| Dispatcher limits (AArch64) | `translator.dispatcher_*` under qemu | PASS — stops at unsupported; reports step limit, does not hang |
+| Translation cache (AArch64) | `translation_cache.caches_*` under qemu | PASS — caches blocks, agrees with interpreter |
+| CLI tier 1 executes generated code | `HYPERION_EMULATOR=qemu-aarch64 ... cli_smoke.sh` | PASS — **3 basic blocks translated**, `steps=17` |
+| ASan/UBSan (clang) | `ctest --test-dir build/san` | PASS — 7/7 |
+| Clang build + tests | `ctest --test-dir build/clang` | PASS — 7/7 |
 | Formatting | `clang-format --dry-run --Werror` | PASS — clean |
 | Shell scripts | `shellcheck install.sh scripts/*` | PASS — clean |
 | Installer (local) | `install.sh --src . --prefix DIR` | PASS — builds, tests, installs, uninstalls |
@@ -205,9 +271,9 @@ aarch64-linux-gnu-g++ 14.2.0.
 | UML feasibility (smoke) | `experiments/uml/run.sh smoke` | PASS — kernel boots unprivileged; all 6 namespace types OK |
 | UML feasibility (systemd) | `experiments/uml/run.sh systemd` | PASS — systemd 257 as PID 1 → `multi-user.target` |
 
-The native suite is 6 CTest entries: `unit.native` (one entry running **86**
-unit test cases across 9 files), `differential.native_vs_interpreter` (**8**
-cases compared against real x86-64 hardware), `bench.smoke`,
+The native suite is 7 CTest entries: `unit.native` (one entry running **96**
+unit test cases across 10 files), `differential.native_vs_interpreter` (**8**
+cases compared against real x86-64 hardware), `cli.smoke`, `bench.smoke`,
 `bench.methodology`, `bench.timing_not_eliminated` and
 `bench.rejects_single_sample`.
 
@@ -258,7 +324,15 @@ stable-vs-noisy discrimination case).
 
 - **Failing tests:** none.
 - **Known defects:** BENCH-001 (a fabricated benchmark result) was found and
-  fixed this session; see `docs/known-issues.md`.
+  fixed in an earlier session; see `docs/known-issues.md`.
+- **Known limitations of the Phase 4 dispatcher:**
+  - The translation cache **never invalidates**. Self-modifying guest code will
+    run stale translations. This is a deliberate, documented boundary for the
+    first version; invalidation is Phase 7 work.
+  - Blocks are **not chained**: every block exit returns to the dispatcher, which
+    does a hash lookup. This is correct but slow; chaining is Phase 5.
+  - Guest code is fetched through a 4 KiB window and the block is cut at the
+    window edge. Longer blocks are correct (they just split), not miscompiled.
 - **Open questions:**
   - The AArch64 UML port has **not** been built or run. Its build is blocked by
     a host toolchain problem that also blocks stock x86-64 UML. Not measured on
@@ -267,52 +341,45 @@ stable-vs-noisy discrimination case).
   - Whether Android 10's seccomp/SELinux policy permits the `ptrace`/mmap
     behaviour the kernel-as-process tier needs is unmeasured (R2).
   - No measurement exists on the reference device (Snapdragon 855, Android 10).
-    Everything recorded so far is from the x86-64 development host.
+    Everything recorded so far is from the x86-64 development host, except the
+    AArch64 code paths, which run under `qemu-user`, not on real ARM hardware.
+  - No **performance** measurement of Tier 1 vs Tier 0 exists yet. Tier 1 is
+    expected to be slower than the interpreter at this stage (no register
+    allocation, no chaining); that is a Phase 5 question, not a Phase 4 failure.
 - See `docs/known-issues.md` for limitations.
 
 ---
 
 ## 4. Immediate next task
 
-**Phase 3 is complete at its stated scope. The next task is Phase 4: turn
-single-instruction translation into a basic dynamic binary translator.**
+**Phase 4's core is implemented and verified. The next task is to close Phase 4
+out and record it, then begin Phase 5 (performance measurement and
+optimization).**
 
-What exists now: `a64::Encoder`, `ExecMem`, and `translate_instruction`, which
-lowers `mov`/`add`/`sub`/`and`/`or`/`xor`/`cmp`/`inc`/`dec`/`nop`/`hlt` with
-register/immediate operands to a `BlockResult block(GuestState*)` AArch64 block,
-verified bit-for-bit against the interpreter under `qemu-user` (see §0b).
+Phase 4 exit criterion: *a repeatable suite of small guest programs runs
+correctly under the translator.* That is met — see §2 and §0c. Before declaring
+Phase 4 complete, the remaining work is:
 
-The single best next action is to **translate a basic block, not a single
-instruction**:
+1. **Commit and push this milestone**, and watch CI go green (§2 has the local
+   evidence; the remote run must be recorded here once it completes).
+2. **Update `ROADMAP.md` and `CHANGELOG.md`** to mark Phase 4's items and record
+   what changed.
+3. **Extend the guest program suite** if time allows — a few more programs
+   (nested loops, a branch inside a loop, a longer straight-line block that
+   spans the fetch window) strengthen the exit criterion.
 
-1. **Basic-block formation.** Starting at a guest PC, decode instructions until
-   a terminator (`jmp`/`jcc`/`ret`/`hlt`) or an unsupported instruction. Record
-   the guest addresses of each instruction and of the block's exit(s).
-2. **Guest `rip` at block exit.** Make the generated block write the correct
-   next guest PC: the branch target for a taken `jmp`/`jcc`, the fall-through
-   address otherwise, and leave `rip` alone on `hlt`. This is where a block's
-   return value should also say *why* it stopped (fall-through vs. branch vs.
-   halt), so the dispatcher can find the next block.
-3. **Control-flow lowering.** `jcc` needs the x86 condition evaluated from the
-   modelled flags — reuse the same NZCV-derived logic already in the translator
-   rather than a new path. `ret` needs a guest stack, which needs a guest address
-   space; keep `ret`/`push`/`pop` refused until that exists.
-4. **A translation cache and dispatcher.** Keyed by guest PC, holding translated
-   blocks, with an explicit "unsupported" result that stops the run rather than
-   executing something wrong. Cache invalidation can be trivial (never invalidate)
-   for the first version, but the boundary must be documented.
-5. Extend `tests/unit/test_translator.cpp` with multi-instruction programs
-   (a counted loop, a conditional branch taken and not taken) and compare the
-   final `GuestState` against `run_program` from the interpreter.
+Then Phase 5 begins, and the single best first action there is:
 
-Add encoder instructions only as the translator needs them, each with a
-binutils-verified test (see `TESTING.md` §7).
+- **Measure before optimizing.** Build a Tier-1-vs-Tier-0 timing harness on the
+  existing benchmark infrastructure so every later optimization (register
+  allocation, chaining, dispatch) has a fixed baseline to be judged against.
+  Do not start optimizing until that baseline exists and is reproducible.
 
 **The interpreter stays.** It is the oracle. Do not weaken it to make the
-translator look correct. Phase 4 exit criteria are in `ROADMAP.md`.
+translator look correct. Phase 5 exit criteria are in `ROADMAP.md`.
 
 Optional Phase 1 leftovers remain if wanted (unblocking the UML build, a CI
-performance-trend baseline), but neither blocks Phase 4.
+performance-trend baseline), but neither blocks Phase 5.
 
 ---
 

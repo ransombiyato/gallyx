@@ -114,6 +114,16 @@ HYPERION_TEST("decoder", "jmp_relative_target") {
     HYPERION_CHECK(r.instruction.dst.imm == 0x1000 + 5);
 }
 
+HYPERION_TEST("decoder", "jmp_short_rel8") {
+    // EB FE = jmp -2 (short, rel8). Target = address after + (-2) = the jmp
+    // itself. This is the classic infinite-loop encoding.
+    const auto r = dec({0xEB, 0xFE});
+    HYPERION_CHECK(r.ok());
+    HYPERION_CHECK(r.instruction.opcode == Opcode::kJmp);
+    HYPERION_CHECK(r.instruction.length == 2);
+    HYPERION_CHECK(r.instruction.dst.imm == 0x1000 + 2 - 2);
+}
+
 HYPERION_TEST("decoder", "jcc_condition_decoded") {
     // 74 05 = je +5  (short jump, rel8). Target = address_after + 5.
     const auto r = dec({0x74, 0x05});

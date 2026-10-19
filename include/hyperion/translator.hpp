@@ -56,9 +56,57 @@ struct Translation {
 
 // Value returned in x0 by a translated block.
 enum class BlockResult : std::uint64_t {
-    kOk = 0,     // instruction completed; guest state is updated
-    kHalted = 1, // HLT: the program has stopped
+    kOk = 0,     // block completed; guest state (including rip) is updated
+    kHalted = 1, // HLT/RET: the program has stopped
 };
+
+// How a translated block left. Purely informational for callers: the
+// authoritative next PC is always GuestState::rip, which the block writes.
+enum class BlockExit : std::uint8_t {
+    kFallThrough, // ran to the end of the decoded sequence (or hit an
+                  // instruction the translator does not support)
+    kJmp,         // unconditional JMP
+    kJcc,         // conditional branch; the runtime decides taken/not-taken
+    kHalted,      // HLT or RET: the program has stopped
+};
+
+const char* to_string(BlockExit exit);
+
+// The result of translating one basic block (a straight-line run of
+// instructions ending in a terminator, or in an instruction the translator
+// does not support).
+struct BlockTranslation {
+    TranslateError error = TranslateError::kNone;
+    // AArch64 code for `BlockResult block(GuestState*)`. Empty on error.
+    std::vector<std::uint8_t> code;
+    std::size_t instruction_count = 0;       // AArch64 instructions emitted
+    std::size_t guest_instruction_count = 0; // guest instructions covered
+
+    BlockExit exit = BlockExit::kFallThrough;
+    // Predicted successor for a fall-through or JMP (correct for both). For
+    // kJcc it is the fall-through address and is only a hint; the dispatcher
+    // must read the real PC from GuestState::rip. Unused for kHalted.
+    std::uint64_t target = 0;
+
+    bool ok() const { return error == TranslateError::kNone; }
+};
+
+// Translate a basic block starting at `instruction.address` in `code`, whose
+// first instruction has already been decoded. Decoding continues until a
+// terminator (JMP/Jcc/HLT/RET), an instruction outside the translated subset
+// (the block is cut *before* it), or the end of `size` bytes.
+//
+// A block that hits an unsupported instruction still returns ok() with a valid
+// block: the block covers only the supported prefix and its exit is
+// kFallThrough, so the dispatcher can detect the unsupported PC on the next
+// lookup and stop cleanly. This is what makes "do not silently execute
+// incorrect code" true at the program level.
+//
+// For kJcc the block evaluates the x86 condition from the modelled flags and
+// writes the correct next rip itself, so `BlockResult` alone is enough to know
+// whether the program halted.
+BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
+                                 const Instruction& first);
 
 // Translate one decoded x86-64 instruction into a self-contained AArch64 block
 // with the signature `BlockResult block(GuestState*)`. The block reads and

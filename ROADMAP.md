@@ -197,14 +197,35 @@ rather than of program-level translation.
 
 ---
 
-## Phase 4 — Basic dynamic binary translator ⬜
+## Phase 4 — Basic dynamic binary translator 🟡 (core done, closing out)
 
 **Objective.** A working translator loop with a code cache.
 
 **Work items.** Translation blocks, translation cache, guest PC tracking,
 block exits, cache invalidation, explicit handling of unsupported instructions.
 
+**Status.** Core implemented and verified under `qemu-user`:
+
+| Work item | State |
+| --- | --- |
+| Translation blocks | **Done** — `translate_block` decodes to a terminator |
+| Guest PC tracking | **Done** — generated block writes the authoritative `rip` |
+| Block exits | **Done** — `BlockExit` (fall-through / jmp / jcc / halted) |
+| Translation cache | **Done** — keyed by guest PC; `TranslationCache` |
+| Dispatcher loop | **Done** — `TranslationCache::run`, step-limited |
+| Explicit unsupported handling | **Done** — stops with `kUnsupported`, never miscompiles |
+| Cache invalidation | **Not started** — the cache never invalidates (documented boundary; Phase 7) |
+| Block chaining | **Not started** — Phase 5 |
+
 **Exit criteria.** A repeatable suite of small guest programs runs correctly.
+
+**Evidence.** `translator.differential_program_loops` (counted loop) and
+`translator.differential_branch_directions` (taken/not-taken) compare the final
+`GuestState` and step count against `run_program` and pass under `qemu-user`;
+`translator.dispatcher_*` prove unsupported instructions stop the run and an
+infinite loop is reported as a step limit rather than hanging. The
+`hyperion run --tier=1` CLI executes a whole program through generated AArch64
+code (3 basic blocks translated) and agrees with tier 0.
 
 ---
 

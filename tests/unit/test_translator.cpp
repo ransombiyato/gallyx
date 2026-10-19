@@ -20,6 +20,7 @@
 #include "hyperion/exec_mem.hpp"
 #include "hyperion/guest_state.hpp"
 #include "hyperion/interpreter.hpp"
+#include "hyperion/translation_cache.hpp"
 #include "hyperion/translator.hpp"
 
 using hyperion::BlockResult;
@@ -91,6 +92,80 @@ HYPERION_TEST("translator", "refuses_memory_operands") {
                           static_cast<int>(TranslateError::kUnsupportedOperand));
         HYPERION_CHECK(t.code.empty());
     }
+}
+
+// --- Scope: basic-block translation -----------------------------------------
+
+HYPERION_TEST("translator", "block_ends_at_terminators") {
+    // A block runs up to and including its terminator, then stops.
+    {
+        // add eax, ecx ; dec ecx ; jnz -6 ; hlt
+        const std::vector<std::uint8_t> program = {0x01, 0xC8, 0xFF, 0xC9, 0x75, 0xFA, 0xF4};
+        const DecodeResult first = hyperion::decode(program.data(), program.size(), kBase);
+        HYPERION_CHECK(first.ok());
+        // Translating a block from the first instruction: it is a body
+        // instruction, so the block continues to the Jcc and stops there.
+        const hyperion::BlockTranslation b =
+            hyperion::translate_block(program.data(), program.size(), first.instruction);
+        HYPERION_CHECK(b.ok());
+        HYPERION_CHECK(b.exit == hyperion::BlockExit::kJcc);
+        // add + dec + jcc = 3 guest instructions.
+        HYPERION_CHECK_EQ(b.guest_instruction_count, std::size_t{3});
+        // Fall-through hint is the address just past the Jcc.
+        HYPERION_CHECK_EQ(b.target, kBase + 6);
+        HYPERION_CHECK(!b.code.empty());
+    }
+    {
+        // hlt on its own: a one-instruction block that halts.
+        const std::vector<std::uint8_t> program = {0xF4};
+        const DecodeResult first = hyperion::decode(program.data(), program.size(), kBase);
+        HYPERION_CHECK(first.ok());
+        const hyperion::BlockTranslation b =
+            hyperion::translate_block(program.data(), program.size(), first.instruction);
+        HYPERION_CHECK(b.ok());
+        HYPERION_CHECK(b.exit == hyperion::BlockExit::kHalted);
+        HYPERION_CHECK_EQ(b.guest_instruction_count, std::size_t{1});
+    }
+    {
+        // jmp +0 : a one-instruction block that transfers control.
+        const std::vector<std::uint8_t> program = {0xE9, 0x00, 0x00, 0x00, 0x00};
+        const DecodeResult first = hyperion::decode(program.data(), program.size(), kBase);
+        HYPERION_CHECK(first.ok());
+        const hyperion::BlockTranslation b =
+            hyperion::translate_block(program.data(), program.size(), first.instruction);
+        HYPERION_CHECK(b.ok());
+        HYPERION_CHECK(b.exit == hyperion::BlockExit::kJmp);
+        HYPERION_CHECK_EQ(b.target, kBase + 5); // rel is from the end of the jmp
+    }
+}
+
+HYPERION_TEST("translator", "block_cuts_before_unsupported") {
+    // mov eax, 1 ; push rax ; hlt
+    // The block covers only `mov` and cuts *before* `push`, so the dispatcher
+    // sees the push PC and stops rather than miscompiling it.
+    const std::vector<std::uint8_t> program = {0xB8, 0x01, 0x00, 0x00, 0x00, 0x50, 0xF4};
+    const DecodeResult first = hyperion::decode(program.data(), program.size(), kBase);
+    HYPERION_CHECK(first.ok());
+    const hyperion::BlockTranslation b =
+        hyperion::translate_block(program.data(), program.size(), first.instruction);
+    HYPERION_CHECK(b.ok());
+    HYPERION_CHECK(b.exit == hyperion::BlockExit::kFallThrough);
+    HYPERION_CHECK_EQ(b.guest_instruction_count, std::size_t{1});
+    HYPERION_CHECK_EQ(b.target, kBase + 5); // the push, not the hlt
+}
+
+HYPERION_TEST("translator", "block_cuts_at_buffer_end") {
+    // Two adds with no terminator: the block runs off the end of the buffer and
+    // falls through past the last instruction.
+    const std::vector<std::uint8_t> program = {0x01, 0xC8, 0x01, 0xC8};
+    const DecodeResult first = hyperion::decode(program.data(), program.size(), kBase);
+    HYPERION_CHECK(first.ok());
+    const hyperion::BlockTranslation b =
+        hyperion::translate_block(program.data(), program.size(), first.instruction);
+    HYPERION_CHECK(b.ok());
+    HYPERION_CHECK(b.exit == hyperion::BlockExit::kFallThrough);
+    HYPERION_CHECK_EQ(b.guest_instruction_count, std::size_t{2});
+    HYPERION_CHECK_EQ(b.target, kBase + 4);
 }
 
 // --- Differential: generated code vs. the reference interpreter -------------
@@ -207,6 +282,117 @@ HYPERION_TEST("translator", "differential_flags_are_exact") {
     }
 }
 
+// --- Differential: whole programs through the translation cache --------------
+
+namespace {
+
+// Run a whole program through both tiers and require identical final state.
+// This is the strongest check in the suite: the generated blocks are executed
+// by real hardware (under qemu-user on CI) while the interpreter independently
+// models the same semantics.
+void check_program_matches(const std::vector<std::uint8_t>& program, GuestState initial,
+                           std::uint64_t max_steps = 1'000'000) {
+    FlatMemory interp_mem(kBase, 4096);
+    std::memcpy(interp_mem.data(), program.data(), program.size());
+    const hyperion::RunResult expected = hyperion::run_program(interp_mem, initial, max_steps);
+
+    FlatMemory tier1_mem(kBase, 4096);
+    std::memcpy(tier1_mem.data(), program.data(), program.size());
+    hyperion::TranslationCache cache;
+    const hyperion::RunResult actual = cache.run(tier1_mem, initial, max_steps);
+
+    HYPERION_CHECK_EQ(static_cast<int>(actual.status), static_cast<int>(expected.status));
+    HYPERION_CHECK_EQ(actual.steps, expected.steps);
+    if (expected.status == hyperion::RunStatus::kOk ||
+        expected.status == hyperion::RunStatus::kStepLimit) {
+        for (std::size_t i = 0; i < hyperion::kGprCount; ++i) {
+            HYPERION_CHECK_EQ(actual.state.gpr[i], expected.state.gpr[i]);
+        }
+        HYPERION_CHECK_EQ(actual.state.rip, expected.state.rip);
+        HYPERION_CHECK(actual.state.flags == expected.state.flags);
+    }
+}
+
+} // namespace
+
+HYPERION_TEST("translator", "differential_program_loops") {
+    // Count down from rcx, accumulating rbx += rax each iteration:
+    //   xor ebx, ebx            ; 31 DB
+    // loop:
+    //   add rbx, rax            ; 48 01 C3
+    //   dec rcx                 ; 48 FF C9
+    //   jnz loop                ; 75 F8
+    //   hlt                     ; F4
+    const std::vector<std::uint8_t> program = {
+        0x31, 0xDB, 0x48, 0x01, 0xC3, 0x48, 0xFF, 0xC9, 0x75, 0xF8, 0xF4,
+    };
+    for (std::uint64_t count :
+         {std::uint64_t{0}, std::uint64_t{1}, std::uint64_t{5}, std::uint64_t{1000}}) {
+        GuestState initial;
+        initial.rip = kBase;
+        initial.reg(Gpr::kRax) = 7;
+        initial.reg(Gpr::kRcx) = count;
+        check_program_matches(program, initial);
+    }
+}
+
+HYPERION_TEST("translator", "differential_branch_directions") {
+    // A conditional branch must take the correct path for many flag states.
+    //   cmp rax, rbx            ; 48 39 D8
+    //   je  taken               ; 74 05
+    //   mov ecx, 0x1111         ; B9 11 11 00 00
+    //   jmp done                ; EB 03
+    // taken:
+    //   mov ecx, 0x2222         ; B9 22 22 00 00
+    // done:
+    //   hlt                     ; F4
+    const std::vector<std::uint8_t> program = {
+        0x48, 0x39, 0xD8, 0x74, 0x05, 0xB9, 0x11, 0x11, 0x00,
+        0x00, 0xEB, 0x03, 0xB9, 0x22, 0x22, 0x00, 0x00, 0xF4,
+    };
+    for (std::uint64_t a :
+         {std::uint64_t{0}, std::uint64_t{1}, std::uint64_t{0xFFFFFFFFFFFFFFFFULL}}) {
+        for (std::uint64_t b :
+             {std::uint64_t{0}, std::uint64_t{1}, std::uint64_t{0xFFFFFFFFFFFFFFFFULL}}) {
+            GuestState initial;
+            initial.rip = kBase;
+            initial.reg(Gpr::kRax) = a;
+            initial.reg(Gpr::kRbx) = b;
+            check_program_matches(program, initial);
+        }
+    }
+}
+
+HYPERION_TEST("translator", "dispatcher_stops_at_unsupported") {
+    // mov eax, 1 ; push rax ; hlt. The dispatcher translates `mov`, then stops
+    // at `push` with kUnsupported and leaves rip on the push, never running the
+    // untranslatable instruction.
+    const std::vector<std::uint8_t> program = {0xB8, 0x01, 0x00, 0x00, 0x00, 0x50, 0xF4};
+    FlatMemory mem(kBase, 4096);
+    std::memcpy(mem.data(), program.data(), program.size());
+    GuestState initial;
+    initial.rip = kBase;
+    hyperion::TranslationCache cache;
+    const hyperion::RunResult r = cache.run(mem, initial);
+    HYPERION_CHECK(r.status == hyperion::RunStatus::kUnsupported);
+    HYPERION_CHECK_EQ(r.state.rip, kBase + 5); // the push
+    HYPERION_CHECK_EQ(r.state.reg(Gpr::kRax), std::uint64_t{1});
+}
+
+HYPERION_TEST("translator", "dispatcher_step_limit") {
+    // An infinite loop must be reported as a step limit, not hang.
+    // loop: jmp loop  ->  EB FE
+    const std::vector<std::uint8_t> program = {0xEB, 0xFE};
+    FlatMemory mem(kBase, 4096);
+    std::memcpy(mem.data(), program.data(), program.size());
+    GuestState initial;
+    initial.rip = kBase;
+    hyperion::TranslationCache cache;
+    const hyperion::RunResult r = cache.run(mem, initial, 1000);
+    HYPERION_CHECK(r.status == hyperion::RunStatus::kStepLimit);
+    HYPERION_CHECK_EQ(r.steps, std::uint64_t{1000});
+}
+
 #else
 
 HYPERION_TEST("translator", "differential_mov_and_alu") {
@@ -214,6 +400,22 @@ HYPERION_TEST("translator", "differential_mov_and_alu") {
 }
 
 HYPERION_TEST("translator", "differential_flags_are_exact") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "differential_program_loops") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "differential_branch_directions") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "dispatcher_stops_at_unsupported") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "dispatcher_step_limit") {
     HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
 }
 

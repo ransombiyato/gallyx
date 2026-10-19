@@ -6,6 +6,20 @@
 
 namespace hyperion {
 
+const char* to_string(RunStatus status) {
+    switch (status) {
+    case RunStatus::kOk:
+        return "ok";
+    case RunStatus::kStepLimit:
+        return "step limit";
+    case RunStatus::kFault:
+        return "fault";
+    case RunStatus::kUnsupported:
+        return "unsupported";
+    }
+    return "?";
+}
+
 // --- FlatMemory -------------------------------------------------------------
 
 FlatMemory::FlatMemory(std::uint64_t base, std::size_t size) : base_(base), bytes_(size, 0) {}

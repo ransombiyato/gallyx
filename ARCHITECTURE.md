@@ -142,11 +142,13 @@ read-modify-write for partial widths; later phases may track "known high bits".
 - **Tier 0 (Phase 2):** reference interpreter. Always available, used as the
   differential oracle for everything above it.
 - **Tier 1 (Phase 3–4):** straightforward AArch64 code generation, one
-  translation block per basic block, minimal register allocation. The first
-  increment (Phase 3) translates single instructions to a self-contained
-  `BlockResult block(GuestState*)` block; the guest registers live in memory and
-  are loaded/stored by the generated code, and every x86 flag is recomputed from
-  AArch64 NZCV (D-017).
+  translation block per basic block, minimal register allocation. The Phase 3
+  increment translated single instructions to a self-contained
+  `BlockResult block(GuestState*)` block; Phase 4 added block formation
+  (`translate_block` decodes to a terminator and lowers `jmp`/`jcc`) and a
+  dispatcher (`TranslationCache`) that runs whole programs block by block. The
+  guest registers live in memory and are loaded/stored by the generated code,
+  and every x86 flag is recomputed from AArch64 NZCV (D-017).
 - **Tier 2 (Phase 5+):** optimized blocks for hot paths — better register
   allocation, constant propagation, dead-code elimination, block chaining.
 
@@ -157,16 +159,40 @@ Every tier must produce bit-identical guest state; this is enforced by tests.
 
 ## 5. Translation cache and invalidation
 
-Planned design (Phase 4):
+**Implemented (Phase 4):** `TranslationCache` (`translation_cache.hpp`) is a
+hash map keyed by guest PC holding one generated block per entry. The
+dispatcher loop is:
 
-- Fixed-size, hash-indexed lookup keyed by guest PC (plus a generation tag).
-- Code stored in page-aligned arenas allocated with `mmap`; on AArch64 the
-  arena is written with `PROT_WRITE`, then made executable with
-  `PROT_READ|PROT_EXEC` and flushed with `__builtin___clear_cache`.
+```
+while not halted and steps < limit:
+    block = lookup(state.rip) or translate_block(state.rip)
+    if block is unsupported: stop with kUnsupported, rip left on the instruction
+    run block(state)          # block writes the authoritative next rip
+```
+
+Design properties that are deliberate at this stage:
+
+- The **authoritative next PC is `GuestState::rip`**, written by the generated
+  block. The cache is only a lookup accelerator; a missing or stale entry can
+  never change what the program computes.
+- **Unsupported instructions stop the run.** The block cutter stops *before* an
+  instruction it cannot translate, so the dispatcher sees that PC on the next
+  lookup and reports it. A block whose first instruction is unsupported is
+  reported as an error rather than emitted empty (which would loop forever).
+- Generated code lives in `ExecMem` arenas: written `PROT_WRITE`, then made
+  `PROT_READ|PROT_EXEC` with an instruction-cache clear. **W^X is assumed on
+  AArch64** (probed at runtime, see `host_probe`).
+- The cache **never invalidates** in this version. Self-modifying guest code
+  runs stale translations. This is a documented boundary, not an accident;
+  precise invalidation (guest page → block set) is Phase 7 work.
+
+Still planned (Phase 5+):
+
+- Fixed-size, hash-indexed lookup with a generation tag instead of `unordered_map`.
+- Block chaining so a block exit jumps straight to its successor instead of
+  returning to the dispatcher.
 - Invalidation: a mapping from guest page → set of blocks, so self-modifying
   code or `mprotect` invalidates precisely.
-- **W^X is assumed on AArch64** (probed at runtime, see `host_probe`). The
-  design never assumes a page is simultaneously writable and executable.
 
 ---
 

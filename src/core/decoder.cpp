@@ -671,6 +671,21 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
         return result;
     }
 
+    // --- 0xEB JMP rel8 (short unconditional jump) -------------------------
+    // The rel32 form is 0xE9; the rel8 form is very common in real code and is
+    // the natural companion to the 0x70..0x7F short Jcc below.
+    if (opcode == 0xEB) {
+        const std::int8_t rel = r.i8();
+        Operand target;
+        target.kind = OperandKind::kImmediate;
+        target.size = OperandSize::k64;
+        const std::uint64_t next = address + static_cast<std::uint64_t>(r.position());
+        target.imm = static_cast<std::uint64_t>(static_cast<std::int64_t>(next) + rel);
+        insn.dst = target;
+        finish(Opcode::kJmp);
+        return result;
+    }
+
     // --- 0xE9 JMP rel32 ----------------------------------------------------
     if (opcode == 0xE9) {
         const std::int32_t rel = r.i32();

@@ -47,6 +47,7 @@ here is rejected with a specific `DecodeError` — the decoder never guesses.
 | `push r64` | `0x50+rd` | 64 | `rsp -= 8; [rsp] = r` |
 | `pop r64` | `0x58+rd` | 64 | `r = [rsp]; rsp += 8` |
 | `jmp rel32` | `0xE9` | — | absolute target = next rip + rel32 |
+| `jmp rel8` | `0xEB` | — | short form; absolute target = next rip + rel8 |
 | `jcc rel8` | `0x70..0x7F` | — | all 16 conditions; **short form only** |
 | `nop` | `0x90` | — | |
 | `hlt` | `0xF4` | — | stops execution (see §2.4) |
@@ -110,11 +111,12 @@ These appeared in an earlier version of this table and remain unbuilt. They are
 `rep`-prefixed string ops, segmentation, and most system instructions. All are
 rejected explicitly.
 
-### 2.6 AArch64 translation coverage (Phase 3)
+### 2.6 AArch64 translation coverage (Phase 3–4)
 
-The translator (`translate_instruction`) lowers a subset of the decoder's
-subset. An instruction the decoder accepts but the translator does not is
-refused with an explicit `TranslateError`; nothing is miscompiled.
+The translator lowers a subset of the decoder's subset. An instruction the
+decoder accepts but the translator does not is refused with an explicit
+`TranslateError`; nothing is miscompiled. Phase 4 adds whole-block translation
+(`translate_block`) and a dispatcher (`TranslationCache`).
 
 | Instruction | Translated? | Notes |
 | --- | --- | --- |
@@ -123,14 +125,21 @@ refused with an explicit `TranslateError`; nothing is miscompiled.
 | `and`, `or`, `xor` | ✅ | register and immediate; CF/OF/AF cleared |
 | `cmp` | ✅ | flags only, no writeback |
 | `inc`, `dec` | ✅ | CF preserved across the operation |
-| `nop`, `hlt` | ✅ | `hlt` returns `kHalted` without advancing rip |
-| `jmp`, `jcc` | ⬜ | Phase 4 (needs block exits) |
-| `push`, `pop`, `ret` | ⬜ | Phase 4 (needs guest stack) |
+| `nop` | ✅ | no effect |
+| `hlt` | ✅ | block exits with `kHalted`; `rip` not advanced |
+| `jmp rel32` (`0xE9`) | ✅ | block exits with `kJmp`; writes target `rip` |
+| `jmp rel8` (`0xEB`) | ✅ | block exits with `kJmp`; writes target `rip` |
+| `jcc rel8` (`0x70..0x7F`) | ✅ | block exits with `kJcc`; writes target or fall-through `rip` |
+| `push`, `pop`, `ret` | ⬜ | needs a guest stack / address space (Phase 6) |
 | memory operands | ⬜ | Phase 6 (needs a guest address space) |
 
-Verified by `tests/unit/test_translator.cpp`: scope tests on every host, and a
-differential run of the generated code against the interpreter under
-`qemu-user` on AArch64 (847 operand cases plus a fixed instruction set).
+Verified by `tests/unit/test_translator.cpp`: scope tests on every host, a
+single-instruction differential against the interpreter under `qemu-user` on
+AArch64 (847 operand cases plus a fixed instruction set), **and whole-program
+differentials** — a counted loop and taken/not-taken branches — that compare the
+final `GuestState` and step count against `run_program`. The
+`hyperion run --tier=1` CLI runs a complete program through generated AArch64
+code and is required to agree with tier 0 (`tests/cli/cli_smoke.sh`).
 
 ---
 

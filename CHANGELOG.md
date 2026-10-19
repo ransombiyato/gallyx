@@ -7,6 +7,49 @@ Meaningful changes by milestone. Format loosely follows
 
 ## [Unreleased] — Phase 1
 
+### Added — one-line installer and `hyperion` command
+- `install.sh`: `curl -fsSL .../install.sh | bash` fetches, builds and tests the
+  project, then installs a `hyperion` command into `<prefix>/bin` (default
+  `~/.local`). No root, nothing written outside the prefix, and it aborts
+  rather than install a build that fails its own tests.
+- `scripts/hyperion`: a front end with `status`, `doctor`, `version`, `build`,
+  `test`, `bench`, `cross-test`, `clean`. `run` and `info` exist but exit 2 with
+  `NOT IMPLEMENTED` — there is no translator yet, and an honest refusal is
+  better than a command that silently does nothing.
+
+### Added — baseline benchmark methodology
+- `include/hyperion/bench_stats.hpp`, `src/core/bench_stats.cpp`: min, p25,
+  median, p75, max, mean, population standard deviation and `iqr_fraction` (the
+  noise indicator), computed in the core library so the Phase 8 optimisation lab
+  reports results the same way.
+- The harness now takes `--repeats` (default 9, minimum 2), discards one warm-up
+  sample and reports the full spread; JSON schema `hyperion.bench.host.v1` →
+  `v2`.
+- Measured host calibration recorded in `BENCHMARKS.md` §4.1: median
+  **2.0568 ns/op**, 1.2 % spread, checksum stable, with a scaling validation at
+  1e6/1e7/1e8 iterations. These are harness figures, not a translator claim.
+- 8 unit tests for the statistics; `bench.methodology` and
+  `bench.timing_not_eliminated` CTest entries; `bench.rejects_single_sample`
+  negative test.
+
+### Fixed — BENCH-001, a fabricated benchmark result
+- The Phase 0 harness reported ~0.00003 ns/op (~30 ps per iteration, far below
+  one clock cycle) because `-O2` hoisted the loop-invariant calibration call out
+  of the repeat loop. The checksum stayed correct, so the failure was silent.
+- Found by checking that total time scales with `--iterations`; it did not.
+- Fixed with an `asm` optimisation barrier plus a plausibility check: a result
+  faster than one clock cycle per iteration is rejected, and the harness exits
+  non-zero, rather than publishing it. Regression test added.
+
+### Added — prior-art survey and reuse decision
+- `docs/prior-art.md`: FEX-Emu, Box64, QEMU TCG, Zydis, Capstone, LLVM,
+  Unicorn, Dynarmic, with licences verified against upstream licence files.
+- `DECISIONS.md` D-013: the reuse-vs-build boundary.
+- `docs/prior-art.md` §6: the attempted AArch64 UML cross-build. It configures
+  but does not compile, and the same failure occurs on stock x86-64 UML, so it
+  is a host toolchain problem rather than a port defect. The port is recorded as
+  *plausible but unverified*.
+
 ### Changed — scope correction (2026-10-19)
 - **Withdrawn** the Phase 0 assumption that kernel/system-mode emulation is an
   explicit non-goal. It capped the project's compatibility ceiling below its

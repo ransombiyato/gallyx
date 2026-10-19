@@ -18,14 +18,16 @@ no KVM. Development often happens on x86-64 Linux hosts.
 
 ## 2. Current state in one paragraph
 
-**Phase 0 is complete.** The repository builds clean with `-Werror`, has a
-dependency-free unit-test suite wired into CTest, and has a **verified
-cross-architecture validation pipeline** that cross-compiles the test suite to
-AArch64 and runs it under `qemu-user`. A host capability probe measures
-architecture/page size/cache line/W^X rather than assuming them, and a benchmark
-harness emits JSON with guest-execution metrics marked unavailable. **There is
-no instruction decoding, interpretation, translation, or syscall layer.**
-Phase 1 (baseline/prior-art) is the next phase.
+**Phase 0 is complete and Phase 1 is essentially complete.** The repository
+builds clean with `-Werror`, has a dependency-free unit-test suite wired into
+CTest, and has a **verified cross-architecture validation pipeline** that
+cross-compiles the test suite to AArch64 and runs it under `qemu-user`. A host
+capability probe measures architecture/page size/cache line/W^X rather than
+assuming them, and a benchmark harness reports repeated-run statistics with
+guest-execution metrics marked unavailable. The project installs with a single
+`curl | bash` command that builds, tests and installs a `hyperion` command.
+**There is no instruction decoding, interpretation, translation, or syscall
+layer.** Phase 2 (minimal instruction execution) is the next phase.
 
 **Scope was corrected on 2026-10-19.** Kernel/system-mode emulation is no longer
 an explicit non-goal (`DECISIONS.md` D-011). Kernel-level compatibility is in
@@ -33,6 +35,12 @@ scope for *investigation*; the user-mode translator remains the primary path.
 The kernel-as-process option was de-risked by measurement and by desk research
 (`docs/architecture-feasibility.md`). **No kernel-level code exists or should be
 written yet.**
+
+**A real defect was found and fixed in Phase 1.** BENCH-001: the benchmark
+harness reported a fabricated result because `-O2` eliminated the timed
+workload. Read `docs/known-issues.md` §"Benchmarking defects" before touching
+`benchmarks/`. The lesson generalises: a measurement that looks too good is
+usually broken, and this project requires evidence, not plausible numbers.
 
 > **The environment does not persist.** A new session starts with no toolchain.
 > Run `scripts/bootstrap.sh` first, and do not treat a stale `build/` directory
@@ -46,16 +54,23 @@ written yet.**
 scripts/bootstrap.sh        # toolchain (sudo); skip if already installed
 scripts/dev.sh bootstrap
 scripts/dev.sh build
-scripts/dev.sh test         # expect: 2/2 tests passed
+scripts/dev.sh test         # expect: 5/5 tests passed
 scripts/dev.sh cross-test   # expect: 2/2 tests passed incl. cross.aarch64_tests
 ./build/dev/hyperion version
 ./build/dev/hyperion probe
+
+# optional: the installer path (no root, installs into a temp prefix)
+bash install.sh --src . --prefix /tmp/hp --yes
+/tmp/hp/bin/hyperion doctor
+bash install.sh --uninstall --prefix /tmp/hp
 ```
 
 If `test` or `cross-test` does not pass, **stop and fix that first**. Do not
 build new features on a broken base.
 
-Expected test names: `unit.native`, `bench.smoke`, `cross.aarch64_tests`.
+Expected test names: `unit.native`, `bench.smoke`, `bench.methodology`,
+`bench.timing_not_eliminated`, `bench.rejects_single_sample`,
+`cross.aarch64_tests`.
 
 ---
 
@@ -66,31 +81,37 @@ Expected test names: `unit.native`, `bench.smoke`, `cross.aarch64_tests`.
 3. `ARCHITECTURE.md` — design and component boundaries.
 4. `docs/architecture-feasibility.md` — why kernel-level scope was reopened,
    and the measured evidence.
-5. `DECISIONS.md` — why things are the way they are (D-001 … D-012).
+5. `DECISIONS.md` — why things are the way they are (D-001 … D-013).
 6. `CONTRIBUTING.md` — conventions and the milestone workflow.
-7. `docs/known-issues.md` — current limitations.
+7. `docs/known-issues.md` — current limitations, including BENCH-001.
+8. `docs/prior-art.md` — the survey and the reuse-vs-build boundary.
 
 ---
 
 ## 5. Your next task
 
-**Phase 1 — Establish the baseline.** Smallest meaningful first step:
+**Phase 2 — Minimal instruction execution.** Smallest meaningful first step:
 
-> Write `docs/prior-art.md` comparing FEX-Emu, Box64, QEMU TCG, and relevant
-> decoder/compiler projects: licence, reuse potential, design trade-offs versus
-> a custom implementation.
+> Choose and document a small, explicit x86-64 instruction subset (registers,
+> flags, a handful of integer ALU ops, a few memory addressing forms, a few
+> control-flow forms), record it in `COMPATIBILITY.md`, then implement guest
+> state and decoding for it.
 
-Then extend `benchmarks/` with a documented methodology and record measured
-host baselines in `BENCHMARKS.md`, and record the reuse-vs-build decision in
-`DECISIONS.md`. Full Phase 1 acceptance criteria are in `ROADMAP.md`.
+Then implement a reference interpreter for the subset, and differential-test it
+against an independent reference — for example, execute the same instruction
+encodings natively on the x86-64 development host and compare architectural
+state. That interpreter becomes the correctness oracle for Phase 3's code
+generator, so it is worth making trustworthy rather than fast.
 
-Optionally (cheap, raises confidence in the kernel-as-process tier): cross-build
-the AArch64 UML port and confirm a binary is produced. Report only what you
-measure.
+Full Phase 2 acceptance criteria are in `ROADMAP.md`.
 
-**Do not** start Phase 2 (instruction execution) until Phase 1 exit criteria
-are met. **Do not** write kernel-level code — the tier is unvalidated on the
-reference device.
+**Do not** start Phase 3 (code generation) until Phase 2 exit criteria are met.
+**Do not** write kernel-level code — the tier is unvalidated on the reference
+device.
+
+Optional Phase 1 leftovers, neither blocking Phase 2: unblocking the AArch64 UML
+build (a host glibc/kernel-header problem, see `docs/prior-art.md` §6), and a
+first CI performance-trend baseline.
 
 ---
 

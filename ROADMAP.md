@@ -83,7 +83,7 @@ no syscall layer.
 
 ---
 
-## Phase 1 — Establish the baseline ⬜
+## Phase 1 — Establish the baseline ✅ (item 6 blocked, see note)
 
 **Objective.** Know the prior art and have a reproducible measurement harness
 *before* writing an engine.
@@ -99,15 +99,28 @@ no syscall layer.
 5. Record baseline numbers where obtainable; mark unavailable measurements as
    unavailable — **never fabricate**.
 6. **(added by the scope correction, optional)** Cross-build the AArch64 UML
-   port and confirm the binary is produced. This is a cheap way to raise
-   confidence in the kernel-as-process tier (R1) without committing to it.
-   Report only what is measured.
+   port and confirm the binary is produced.
 
 **Exit criteria.**
 
-- `THIRD_PARTY.md` and a baseline comparison document are committed.
-- `benchmarks/` produces repeatable, attributable results.
-- `BENCHMARKS.md` documents methodology and any measured baselines.
+- `THIRD_PARTY.md` and a baseline comparison document are committed. ✅
+- `benchmarks/` produces repeatable, attributable results. ✅
+- `BENCHMARKS.md` documents methodology and any measured baselines. ✅
+
+**Evidence.** `docs/prior-art.md` (survey, licences, trade-offs, reuse matrix);
+`DECISIONS.md` D-013 (reuse-vs-build boundary); `BENCHMARKS.md` §4 (measured
+host calibration with spread and a scaling validation); `install.sh` +
+`scripts/hyperion` (one-line install and a `hyperion` test-run command).
+
+**Item 6 note.** The AArch64 UML port configures but does not compile. The
+failure is not arch-specific — stock x86-64 UML fails identically on this host —
+so it is a host glibc/kernel-header incompatibility, not a port defect. The port
+is recorded as *plausible but unverified*; no claim is made that it works.
+Transcript in `docs/prior-art.md` §6.
+
+**Defect found and fixed in this phase:** BENCH-001, a benchmark harness that
+reported a fabricated result because the optimiser eliminated the timed
+workload. See `docs/known-issues.md`.
 
 ---
 

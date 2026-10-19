@@ -32,7 +32,8 @@ assumed* — see [`docs/target-environment.md`](docs/target-environment.md).
 | Unit tests + CTest integration | Implemented, passing |
 | AArch64 cross-build + qemu-user validation pipeline | Implemented, passing |
 | Host capability probe (arch, page size, cache line, W^X) | Implemented |
-| Host benchmark harness (JSON output) | Implemented (host-only) |
+| Host benchmark harness (JSON, repeated-run statistics) | Implemented (host-only) |
+| One-line installer + `hyperion` command | Implemented |
 | x86-64 decoder | **Not started** |
 | Guest execution / interpreter | **Not started** |
 | AArch64 code generator | **Not started** |
@@ -56,9 +57,11 @@ src/cli/                Command-line entry point
 tests/harness/          Dependency-free C++ test harness
 tests/unit/             Unit tests
 tests/run_cross_tests.cmake  Cross-arch validation driver
+tests/bench_rejects_bad_args.cmake  Negative test for the benchmark harness
 benchmarks/             Benchmark harness
 experiments/            Feasibility experiments (NOT part of the translator)
-scripts/                Developer task runner and environment bootstrap
+scripts/                Developer task runner, env bootstrap, `hyperion` CLI
+install.sh              One-line installer (curl | bash)
 docs/                   Agent handoff, known issues, target environment
 .github/workflows/      CI
 ```
@@ -87,6 +90,40 @@ Documentation index:
 ---
 
 ## Quick start
+
+### One-line install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ransombiyato/hyperion-dbt/main/install.sh | bash
+```
+
+This needs no root, writes nothing outside `~/.local` (override with
+`--prefix`), builds and tests the project, and installs a `hyperion` command:
+
+```bash
+hyperion doctor    # check the host, toolchain and install
+hyperion status    # what is implemented, and what is not
+hyperion test      # run the test suite
+hyperion bench     # run the benchmark harness
+hyperion help      # every command
+```
+
+If you would rather read a script before running it — always reasonable — the
+installer is a plain, commented shell script:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/ransombiyato/hyperion-dbt/main/install.sh
+less install.sh && bash install.sh
+```
+
+To remove it again: `bash install.sh --uninstall --prefix ~/.local`.
+
+> **`hyperion run` does not work yet, on purpose.** There is no translator, so
+> it prints `NOT IMPLEMENTED` and exits 2. A command that silently did nothing
+> would be worse than one that says so. `hyperion bench` measures the host
+> machine, not any emulation.
+
+### Build from source
 
 Requires a C++20 compiler and CMake ≥ 3.20.
 

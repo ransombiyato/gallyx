@@ -40,6 +40,20 @@ private:
     std::string message_;
 };
 
+// Thrown by HYPERION_SKIP to mark a test as not executed, as distinct from
+// passing. Used when a test's precondition genuinely cannot be met (for
+// example, a hardware-differential test running on a non-x86-64 host). Without
+// this, such a test would report PASS while having verified nothing, which
+// would be a false claim of coverage.
+class SkipTest : public std::exception {
+public:
+    explicit SkipTest(std::string reason) : reason_(std::move(reason)) {}
+    const char* what() const noexcept override { return reason_.c_str(); }
+
+private:
+    std::string reason_;
+};
+
 struct Registrar {
     Registrar(const char* suite, const char* name, std::function<void()> fn) {
         registry().push_back(TestCase{suite, name, std::move(fn)});
@@ -76,6 +90,12 @@ template<typename T> std::string to_display(const T& v) {
     static ::hyperion::test::Registrar HYPERION_CONCAT(hyperion_registrar_, __LINE__)(             \
         suite_name, test_name, &HYPERION_CONCAT(hyperion_test_, __LINE__));                        \
     static void HYPERION_CONCAT(hyperion_test_, __LINE__)()
+
+// Mark the current test as skipped (not executed) with a reason. Prefer this
+// over returning early when a precondition cannot be met: a skip is reported
+// separately from a pass, so a test that verified nothing is never counted as
+// coverage.
+#define HYPERION_SKIP(reason) throw ::hyperion::test::SkipTest(reason)
 
 #define HYPERION_CHECK(cond)                                                                       \
     do {                                                                                           \

@@ -1,11 +1,44 @@
 # STATUS
 
 **Last updated:** 2026-10-19
-**Current phase:** Phase 1 (Establish the baseline) — in progress, most exit criteria met
-**Repository state:** buildable, tested, documented. **No guest execution.**
+**Current phase:** Phase 2 (Minimal instruction execution) — in progress
+**Repository state:** buildable, tested, documented. **No guest execution yet; a
+verified reference interpreter exists for a documented instruction subset.**
 
 This is the first file a returning agent should read. It records exactly what
 works, what was last verified, and what to do next.
+
+---
+
+## 0a. Phase 2 progress (minimal instruction execution)
+
+| Work item | State |
+| --- | --- |
+| 1. Guest-state representation (GPRs, RFLAGS) | **Done** — `include/hyperion/guest_state.hpp` |
+| 2. x86-64 decoder for a documented subset | **Done** — `include/hyperion/decoder.hpp`, `src/core/decoder.cpp` |
+| 3. Reference interpreter (correctness oracle) | **Done** — `src/core/interpreter.cpp` |
+| 4. Unit tests: decoder, interpreter, guest state | **Done** — 39 new cases (see §2) |
+| 5. Differential test vs. real x86-64 hardware | **Done** — `tests/differential/`, 8 cases |
+| 6. Documented instruction subset in COMPATIBILITY.md | **Pending** — next task |
+| 7. Branch/loop execution over a program image | **Pending** — Phase 4 territory |
+
+**Instruction subset (Phase 2).** MOV (reg/imm/mem, 8/16/32/64 forms for
+reg/imm, 32/64 for memory), ADD, SUB, AND, OR, XOR, CMP, INC, DEC, PUSH, POP,
+JMP, Jcc (rel8 short forms), NOP, HLT, and RET-as-stop. Addressing supports
+base+index*scale+disp with a SIB byte. **Everything else is explicitly
+rejected** with a specific `DecodeError`; the decoder never guesses.
+
+**Two real bugs were found by the differential test and fixed** (this is the
+whole point of having one):
+1. 64-bit ADD carry was never set — `sum > mask` is impossible when the mask is
+   `~0`. Corrected to `(sum < ua) || (sum > mask)`.
+2. `Jcc` short jumps (`0x70..0x7F`) were decoded as rel32 instead of rel8,
+   producing wild jump targets.
+
+**Integrity fix.** The test harness previously had no way for a test to report
+"not executed", so the hardware-differential cases would have reported *PASS*
+on AArch64 while comparing nothing. A `HYPERION_SKIP` mechanism was added; on
+AArch64 the differential suite now honestly reports **0 passed, 8 skipped**.
 
 ---
 
@@ -44,8 +77,16 @@ and has a **verified cross-architecture validation pipeline**: the test suite is
 cross-compiled to AArch64 and executed under `qemu-user`. A host capability
 probe measures (rather than assumes) architecture, page size, cache-line size
 and W^X expectations, and a benchmark harness emits JSON with repeated-run
-statistics and guest-execution metrics explicitly marked unavailable. There is
-**no decoder, interpreter, code generator or syscall layer** yet.
+statistics and guest-execution metrics explicitly marked unavailable.
+
+Phase 2 added the first executable core: a **guest-state model**, an **x86-64
+decoder for a documented subset** that rejects everything else explicitly, and a
+**reference interpreter** that is now the correctness oracle for the future code
+generator. Correctness is anchored by a **differential test that compares the
+interpreter against real x86-64 hardware** (8 cases, thousands of comparisons
+across operand values and flag inputs). There is still **no AArch64 code
+generator, translation cache or syscall layer**; the interpreter is the only
+way to execute guest code, and only one instruction at a time.
 
 The project also installs with a single command:
 
@@ -91,13 +132,14 @@ aarch64-linux-gnu-g++ 14.2.0.
 | Check | Command | Result |
 | --- | --- | --- |
 | Native build (`-Werror`) | `cmake --build build/dev` | PASS — no warnings |
-| Native tests | `ctest --test-dir build/dev` | PASS — **5/5** |
+| Native tests | `ctest --test-dir build/dev` | PASS — **6/6** entries (54 unit cases + 8 differential) |
+| Differential vs. hardware | `./build/dev/tests/hyperion_differential_tests` | PASS — 8/8 compared against real x86-64 |
 | Cross build | `cmake --build build/cross-test` | PASS — AArch64 binaries produced |
-| Cross tests under qemu | `ctest --test-dir build/cross-test` | PASS — **2/2** |
+| Cross tests under qemu | `ctest --test-dir build/cross-test` | PASS — **3/3** |
+| AArch64 differential | `qemu-aarch64 .../hyperion_differential_tests` | SKIP — 0 passed, **8 skipped** (no x86-64 oracle) |
 | AArch64 unit tests in qemu | `qemu-aarch64 .../hyperion_unit_tests` | PASS — 0 failed |
-| AArch64 probe | `qemu-aarch64 .../hyperion probe` | PASS — `arch: aarch64`, `assume W^X: yes`, cache line 32 |
-| ASan/UBSan (clang) | `ctest --test-dir build/sanitize` | PASS — 5/5 |
-| Clang build + tests | `ctest --test-dir build/clang` | PASS — 5/5 |
+| ASan/UBSan (clang) | `ctest --test-dir build/sanitize` | PASS — 6/6 |
+| Clang build + tests | `ctest --test-dir build/clang` | PASS — 6/6 |
 | Formatting | `clang-format --dry-run --Werror` | PASS — clean |
 | Shell scripts | `shellcheck install.sh scripts/*` | PASS — clean |
 | Installer (local) | `install.sh --src . --prefix DIR` | PASS — builds, tests, installs, uninstalls |
@@ -105,17 +147,22 @@ aarch64-linux-gnu-g++ 14.2.0.
 | UML feasibility (smoke) | `experiments/uml/run.sh smoke` | PASS — kernel boots unprivileged; all 6 namespace types OK |
 | UML feasibility (systemd) | `experiments/uml/run.sh systemd` | PASS — systemd 257 as PID 1 → `multi-user.target` |
 
-The native suite is 5 CTest entries: `unit.native` (one entry running **16**
-unit test cases), `bench.smoke`, `bench.methodology`,
-`bench.timing_not_eliminated` and `bench.rejects_single_sample`.
+The native suite is 6 CTest entries: `unit.native` (one entry running **54**
+unit test cases across 6 files), `differential.native_vs_interpreter` (**8**
+cases compared against real x86-64 hardware), `bench.smoke`,
+`bench.methodology`, `bench.timing_not_eliminated` and
+`bench.rejects_single_sample`.
 
 ### Remote verification (GitHub Actions)
 
-CI run `39250218783` on `main` (commit `3f15e48`): **conclusion `success`** —
-all five jobs passed: `build & test (gcc)`, `build & test (clang)`,
-`AArch64 cross tests (qemu-user)`, `ASan/UBSan`, `clang-format`.
+CI run `39263916932` on `main` (commit `cadbc17`): **conclusion `success`** —
+all five jobs passed: `clang-format` (8s), `build & test (gcc)` (22s),
+`ASan/UBSan` (33s), `AArch64 cross tests (qemu-user)` (31s), `build & test
+(clang)` (24s).
 
-Earlier Phase 0 run `39244780989` (commit `460629a`) also passed.
+Earlier green runs on `main`: `39263212528` (installer, `708c831`),
+`39261295636` (benchmark methodology, `fc5fd42`), `39250218783` (`3f15e48`),
+`39244780989` (`460629a`).
 
 One non-failing annotation appears on every job: `actions/checkout@v4` targets
 Node.js 20, which the runner now forces onto Node.js 24. It is a deprecation
@@ -149,24 +196,26 @@ stable-vs-noisy discrimination case).
 
 ## 4. Immediate next task
 
-**Phase 1 is essentially complete. The next task is Phase 2 — minimal
-instruction execution.**
+**Phase 2 items 1-5 are done and verified.** Guest state, the decoder, the
+reference interpreter, the unit tests and the hardware differential all exist
+and pass. The remaining Phase 2 work is documentation, then Phase 3.
 
-Smallest meaningful next task:
+Smallest meaningful next task (finish Phase 2):
 
-1. Choose and document a small, explicit x86-64 instruction subset (registers,
-   flags, a handful of integer ALU ops, a few memory forms, a few control-flow
-   forms). Record it in `COMPATIBILITY.md`.
-2. Implement guest state (the register file and flags word) and decoding for
-   that subset.
-3. Implement a reference interpreter for the subset — this becomes the
-   correctness oracle for Phase 3's code generator.
-4. Differential-test it against an independent reference (for example, execute
-   the same instruction encodings natively on the x86-64 dev host and compare
-   architectural state).
+1. Document the exact supported subset and the rejection behaviour in
+   `COMPATIBILITY.md` (it currently describes Phase 0/1 only). List every
+   supported opcode, the addressing forms, the operand sizes, and every
+   `DecodeError` case. This is the contract Phase 3's code generator must meet.
+2. Add a small "run a program image" helper so multi-instruction programs (with
+   branches and loops) can be executed by the interpreter and asserted on. The
+   interpreter already steps correctly; this is a convenience layer for tests,
+   not new semantics.
+3. Then begin Phase 3 (first AArch64 code generation) using the interpreter as
+   the oracle, reusing the `cross.aarch64_tests` pipeline already in CI.
 
 **Acceptance criteria for Phase 2** are in `ROADMAP.md`. Do not begin Phase 3
-until they are met.
+until they are met — the remaining blocker is the COMPATIBILITY.md subset
+contract.
 
 Two optional Phase 1 follow-ups remain if wanted: unblocking the UML build, and
 a first CI performance-trend baseline. Neither blocks Phase 2.

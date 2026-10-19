@@ -55,7 +55,10 @@ endif()
 add_library(hyperion_core
     src/core/version.cpp
     src/core/host_probe.cpp
-    src/core/bench_stats.cpp)
+    src/core/bench_stats.cpp
+    src/core/guest_state.cpp
+    src/core/decoder.cpp
+    src/core/interpreter.cpp)
 add_library(hyperion::core ALIAS hyperion_core)
 
 target_include_directories(hyperion_core

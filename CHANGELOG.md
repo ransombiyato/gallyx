@@ -5,6 +5,47 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 2
+
+### Added — guest state, decoder, reference interpreter
+- `include/hyperion/guest_state.hpp`, `src/core/guest_state.cpp`: the guest
+  register file (16 GPRs, index order matching the x86-64 ModRM/REX encoding),
+  `rip`, and a `Flags` struct with `pack_flags`/`unpack_flags` mapping to and
+  from architectural RFLAGS bits.
+- `include/hyperion/decoder.hpp`, `src/core/decoder.cpp`: an x86-64 decoder for
+  a documented subset — MOV/ADD/SUB/AND/OR/XOR/CMP/INC/DEC/PUSH/POP/JMP/Jcc
+  (rel8)/NOP/HLT — with REX, ModRM and SIB support for
+  `base + index*scale + disp`. Every unsupported byte sequence is **rejected**
+  with a specific `DecodeError` (`kUnsupportedPrefix`, `kUnsupportedModrm`,
+  `kUnknownOpcode`, `kTruncated`); it never guesses.
+- `include/hyperion/interpreter.hpp`, `src/core/interpreter.cpp`: a reference
+  interpreter over a `FlatMemory` region, implementing the ALU flag model (CF,
+  PF, AF, ZF, SF, OF), effective-address computation, and x86-64's 32-bit
+  zero-extension rule. This is the **correctness oracle** for Phase 3.
+- 38 new unit test cases: `test_guest_state.cpp` (7), `test_decoder.cpp` (19),
+  `test_interpreter.cpp` (12).
+
+### Added — hardware differential test
+- `tests/differential/test_differential.cpp`: compares the interpreter against
+  **real x86-64 hardware** by executing the same operation natively (inline
+  asm, flags captured through `pushfq`) and in the interpreter, across many
+  operand values and flag inputs. 8 cases. This is the Phase 2 acceptance test:
+  the interpreter is only trusted because an independent implementation agrees.
+- Added `HYPERION_SKIP`: the harness can now report a test as **skipped**
+  (not executed), separately from passing. On non-x86-64 hosts the differential
+  cases SKIP rather than falsely reporting coverage — on AArch64 the suite
+  reports `0 passed, 8 skipped`.
+
+### Fixed — two bugs found by the differential test
+- `alu::add` never set CF for 64-bit operands: the check `sum > mask` is
+  impossible when `mask == ~0`, so the carry test could not fire. Corrected to
+  `(sum < ua) || (sum > mask)`.
+- `Jcc` short jumps (`0x70..0x7F`) were decoded with a rel32 displacement
+  instead of rel8, producing wild branch targets. The rel32 forms are
+  `0x0F 0x80..0x8F` and are still unsupported.
+
+---
+
 ## [Unreleased] — Phase 1
 
 ### Added — one-line installer and `hyperion` command

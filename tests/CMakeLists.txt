@@ -13,10 +13,23 @@ target_link_libraries(hyperion_test_harness PUBLIC hyperion::core hyperion_warni
 add_executable(hyperion_unit_tests
     unit/test_version.cpp
     unit/test_host_probe.cpp
-    unit/test_bench_stats.cpp)
+    unit/test_bench_stats.cpp
+    unit/test_guest_state.cpp
+    unit/test_decoder.cpp
+    unit/test_interpreter.cpp)
 target_link_libraries(hyperion_unit_tests PRIVATE hyperion_test_harness)
 
 add_test(NAME unit.native COMMAND hyperion_unit_tests)
+
+# --- Differential tests (interpreter vs. real x86-64 hardware) ---------------
+#
+# Only meaningful on an x86-64 host. On other hosts (the AArch64 cross-test
+# path under qemu-user) the cases detect that and report a skip instead of a
+# false pass. It is a separate binary so its hardware dependence is explicit.
+add_executable(hyperion_differential_tests
+    differential/test_differential.cpp)
+target_link_libraries(hyperion_differential_tests PRIVATE hyperion_test_harness)
+add_test(NAME differential.native_vs_interpreter COMMAND hyperion_differential_tests)
 
 # --- Cross-architecture validation pipeline ---------------------------------
 #

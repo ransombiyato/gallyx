@@ -63,4 +63,28 @@ if(NOT run_result EQUAL 0)
     message(FATAL_ERROR "AArch64 tests failed (exit ${run_result}):\n${run_error}")
 endif()
 
+# Also run the hardware-differential binary. On AArch64 it cannot compare
+# against real x86-64, so every case must report SKIP (exit 0, zero passes).
+# This is a deliberate integrity check: it proves the suite does not claim
+# coverage it did not achieve on a non-x86-64 host.
+set(diff_binary "${HYPERION_CROSS_BINARY_DIR}/tests/hyperion_differential_tests")
+if(NOT EXISTS "${diff_binary}")
+    message(FATAL_ERROR "cross tests: differential binary not found at ${diff_binary}")
+endif()
+
+execute_process(
+    COMMAND ${HYPERION_QEMU} "${diff_binary}"
+    RESULT_VARIABLE diff_result
+    OUTPUT_VARIABLE diff_output
+    ERROR_VARIABLE diff_error)
+message(STATUS "AArch64 differential output:\n${diff_output}")
+if(NOT diff_result EQUAL 0)
+    message(FATAL_ERROR "AArch64 differential run failed (exit ${diff_result}):\n${diff_error}")
+endif()
+if(NOT diff_output MATCHES "0 passed")
+    message(FATAL_ERROR
+        "AArch64 differential suite reported a pass without an x86-64 oracle; "
+        "it must SKIP every case. Output:\n${diff_output}")
+endif()
+
 message(STATUS "cross-architecture validation pipeline OK")

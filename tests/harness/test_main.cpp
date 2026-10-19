@@ -60,6 +60,9 @@ int run_all(const char* program_name, int argc, char** argv) {
             tc.fn();
             std::printf("[ PASS ] %s\n", label.c_str());
             ++passed;
+        } catch (const SkipTest& e) {
+            std::printf("[ SKIP ] %s (%s)\n", label.c_str(), e.what());
+            ++skipped;
         } catch (const AssertionFailure& e) {
             std::printf("[ FAIL ] %s\n         %s\n", label.c_str(), e.what());
             ++failed;

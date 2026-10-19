@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Project HYPERION contributors
+//
+// x86-64 guest architectural state.
+//
+// This is the state the reference interpreter (Phase 2) and, later, the
+// AArch64 code generator (Phase 3) must agree on. It is deliberately a plain
+// data structure: no hidden laziness, no implicit normalisation, so that two
+// implementations can be compared field by field in a differential test.
+#ifndef HYPERION_GUEST_STATE_HPP
+#define HYPERION_GUEST_STATE_HPP
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+namespace hyperion {
+
+// The sixteen general-purpose registers, in x86-64 encoding order. The order
+// matters: it is the value stored in ModRM/REX fields, and indexing by it
+// keeps the decoder free of lookup tables.
+enum class Gpr : std::uint8_t {
+    kRax = 0,
+    kRcx = 1,
+    kRdx = 2,
+    kRbx = 3,
+    kRsp = 4,
+    kRbp = 5,
+    kRsi = 6,
+    kRdi = 7,
+    kR8 = 8,
+    kR9 = 9,
+    kR10 = 10,
+    kR11 = 11,
+    kR12 = 12,
+    kR13 = 13,
+    kR14 = 14,
+    kR15 = 15,
+};
+
+inline constexpr std::size_t kGprCount = 16;
+
+// Status flags. x86-64 RFLAGS holds more (IF, DF, IOPL, ...); this project
+// models only the flags that integer ALU operations produce. Keeping the set
+// explicit means "unmodelled" is visible rather than accidentally zero.
+struct Flags {
+    bool cf = false; // carry
+    bool pf = false; // parity (low byte)
+    bool af = false; // auxiliary carry (bit 4)
+    bool zf = false; // zero
+    bool sf = false; // sign (bit 63)
+    bool of = false; // signed overflow
+
+    friend bool operator==(const Flags& a, const Flags& b) {
+        return a.cf == b.cf && a.pf == b.pf && a.af == b.af && a.zf == b.zf && a.sf == b.sf &&
+               a.of == b.of;
+    }
+    friend bool operator!=(const Flags& a, const Flags& b) { return !(a == b); }
+};
+
+std::string to_string(const Flags& flags);
+
+// RFLAGS bit positions, for converting to and from the real architectural
+// encoding. Bit 1 is always set on a real x86-64 CPU; it is not a flag.
+inline constexpr std::uint64_t kRflagsBitCf = 1ULL << 0;
+inline constexpr std::uint64_t kRflagsBitPf = 1ULL << 2;
+inline constexpr std::uint64_t kRflagsBitAf = 1ULL << 4;
+inline constexpr std::uint64_t kRflagsBitZf = 1ULL << 6;
+inline constexpr std::uint64_t kRflagsBitSf = 1ULL << 7;
+inline constexpr std::uint64_t kRflagsBitOf = 1ULL << 11;
+inline constexpr std::uint64_t kRflagsBitReserved1 = 1ULL << 1;
+
+// Only the six modelled flags; every other bit is left zero. Use this when
+// comparing against a native RFLAGS captured from real hardware, and mask the
+// native value with kRflagsModelMask first.
+inline constexpr std::uint64_t kRflagsModelMask =
+    kRflagsBitCf | kRflagsBitPf | kRflagsBitAf | kRflagsBitZf | kRflagsBitSf | kRflagsBitOf;
+
+std::uint64_t pack_flags(const Flags& flags);
+Flags unpack_flags(std::uint64_t rflags);
+
+// Full guest architectural state.
+struct GuestState {
+    std::uint64_t gpr[kGprCount] = {};
+    std::uint64_t rip = 0;
+    Flags flags{};
+
+    std::uint64_t& reg(Gpr r) { return gpr[static_cast<std::size_t>(r)]; }
+    std::uint64_t reg(Gpr r) const { return gpr[static_cast<std::size_t>(r)]; }
+};
+
+std::string to_string(const GuestState& state);
+
+const char* to_string(Gpr r);
+
+} // namespace hyperion
+
+#endif // HYPERION_GUEST_STATE_HPP

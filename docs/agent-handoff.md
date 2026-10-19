@@ -18,7 +18,7 @@ no KVM. Development often happens on x86-64 Linux hosts.
 
 ## 2. Current state in one paragraph
 
-**Phase 0 is complete and Phase 1 is essentially complete.** The repository
+**Phase 0 and Phase 1 are complete. Phase 2 is nearly complete.** The repository
 builds clean with `-Werror`, has a dependency-free unit-test suite wired into
 CTest, and has a **verified cross-architecture validation pipeline** that
 cross-compiles the test suite to AArch64 and runs it under `qemu-user`. A host
@@ -26,8 +26,16 @@ capability probe measures architecture/page size/cache line/W^X rather than
 assuming them, and a benchmark harness reports repeated-run statistics with
 guest-execution metrics marked unavailable. The project installs with a single
 `curl | bash` command that builds, tests and installs a `hyperion` command.
-**There is no instruction decoding, interpretation, translation, or syscall
-layer.** Phase 2 (minimal instruction execution) is the next phase.
+
+**Phase 2 added the first executable core.** There is now a guest-state model
+(`include/hyperion/guest_state.hpp`), an **x86-64 decoder for a documented
+subset** that explicitly rejects everything else, and a **reference
+interpreter** that is the correctness oracle for Phase 3. The interpreter is
+validated by a **hardware differential test**: the same operations are executed
+natively on the x86-64 host and compared against the interpreter's results
+(`tests/differential/`). **There is still no AArch64 code generator, no
+translation cache and no syscall layer**; guest code runs one instruction at a
+time, in the interpreter only.
 
 **Scope was corrected on 2026-10-19.** Kernel/system-mode emulation is no longer
 an explicit non-goal (`DECISIONS.md` D-011). Kernel-level compatibility is in
@@ -35,6 +43,14 @@ scope for *investigation*; the user-mode translator remains the primary path.
 The kernel-as-process option was de-risked by measurement and by desk research
 (`docs/architecture-feasibility.md`). **No kernel-level code exists or should be
 written yet.**
+
+**Two real defects were found and fixed in Phase 2**, both by the differential
+test — 64-bit ADD carry was never set, and `Jcc` short jumps were decoded as
+rel32. A third issue was an *integrity* problem, not a code bug: the harness
+could not report a test as "not executed", so the hardware-differential cases
+would have claimed PASS on AArch64 while comparing nothing. `HYPERION_SKIP` was
+added; on AArch64 the suite now reports `0 passed, 8 skipped`. When a test
+cannot run, say so — never let it look like coverage.
 
 **A real defect was found and fixed in Phase 1.** BENCH-001: the benchmark
 harness reported a fabricated result because `-O2` eliminated the timed
@@ -54,8 +70,9 @@ usually broken, and this project requires evidence, not plausible numbers.
 scripts/bootstrap.sh        # toolchain (sudo); skip if already installed
 scripts/dev.sh bootstrap
 scripts/dev.sh build
-scripts/dev.sh test         # expect: 5/5 tests passed
-scripts/dev.sh cross-test   # expect: 2/2 tests passed incl. cross.aarch64_tests
+scripts/dev.sh test         # expect: 6/6 test entries passed
+scripts/dev.sh cross-test   # expect: 3/3 tests passed incl. cross.aarch64_tests
+./build/dev/tests/hyperion_differential_tests   # expect: 8 passed, 0 skipped (x86-64)
 ./build/dev/hyperion version
 ./build/dev/hyperion probe
 
@@ -90,20 +107,25 @@ Expected test names: `unit.native`, `bench.smoke`, `bench.methodology`,
 
 ## 5. Your next task
 
-**Phase 2 — Minimal instruction execution.** Smallest meaningful first step:
+**Finish Phase 2, then start Phase 3.** Guest state, the decoder, the reference
+interpreter and the hardware differential test already exist and pass. The
+remaining Phase 2 work is small:
 
-> Choose and document a small, explicit x86-64 instruction subset (registers,
-> flags, a handful of integer ALU ops, a few memory addressing forms, a few
-> control-flow forms), record it in `COMPATIBILITY.md`, then implement guest
-> state and decoding for it.
+1. **Document the subset in `COMPATIBILITY.md`.** It still describes Phase 0/1.
+   List every supported opcode, addressing form and operand size, and every
+   `DecodeError` case. This is the contract the Phase 3 code generator must
+   meet, so write it as a specification, not a summary.
+2. **Add a "run a program image" helper** so multi-instruction programs (with
+   branches and loops) can be executed by the interpreter and asserted on. The
+   stepping semantics already work; this is a convenience layer for tests.
 
-Then implement a reference interpreter for the subset, and differential-test it
-against an independent reference — for example, execute the same instruction
-encodings natively on the x86-64 development host and compare architectural
-state. That interpreter becomes the correctness oracle for Phase 3's code
-generator, so it is worth making trustworthy rather than fast.
+Then begin **Phase 3 — first native code generation**: emit AArch64 for the
+verified subset, validate generated code against the interpreter oracle, and
+reuse the existing `cross.aarch64_tests` pipeline to execute it under
+`qemu-user`. The interpreter must stay available as the oracle — do not delete
+it.
 
-Full Phase 2 acceptance criteria are in `ROADMAP.md`.
+Full Phase 2/3 acceptance criteria are in `ROADMAP.md`.
 
 **Do not** start Phase 3 (code generation) until Phase 2 exit criteria are met.
 **Do not** write kernel-level code — the tier is unvalidated on the reference

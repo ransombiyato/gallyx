@@ -68,11 +68,17 @@ qemu-aarch64 10.0.13, aarch64-linux-gnu-g++ 14.2.0.
 
 ### Remote verification (GitHub Actions)
 
-Phase 0 CI run `39244780989` (commit `460629a`): **conclusion `success`** -
-`build & test (gcc)`, `build & test (clang)`, `AArch64 cross tests (qemu-user)`,
-`ASan/UBSan`, `clang-format`.
+CI run `39250218783` on `main` (commit `3f15e48`): **conclusion `success`** —
+all five jobs passed: `build & test (gcc)`, `build & test (clang)`,
+`AArch64 cross tests (qemu-user)`, `ASan/UBSan`, `clang-format`.
+
+Earlier Phase 0 run `39244780989` (commit `460629a`) also passed.
 
 Pull request: <https://github.com/ransombiyato/hyperion-dbt/pull/1>
+
+One non-failing annotation appears on every job: `actions/checkout@v4` targets
+Node.js 20, which the runner now forces onto Node.js 24. It is a deprecation
+notice, not a failure; tracked as ENV-003 in `docs/known-issues.md`.
 
 Unit tests cover: version string well-formedness, build-summary content,
 host-probe architecture agreement with compile-time arch, plausible CPU/page-size

@@ -155,6 +155,11 @@ cases compared against real x86-64 hardware), `bench.smoke`,
 
 ### Remote verification (GitHub Actions)
 
+CI run `39268700143` on `main` (commit `6c70b87`, Phase 2): **conclusion
+`success`** — all five jobs passed: `clang-format` (7s), `AArch64 cross tests
+(qemu-user)` (41s), `ASan/UBSan` (30s), `build & test (clang)` (32s), `build &
+test (gcc)` (40s).
+
 CI run `39263916932` on `main` (commit `cadbc17`): **conclusion `success`** —
 all five jobs passed: `clang-format` (8s), `build & test (gcc)` (22s),
 `ASan/UBSan` (33s), `AArch64 cross tests (qemu-user)` (31s), `build & test

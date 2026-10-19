@@ -44,31 +44,47 @@ The machine-readable form is the `host` and `build` objects in the JSON output.
 2. Runs a **deterministic** integer calibration workload (`xorshift`-style
    mixing) with a known checksum, so a benchmark cannot silently measure a
    broken build.
-3. Reports elapsed time and nanoseconds per operation.
-4. Emits `guest_execution: { "available": false, "reason": ... }` until the
+3. Runs it `--repeats` times, **discards one warm-up sample**, and reports
+   min/p25/median/p75/max/mean/stddev plus `iqr_fraction` (the noise indicator).
+4. Guards against the optimiser eliminating the timed work: an `asm` barrier
+   keeps the computation between the clock reads, and a **plausibility check**
+   rejects a result faster than one clock cycle per iteration rather than
+   reporting it. See BENCH-001 in `docs/known-issues.md`.
+5. Exits non-zero if the checksum is unstable or the timing is implausible, so
+   a broken measurement fails the build instead of being published.
+6. Emits `guest_execution: { "available": false, "reason": ... }` until the
    translator exists.
 
 Run it:
 
 ```bash
-scripts/dev.sh bench --iterations 100000 --json
+scripts/dev.sh bench --iterations 1000000 --repeats 9 --json
 ```
 
 ### JSON schema
 
 ```json
 {
-  "schema": "hyperion.bench.host.v1",
+  "schema": "hyperion.bench.host.v2",
   "build": "hyperion 0.1.0 [release] gcc 14.2.0 c++202002",
   "host": { "arch": "...", "kernel": "...", "logical_cpus": 0,
             "page_size": 0, "cache_line_size": 0 },
-  "calibration": { "iterations": 0, "seconds": 0.0, "ns_per_op": 0.0,
-                   "checksum": "0x..." },
+  "calibration": {
+    "iterations": 0, "repeats_requested": 0, "warmup_discarded": 1,
+    "samples": 0,
+    "ns_per_op_min": 0.0, "ns_per_op_p25": 0.0, "ns_per_op_median": 0.0,
+    "ns_per_op_p75": 0.0, "ns_per_op_max": 0.0, "ns_per_op_mean": 0.0,
+    "ns_per_op_stddev": 0.0, "iqr_fraction": 0.0,
+    "checksum": "0x...", "checksum_stable": true,
+    "measurement_plausible": true
+  },
   "guest_execution": { "available": false, "reason": "..." }
 }
 ```
 
 The schema version is incremented on any breaking change to the JSON shape.
+`v1` reported a single sample and no spread; `v2` reports the repeated-run
+statistics the methodology requires.
 
 ---
 
@@ -77,17 +93,53 @@ The schema version is incremented on any breaking change to the JSON shape.
 ### 4.1 Host calibration — this development environment
 
 **Measured 2026-10-19.** Host: AMD EPYC 9B14 (x86-64, KVM guest), Debian 13
-(trixie), kernel 6.8.0-1055-gke, 4 logical CPUs, 15 GiB RAM, page size 4096 B,
-cache line 64 B. Build: `hyperion 0.1.0 [release] gcc 14.2.0`, RelWithDebInfo,
-`-O2`.
+(trixie), kernel 6.8.0-1055-gke, 4 logical CPUs, page size 4096 B, cache line
+64 B. Build: `hyperion 0.1.0 [release] gcc 14.2.0`, RelWithDebInfo, `-O2`.
 
-| Iterations | Elapsed (s) | ns/op | Checksum |
-| --- | --- | --- | --- |
-| 100,000 | 0.000209790 | 2.0979 | `0x9c29aa3c8d1b6423` |
+Command:
 
-These are **single-run calibration figures**, not a statistical benchmark, and
-they measure the harness on a virtualized CI-class host. They are recorded to
-prove the pipeline produces attributable output, not as a performance claim.
+```bash
+build/dev/benchmarks/hyperion_bench --iterations 1000000 --repeats 9 --json
+```
+
+| Statistic | ns/op |
+| --- | --- |
+| min | 2.055060 |
+| p25 | 2.056132 |
+| **median** | **2.056794** |
+| p75 | 2.079814 |
+| max | 2.138529 |
+| mean | 2.075143 |
+| stddev | 0.030362 |
+
+`samples: 8` (9 requested, 1 warm-up discarded) · `iqr_fraction: 0.0115` ·
+`checksum: 0x2d288a32c31afada` (stable) · `measurement_plausible: true`.
+
+The spread is **1.2 %** of the median, so this host is quiet enough for
+candidate-vs-baseline comparison at the granularity this project needs.
+
+#### Scaling validation
+
+A calibration figure is only trustworthy if it scales with the work requested.
+A workload that is too fast for the iteration count, or that the optimiser
+eliminated, would produce a constant total time. Measured:
+
+| Iterations | Median ns/op | Total (s) |
+| --- | --- | --- |
+| 1,000,000 | 2.0633 | 0.002063 |
+| 10,000,000 | 2.0575 | 0.020575 |
+| 100,000,000 | 2.0573 | 0.205731 |
+
+Total time scales linearly while ns/op stays flat, as it must for a real
+measurement. This check is what exposed **BENCH-001** (see
+`docs/known-issues.md`), where an earlier revision of this harness reported a
+fabricated ~0.00003 ns/op because the optimiser hoisted the timed workload out
+of the repeat loop. The regression is now guarded by the
+`bench.timing_not_eliminated` test.
+
+These are **calibration figures for the harness on a virtualized host**, not a
+performance claim about HYPERION. Nothing here says anything about translation
+throughput, because there is no translator yet.
 
 ### 4.2 Guest execution
 

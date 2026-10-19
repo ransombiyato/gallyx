@@ -12,7 +12,8 @@ target_link_libraries(hyperion_test_harness PUBLIC hyperion::core hyperion_warni
 # --- Native unit tests ------------------------------------------------------
 add_executable(hyperion_unit_tests
     unit/test_version.cpp
-    unit/test_host_probe.cpp)
+    unit/test_host_probe.cpp
+    unit/test_bench_stats.cpp)
 target_link_libraries(hyperion_unit_tests PRIVATE hyperion_test_harness)
 
 add_test(NAME unit.native COMMAND hyperion_unit_tests)

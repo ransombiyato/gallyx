@@ -53,6 +53,14 @@ guard against regression.
 
 ---
 
+## Benchmarking defects
+
+| ID | Issue | Status |
+| --- | --- | --- |
+| BENCH-001 | The Phase 1 benchmark harness reported a **fabricated** result. `-O2` hoisted the loop-invariant calibration call out of the repeat loop, so every timed region collapsed to ~0.00003 ns/op (~30 ps per iteration — far below one clock cycle) while the checksum stayed correct, so the error was silent. Detected by checking that total time scales with `--iterations`. | **Fixed.** An `asm` optimisation barrier now keeps the work between the clock reads, and the harness rejects an implausible timing (faster than one cycle per iteration) instead of reporting it. Regression test `bench.timing_not_eliminated`. |
+
+---
+
 ## Open questions
 
 | ID | Question | Impact |

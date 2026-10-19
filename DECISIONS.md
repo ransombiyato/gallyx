@@ -249,3 +249,48 @@ plainly in `COMPATIBILITY.md`. Either way, the user-mode path is unaffected.
 **Risks.** Android's seccomp and SELinux policies may block the `ptrace` and
 `mmap` behaviour UML requires. Performance of the syscall boundary is
 unmeasured. See the risk table in the feasibility document.
+
+---
+
+## D-013 — Build the core; reuse the oracles and the designs
+
+**Date:** 2026-10-19 · **Status:** accepted
+
+**Context.** Phase 1 required a prior-art survey before any engine code, so that
+HYPERION does not reimplement a solved problem, and does not vendor code it
+cannot legally or practically use. The survey is
+[`docs/prior-art.md`](docs/prior-art.md); all licence claims in it were verified
+against upstream licence files.
+
+The finding that forces this decision: **FEX-Emu already implements almost
+exactly the pipeline this project's roadmap describes** — x86-64 decoding, a
+custom IR, an interpreter, an AArch64 JIT, a code cache with a disk tier, a
+syscall layer and library thunks — under the permissive MIT licence, on the
+target architecture, and in production use. Box64 covers the same ground with a
+different technique (direct dynarec, no IR).
+
+**Decision.**
+
+1. **Build** the decoder, IR, reference interpreter, AArch64 code generator and
+   code cache. These are the stated research object; reusing them would remove
+   the project's reason to exist.
+2. **Reuse as external processes, never linked**: `qemu-x86_64` and
+   `qemu-aarch64` (differential-testing oracles), Zydis (independent decoder
+   opinion), LLVM/binutils tooling (object inspection). This keeps GPL-2.0 QEMU
+   out of the binary, per `THIRD_PARTY.md`.
+3. **Reuse as design references, read but not vendored**: FEX's IR and
+   `ThunkLibs` design, Box64's dynarec structure, dynarmic's AArch64 emitter.
+4. **Defer the library-forwarding decision to Phase 9**, where a proven design
+   is worth more than novelty.
+5. **State the positioning honestly**: HYPERION is an experimental research
+   platform for measuring translation and optimisation techniques. It is not a
+   FEX competitor, and users who want to run software should use FEX.
+
+**Consequences.** The project must not drift into "a worse FEX". The measurable
+value is the comparison of design choices and the AI-driven optimisation loop
+(Phase 8), not raw compatibility. Early phases stay small because nothing large
+is being vendored. The cost is that correctness oracles must be wired up
+deliberately rather than inherited.
+
+**Supersedes:** nothing. This is the Phase 1 reuse-vs-build boundary required by
+`ROADMAP.md` and anticipated by D-002.

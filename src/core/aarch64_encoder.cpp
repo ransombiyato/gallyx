@@ -149,6 +149,123 @@ void Encoder::cmp_imm(Width w, Reg rn, std::uint32_t imm12, bool shift12) {
          (imm12 << 10) | (rn << 5) | kXzr);
 }
 
+void Encoder::adds(Width w, Reg rd, Reg rn, Reg rm) {
+    validate_reg(rd);
+    validate_reg(rn);
+    validate_reg(rm);
+    // S = 1 (bit 29) makes this ADDS, setting N/Z/C/V.
+    emit(sf_of(w) | kAddSubRegBase | (1u << 29) | (rm << 16) | (rn << 5) | rd);
+}
+
+void Encoder::subs(Width w, Reg rd, Reg rn, Reg rm) {
+    validate_reg(rd);
+    validate_reg(rn);
+    validate_reg(rm);
+    emit(sf_of(w) | kAddSubRegBase | (1u << 30) | (1u << 29) | (rm << 16) | (rn << 5) | rd);
+}
+
+void Encoder::adds_imm(Width w, Reg rd, Reg rn, std::uint32_t imm12) {
+    validate_reg(rd);
+    validate_reg(rn);
+    validate_imm12(imm12);
+    emit(sf_of(w) | kAddSubImmBase | (1u << 29) | (imm12 << 10) | (rn << 5) | rd);
+}
+
+void Encoder::subs_imm(Width w, Reg rd, Reg rn, std::uint32_t imm12) {
+    validate_reg(rd);
+    validate_reg(rn);
+    validate_imm12(imm12);
+    emit(sf_of(w) | kAddSubImmBase | (1u << 30) | (1u << 29) | (imm12 << 10) | (rn << 5) | rd);
+}
+
+void Encoder::cset(Width w, Reg rd, Cond c) {
+    validate_reg(rd);
+    // CSET Rd, cond is CSINC Rd, XZR, XZR, invert(cond).
+    // CSINC: sf 0 0 11010100 Rm cond 0 1 Rn Rd.
+    const std::uint32_t inverted = (static_cast<std::uint32_t>(c) ^ 1u) & 0xFu;
+    emit(sf_of(w) | 0x1A800400u | (inverted << 12) | (kXzr << 16) | (kXzr << 5) | rd);
+}
+
+void Encoder::lsr_imm(Width w, Reg rd, Reg rn, unsigned shift) {
+    validate_reg(rd);
+    validate_reg(rn);
+    const unsigned width = (w == Width::k64) ? 64u : 32u;
+    if (shift >= width) {
+        throw std::invalid_argument("a64::Encoder: lsr shift out of range");
+    }
+    // LSR is UBFM with immr = shift and imms = width-1. UBFM: sf 10 100110 N immr imms Rn Rd.
+    const unsigned n = (w == Width::k64) ? 1u : 0u;
+    emit(sf_of(w) | 0x53000000u | (n << 22) | ((shift & 0x3Fu) << 16) |
+         (((width - 1) & 0x3Fu) << 10) | (rn << 5) | rd);
+}
+
+void Encoder::ubfx(Width w, Reg rd, Reg rn, unsigned lsb, unsigned width) {
+    validate_reg(rd);
+    validate_reg(rn);
+    const unsigned reg_width = (w == Width::k64) ? 64u : 32u;
+    if (width == 0 || width > reg_width || lsb + width > reg_width) {
+        throw std::invalid_argument("a64::Encoder: ubfx field out of range");
+    }
+    // UBFX is UBFM with immr = lsb and imms = lsb + width - 1.
+    const unsigned n = (w == Width::k64) ? 1u : 0u;
+    const unsigned immr = lsb;
+    const unsigned imms = lsb + width - 1;
+    emit(sf_of(w) | 0x53000000u | (n << 22) | ((immr & 0x3Fu) << 16) | ((imms & 0x3Fu) << 10) |
+         (rn << 5) | rd);
+}
+
+namespace {
+// LDR/STR (unsigned offset, scaled): size(2) 111 0 01 opc(2) imm12 Rn Rt.
+// The immediate is the byte offset divided by the access size.
+constexpr std::uint32_t kLoadStoreBase = 0x39000000u;
+} // namespace
+
+void Encoder::ldr(Width w, Reg rt, Reg rn, unsigned byte_offset) {
+    validate_reg(rt);
+    validate_reg(rn);
+    const unsigned size = (w == Width::k64) ? 3u : 2u;
+    const unsigned scale = (w == Width::k64) ? 8u : 4u;
+    if (byte_offset % scale != 0 || byte_offset / scale > 0xFFFu) {
+        throw std::invalid_argument(
+            "a64::Encoder: ldr offset must be a scaled multiple <= 4095*size");
+    }
+    // opc = 01 (zero-extending load).
+    emit((size << 30) | kLoadStoreBase | (1u << 22) | ((byte_offset / scale) << 10) | (rn << 5) |
+         rt);
+}
+
+void Encoder::str(Width w, Reg rt, Reg rn, unsigned byte_offset) {
+    validate_reg(rt);
+    validate_reg(rn);
+    const unsigned size = (w == Width::k64) ? 3u : 2u;
+    const unsigned scale = (w == Width::k64) ? 8u : 4u;
+    if (byte_offset % scale != 0 || byte_offset / scale > 0xFFFu) {
+        throw std::invalid_argument(
+            "a64::Encoder: str offset must be a scaled multiple <= 4095*size");
+    }
+    // opc = 00 for STR (store).
+    emit((size << 30) | kLoadStoreBase | ((byte_offset / scale) << 10) | (rn << 5) | rt);
+}
+
+void Encoder::ldrb(Reg rt, Reg rn, unsigned byte_offset) {
+    validate_reg(rt);
+    validate_reg(rn);
+    if (byte_offset > 0xFFFu) {
+        throw std::invalid_argument("a64::Encoder: ldrb offset out of range");
+    }
+    // size = 00, opc = 01 (zero-extending load) -> LDRB.
+    emit(kLoadStoreBase | (1u << 22) | (byte_offset << 10) | (rn << 5) | rt);
+}
+
+void Encoder::strb(Reg rt, Reg rn, unsigned byte_offset) {
+    validate_reg(rt);
+    validate_reg(rn);
+    if (byte_offset > 0xFFFu) {
+        throw std::invalid_argument("a64::Encoder: strb offset out of range");
+    }
+    emit(kLoadStoreBase | (byte_offset << 10) | (rn << 5) | rt);
+}
+
 void Encoder::mov_reg(Width w, Reg rd, Reg rm) {
     validate_reg(rd);
     validate_reg(rm);

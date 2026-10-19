@@ -60,7 +60,8 @@ add_library(hyperion_core
     src/core/decoder.cpp
     src/core/aarch64_encoder.cpp
     src/core/exec_mem.cpp
-    src/core/interpreter.cpp)
+    src/core/interpreter.cpp
+    src/core/translator.cpp)
 add_library(hyperion::core ALIAS hyperion_core)
 
 target_include_directories(hyperion_core

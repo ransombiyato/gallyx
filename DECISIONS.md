@@ -354,3 +354,29 @@ instruction cache. After `finalize()` the region is immutable through this API.
 The cost is that code cannot be patched in place, which matters later for
 self-modifying-code support (Phase 7) and will need a deliberate re-decision
 then. See also D-010.
+
+---
+
+## D-017 — Flags are recomputed in generated code, not delegated to the interpreter
+
+**Date:** Phase 3.
+**Status:** Accepted.
+
+**Context.** x86-64 flags (CF/PF/AF/ZF/SF/OF) are an awkward match for AArch64's
+NZCV. The tempting shortcut is to have generated code call back into the
+reference interpreter to compute flags. That would make the differential test
+circular: both paths would be "verified" by the same code.
+
+**Decision.** The translator computes every flag in emitted AArch64:
+
+- SF, ZF, CF, OF come directly from `ADDS`/`SUBS` + `CSET` (N, Z, C/borrow, V).
+- AF is `bit 4 of (a XOR b XOR result)`, an identity that holds for both ADD
+  and SUB (verified exhaustively for 32- and 64-bit operands).
+- PF is the inverted XOR-fold of the low byte's bits, computed with eight
+  `UBFX`/`ADD` steps.
+
+**Consequences.** The differential test is a genuine independent check: the
+generated code and the interpreter share no flag logic. The cost is that PF and
+AF are relatively expensive; Phase 5 replaces PF with a table or `CNT` lookup
+once performance is measured. This decision also means an unsupported flag
+combination must fail loudly rather than fall back to the interpreter.

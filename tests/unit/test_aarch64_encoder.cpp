@@ -198,3 +198,116 @@ HYPERION_TEST("aarch64_encoder", "imm12_overflow_is_rejected") {
     }
     HYPERION_CHECK(threw);
 }
+
+// --- Phase 3 additions: flag-setting, cset, bitfield, load/store ------------
+//
+// Reference dump for the words below (binutils 2.44, aarch64-linux-gnu-as):
+//
+//   adds x0, x1, x2         subs x6, x7, x8        adds x12, x13, #1
+//   adds w3, w4, w5         subs w9, w10, w11      subs x14, x15, #1
+//   cset w16, eq            cset w17, ne           cset w18, cs
+//   cset w19, cc            cset w20, mi           cset w21, vs
+//   lsr w22, w23, #4        lsr x24, x25, #4       ubfx w26, w27, #4, #1
+//   ldr x1, [x2, #8]        ldr w3, [x4, #4]       str x5, [x6, #16]
+//   str w7, [x8, #12]       ldrb w9, [x10, #1]     strb w11, [x12, #2]
+//   ldr x13, [x14]          str x15, [x16]
+
+HYPERION_TEST("aarch64_encoder", "flag_setting_arith_matches_binutils") {
+    Encoder e;
+    e.adds(Width::k64, 0, 1, 2);
+    e.adds(Width::k32, 3, 4, 5);
+    e.subs(Width::k64, 6, 7, 8);
+    e.subs(Width::k32, 9, 10, 11);
+    e.adds_imm(Width::k64, 12, 13, 1);
+    e.subs_imm(Width::k64, 14, 15, 1);
+
+    const std::vector<std::uint32_t> expected = {
+        0xAB020020u, // adds x0, x1, x2
+        0x2B050083u, // adds w3, w4, w5
+        0xEB0800E6u, // subs x6, x7, x8
+        0x6B0B0149u, // subs w9, w10, w11
+        0xB10005ACu, // adds x12, x13, #0x1
+        0xF10005EEu, // subs x14, x15, #0x1
+    };
+    HYPERION_CHECK(e.code() == expected);
+}
+
+HYPERION_TEST("aarch64_encoder", "cset_matches_binutils") {
+    Encoder e;
+    e.cset(Width::k32, 16, Cond::kEq);
+    e.cset(Width::k32, 17, Cond::kNe);
+    e.cset(Width::k32, 18, Cond::kCs);
+    e.cset(Width::k32, 19, Cond::kCc);
+    e.cset(Width::k32, 20, Cond::kMi);
+    e.cset(Width::k32, 21, Cond::kVs);
+
+    const std::vector<std::uint32_t> expected = {
+        0x1A9F17F0u, // cset w16, eq
+        0x1A9F07F1u, // cset w17, ne
+        0x1A9F37F2u, // cset w18, cs
+        0x1A9F27F3u, // cset w19, cc
+        0x1A9F57F4u, // cset w20, mi
+        0x1A9F77F5u, // cset w21, vs
+    };
+    HYPERION_CHECK(e.code() == expected);
+}
+
+HYPERION_TEST("aarch64_encoder", "bitfield_matches_binutils") {
+    Encoder e;
+    e.lsr_imm(Width::k32, 22, 23, 4);
+    e.lsr_imm(Width::k64, 24, 25, 4);
+    e.ubfx(Width::k32, 26, 27, 4, 1);
+
+    const std::vector<std::uint32_t> expected = {
+        0x53047EF6u, // lsr w22, w23, #4
+        0xD344FF38u, // lsr x24, x25, #4
+        0x5304137Au, // ubfx w26, w27, #4, #1
+    };
+    HYPERION_CHECK(e.code() == expected);
+}
+
+HYPERION_TEST("aarch64_encoder", "load_store_matches_binutils") {
+    Encoder e;
+    e.ldr(Width::k64, 1, 2, 8);
+    e.ldr(Width::k32, 3, 4, 4);
+    e.str(Width::k64, 5, 6, 16);
+    e.str(Width::k32, 7, 8, 12);
+    e.ldrb(9, 10, 1);
+    e.strb(11, 12, 2);
+    e.ldr(Width::k64, 13, 14, 0);
+    e.str(Width::k64, 15, 16, 0);
+
+    const std::vector<std::uint32_t> expected = {
+        0xF9400441u, // ldr x1, [x2, #8]
+        0xB9400483u, // ldr w3, [x4, #4]
+        0xF90008C5u, // str x5, [x6, #16]
+        0xB9000D07u, // str w7, [x8, #12]
+        0x39400549u, // ldrb w9, [x10, #1]
+        0x3900098Bu, // strb w11, [x12, #2]
+        0xF94001CDu, // ldr x13, [x14]
+        0xF900020Fu, // str x15, [x16]
+    };
+    HYPERION_CHECK(e.code() == expected);
+}
+
+HYPERION_TEST("aarch64_encoder", "unaligned_load_offset_is_rejected") {
+    Encoder e;
+    bool threw = false;
+    try {
+        e.ldr(Width::k64, 1, 2, 4); // 4 is not a multiple of the 8-byte access size
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    HYPERION_CHECK(threw);
+}
+
+HYPERION_TEST("aarch64_encoder", "ubfx_field_overflow_is_rejected") {
+    Encoder e;
+    bool threw = false;
+    try {
+        e.ubfx(Width::k32, 1, 2, 31, 2); // 31 + 2 > 32
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    HYPERION_CHECK(threw);
+}

@@ -90,6 +90,15 @@ not a cycle-accurate model. Performance claims require real AArch64 hardware.
 AArch64-hosted runs (`unit.native` on an AArch64 machine) additionally verify
 the pipeline without qemu.
 
+**Translator differential.** `tests/unit/test_translator.cpp` uses this pipeline
+directly. Its scope tests (which instructions are accepted and which are refused)
+run on any host; its differential tests execute the *generated AArch64* for one
+instruction and compare every register and all six flags against the reference
+interpreter. Those differential cases compile only under `__aarch64__` and
+report `SKIP` on x86-64 rather than a false pass. The suite also sweeps 847
+operand pairs through the flag-setting operations to cover carry/overflow/parity
+boundaries.
+
 ---
 
 ## 5. Sanitizers

@@ -54,25 +54,38 @@ AArch64 the differential suite now honestly reports **0 passed, 8 skipped**.
 
 | Work item | State |
 | --- | --- |
-| 1. AArch64 encoder/emitter | **Done** — `a64::Encoder`, 12 reference-verified cases |
+| 1. AArch64 encoder/emitter | **Done** — `a64::Encoder`, 18 reference-verified cases |
 | 2. Executable memory (W^X + I-cache clear) | **Done** — `ExecMem`, 3 cases |
 | 3. Run generated AArch64 code end to end | **Done** — `add` + summation loop pass under qemu |
-| 4. Guest-state marshalling for generated code | **Not started** |
-| 5. x86-64 → AArch64 instruction translation | **Not started** |
+| 4. Guest-state marshalling for generated code | **Done (increment 1)** — block signature `BlockResult block(GuestState*)` |
+| 5. x86-64 → AArch64 instruction translation | **Done for the register/immediate subset** |
 
 **What "done" means here, precisely.** `a64::Encoder` turns a small set of
 AArch64 operations into 32-bit words, and every encoding is checked against the
 output of GNU `as`/`objdump` rather than written from memory. `ExecMem`
 allocates read-write, is filled, then becomes read-execute (W^X) with an
-instruction-cache clear — see `DECISIONS.md` D-015, D-016. `test_exec_mem.cpp`
-then generates `add x0,x0,x1; ret` and a `1..n` summation loop, executes them,
-and checks the results; those two cases pass on AArch64 under `qemu-user` and
-report **skip** on x86-64 rather than a false pass.
+instruction-cache clear — see `DECISIONS.md` D-015, D-016.
 
-**Why Phase 3 is still open.** The generated code above is hand-written AArch64,
-not a translation of x86-64. No x86-64 instruction is lowered to AArch64 yet,
-and `GuestState` is not yet mapped onto AArch64 registers/memory. So the
-mechanism is proven but this is not yet a translator.
+`translate_instruction` (`include/hyperion/translator.hpp`) now lowers a decoded
+x86-64 instruction to a self-contained AArch64 block. Supported today: `mov`,
+`add`, `sub`, `and`, `or`, `xor`, `cmp`, `inc`, `dec`, `nop`, `hlt`, with 32/64-bit
+register or immediate operands. Guest registers stay in the `GuestState` struct
+in memory; the generated block loads and stores them (no register allocation
+yet). Every one of the six x86 flags is *computed in generated code* from AArch64
+NZCV plus two ALU identities, never delegated to the interpreter (D-017).
+
+`tests/unit/test_translator.cpp` runs the generated blocks under `qemu-user` on
+AArch64 and compares every register and all six flags against the interpreter —
+a fixed instruction set plus an 847-case operand sweep over carry/overflow/parity
+boundaries. On x86-64 the differential cases report **skip**, not a false pass.
+
+**Why Phase 3 is closed at this scope.** The Phase 3 exit criterion — decoded
+x86-64 instructions execute correctly through generated AArch64 code, validated
+under `qemu-user` — is met for the translated subset. What remains is
+*program-level* translation (loops, branches, block exits, a translation cache),
+which is exactly Phase 4. Control flow (`jmp`/`jcc`/`ret`), the stack
+(`push`/`pop`) and memory operands are refused explicitly with a `TranslateError`
+rather than miscompiled.
 
 
 ---
@@ -116,12 +129,20 @@ statistics and guest-execution metrics explicitly marked unavailable.
 
 Phase 2 added the first executable core: a **guest-state model**, an **x86-64
 decoder for a documented subset** that rejects everything else explicitly, and a
-**reference interpreter** that is now the correctness oracle for the future code
-generator. Correctness is anchored by a **differential test that compares the
-interpreter against real x86-64 hardware** (8 cases, thousands of comparisons
-across operand values and flag inputs). There is still **no AArch64 code
-generator, translation cache or syscall layer**; the interpreter is the only
-way to execute guest code, and only one instruction at a time.
+**reference interpreter** that is the correctness oracle. Correctness is anchored
+by a **differential test that compares the interpreter against real x86-64
+hardware** (8 cases, thousands of comparisons across operand values and flag
+inputs).
+
+Phase 3 added the first code generation: a **checked AArch64 encoder**
+(binutils-verified), **W^X executable memory**, and a **translator** that lowers
+a subset of decoded x86-64 instructions to generated AArch64. Generated blocks
+run under `qemu-user` in CI and are checked bit-for-bit against the interpreter,
+including all six x86 flags. The translator currently handles single instructions
+with register/immediate operands; there is still **no translation cache, no
+block chaining, no multi-instruction program translation and no syscall layer**.
+Control flow, the stack and memory operands are refused explicitly rather than
+miscompiled, and the interpreter remains the only complete execution path.
 
 The project also installs with a single command:
 
@@ -167,13 +188,14 @@ aarch64-linux-gnu-g++ 14.2.0.
 | Check | Command | Result |
 | --- | --- | --- |
 | Native build (`-Werror`) | `cmake --build build/dev` | PASS — no warnings |
-| Native tests | `ctest --test-dir build/dev` | PASS — **6/6** entries (75 unit cases + 8 differential) |
+| Native tests | `ctest --test-dir build/dev` | PASS — **6/6** entries (86 unit cases + 8 differential) |
 | Differential vs. hardware | `./build/dev/tests/hyperion_differential_tests` | PASS — 8/8 compared against real x86-64 |
 | Cross build | `cmake --build build/cross-test` | PASS — AArch64 binaries produced |
 | Cross tests under qemu | `ctest --test-dir build/cross-test` | PASS — **3/3** |
 | AArch64 differential | `qemu-aarch64 .../hyperion_differential_tests` | SKIP — 0 passed, **8 skipped** (no x86-64 oracle) |
-| AArch64 unit tests in qemu | `qemu-aarch64 .../hyperion_unit_tests` | PASS — 0 failed |
+| AArch64 unit tests in qemu | `qemu-aarch64 .../hyperion_unit_tests` | PASS — 85 passed, 0 failed |
 | Generated-code execution (AArch64) | `exec_mem.runs_generated_*` under qemu | PASS - `add` and a summation loop run correctly |
+| Translator vs. interpreter (AArch64) | `translator.differential_*` under qemu | PASS — 847 operand cases, all registers + all 6 flags match |
 | ASan/UBSan (clang) | `ctest --test-dir build/sanitize` | PASS — 6/6 |
 | Clang build + tests | `ctest --test-dir build/clang` | PASS — 6/6 |
 | Formatting | `clang-format --dry-run --Werror` | PASS — clean |
@@ -183,8 +205,8 @@ aarch64-linux-gnu-g++ 14.2.0.
 | UML feasibility (smoke) | `experiments/uml/run.sh smoke` | PASS — kernel boots unprivileged; all 6 namespace types OK |
 | UML feasibility (systemd) | `experiments/uml/run.sh systemd` | PASS — systemd 257 as PID 1 → `multi-user.target` |
 
-The native suite is 6 CTest entries: `unit.native` (one entry running **58**
-unit test cases across 8 files), `differential.native_vs_interpreter` (**8**
+The native suite is 6 CTest entries: `unit.native` (one entry running **86**
+unit test cases across 9 files), `differential.native_vs_interpreter` (**8**
 cases compared against real x86-64 hardware), `bench.smoke`,
 `bench.methodology`, `bench.timing_not_eliminated` and
 `bench.rejects_single_sample`.
@@ -246,34 +268,45 @@ stable-vs-noisy discrimination case).
 
 ## 4. Immediate next task
 
-**Phase 2 is complete. Phase 3 has begun: the code-generation mechanism is
-proven, but there is no translator yet.** `a64::Encoder` and `ExecMem` exist and
-generated AArch64 code runs under `qemu-user` in CI (see §0b).
+**Phase 3 is complete at its stated scope. The next task is Phase 4: turn
+single-instruction translation into a basic dynamic binary translator.**
 
-The single best next action is to **define the generated-code calling
-convention and marshall `GuestState`**, then lower the Phase 2 subset to it:
+What exists now: `a64::Encoder`, `ExecMem`, and `translate_instruction`, which
+lowers `mov`/`add`/`sub`/`and`/`or`/`xor`/`cmp`/`inc`/`dec`/`nop`/`hlt` with
+register/immediate operands to a `BlockResult block(GuestState*)` AArch64 block,
+verified bit-for-bit against the interpreter under `qemu-user` (see §0b).
 
-1. **Calling convention.** Decide which AArch64 registers hold which guest GPRs
-   for a translated block (a fixed mapping is fine to start), where the guest
-   `rip` and RFLAGS live, and how a block is entered and returned from. Write it
-   down in `ARCHITECTURE.md` before coding it.
-2. **Guest-state marshalling.** Emit the prologue/epilogue that loads guest
-   registers from `GuestState`, runs the block, and stores them back. Keep it
-   simple; optimisation is Phase 5.
-3. **Translate one instruction at a time.** Lower a decoded
-   `hyperion::Instruction` to `a64::Encoder` calls. For each instruction, run the
-   translated block and the interpreter on the same input `GuestState` and
-   require bit-identical results — extend `tests/differential/` or add a
-   translator-vs-interpreter differential. A mismatch must fail loudly; there is
-   no "close enough".
-4. Add encoder instructions only as the translator needs them, each with a
-   binutils-verified test (see `TESTING.md` §7).
+The single best next action is to **translate a basic block, not a single
+instruction**:
+
+1. **Basic-block formation.** Starting at a guest PC, decode instructions until
+   a terminator (`jmp`/`jcc`/`ret`/`hlt`) or an unsupported instruction. Record
+   the guest addresses of each instruction and of the block's exit(s).
+2. **Guest `rip` at block exit.** Make the generated block write the correct
+   next guest PC: the branch target for a taken `jmp`/`jcc`, the fall-through
+   address otherwise, and leave `rip` alone on `hlt`. This is where a block's
+   return value should also say *why* it stopped (fall-through vs. branch vs.
+   halt), so the dispatcher can find the next block.
+3. **Control-flow lowering.** `jcc` needs the x86 condition evaluated from the
+   modelled flags — reuse the same NZCV-derived logic already in the translator
+   rather than a new path. `ret` needs a guest stack, which needs a guest address
+   space; keep `ret`/`push`/`pop` refused until that exists.
+4. **A translation cache and dispatcher.** Keyed by guest PC, holding translated
+   blocks, with an explicit "unsupported" result that stops the run rather than
+   executing something wrong. Cache invalidation can be trivial (never invalidate)
+   for the first version, but the boundary must be documented.
+5. Extend `tests/unit/test_translator.cpp` with multi-instruction programs
+   (a counted loop, a conditional branch taken and not taken) and compare the
+   final `GuestState` against `run_program` from the interpreter.
+
+Add encoder instructions only as the translator needs them, each with a
+binutils-verified test (see `TESTING.md` §7).
 
 **The interpreter stays.** It is the oracle. Do not weaken it to make the
-translator look correct. Phase 3 exit criteria are in `ROADMAP.md`.
+translator look correct. Phase 4 exit criteria are in `ROADMAP.md`.
 
 Optional Phase 1 leftovers remain if wanted (unblocking the UML build, a CI
-performance-trend baseline), but neither blocks Phase 3.
+performance-trend baseline), but neither blocks Phase 4.
 
 ---
 

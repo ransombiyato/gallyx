@@ -11,10 +11,14 @@ Android 10, 8 GB RAM, no root and no KVM**. Development and testing also happen
 on other Linux hosts, so target-device compatibility is *measured, not
 assumed* — see [`docs/target-environment.md`](docs/target-environment.md).
 
-> **Status: Phase 0 (foundation).** The repository builds, its tests pass, and
-> the documentation is complete. **There is no instruction execution yet.**
-> No guest program can be run. See [`STATUS.md`](STATUS.md) for the exact
-> current state and [`ROADMAP.md`](ROADMAP.md) for the staged plan.
+> **Status: Phase 3 (first native code generation) complete at its stated
+> scope.** The repository builds, its tests pass, and a documented subset of
+> x86-64 instructions now executes through generated AArch64 code, verified
+> against the reference interpreter under `qemu-user`. **There is no
+> multi-instruction program execution, translation cache or syscall layer yet**,
+> and `hyperion run` still refuses to run anything. See
+> [`STATUS.md`](STATUS.md) for the exact current state and
+> [`ROADMAP.md`](ROADMAP.md) for the staged plan.
 >
 > **Scope note (2026-10-19).** Kernel/system-mode emulation is no longer ruled
 > out. A measured experiment showed a real Linux kernel running unprivileged
@@ -34,10 +38,19 @@ assumed* — see [`docs/target-environment.md`](docs/target-environment.md).
 | Host capability probe (arch, page size, cache line, W^X) | Implemented |
 | Host benchmark harness (JSON, repeated-run statistics) | Implemented (host-only) |
 | One-line installer + `hyperion` command | Implemented |
-| x86-64 decoder | **Not started** |
-| Guest execution / interpreter | **Not started** |
-| AArch64 code generator | **Not started** |
-| Linux syscall layer | **Not started** |
+| x86-64 decoder (documented subset) | Implemented, differential-tested |
+| Guest-state model + reference interpreter | Implemented, differential-tested |
+| AArch64 encoder (checked, binutils-verified) | Implemented |
+| W^X executable memory | Implemented |
+| x86-64 → AArch64 instruction translation | **Partial** — register/immediate ALU ops only |
+| Multi-instruction program translation / code cache | **Not started** (Phase 4) |
+| Linux syscall layer | **Not started** (Phase 6) |
+
+The translation row is deliberately narrow: the translator lowers a specific,
+listed set of instructions (`mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`,
+`inc`, `dec`, `nop`, `hlt` with register/immediate operands) and *refuses*
+everything else with an explicit error. Control flow, the stack and memory
+operands are not translated yet. See [`COMPATIBILITY.md`](COMPATIBILITY.md) §2.6.
 
 This table is the single source of truth for "what works". It is updated at
 every milestone. If a capability is not listed as implemented, assume it does
@@ -52,7 +65,8 @@ CMakeLists.txt          Top-level build definition
 CMakePresets.json       Standard configure/build/test presets
 cmake/toolchains/       AArch64 cross-compilation toolchain file
 include/hyperion/       Public headers
-src/core/               Core library (version, host probe)
+src/core/               Core library (host probe, decoder, interpreter,
+                        AArch64 encoder, executable memory, translator)
 src/cli/                Command-line entry point
 tests/harness/          Dependency-free C++ test harness
 tests/unit/             Unit tests
@@ -118,10 +132,11 @@ less install.sh && bash install.sh
 
 To remove it again: `bash install.sh --uninstall --prefix ~/.local`.
 
-> **`hyperion run` does not work yet, on purpose.** There is no translator, so
-> it prints `NOT IMPLEMENTED` and exits 2. A command that silently did nothing
-> would be worse than one that says so. `hyperion bench` measures the host
-> machine, not any emulation.
+> **`hyperion run` does not work yet, on purpose.** Single instructions can be
+> translated and executed, but there is no basic-block translation or code cache
+> (Phase 4), so a whole guest program cannot run. It prints `NOT IMPLEMENTED`
+> and exits 2. A command that silently did nothing would be worse than one that
+> says so. `hyperion bench` measures the host machine, not any emulation.
 
 ### Build from source
 
@@ -152,9 +167,10 @@ scripts/dev.sh cross-test
 ```
 
 This configures a second build tree with `aarch64-linux-gnu-g++`, runs the same
-test suite inside `qemu-aarch64`, and requires it to pass. Phase 3 onwards
-reuses this exact mechanism to validate generated AArch64 code against the
-x86-64 reference interpreter.
+test suite inside `qemu-aarch64`, and requires it to pass. Phase 3 already uses
+this exact mechanism to validate generated AArch64 code against the x86-64
+reference interpreter: `translator.differential_*` executes translated blocks
+under `qemu-user` and compares every register and flag against the interpreter.
 
 See [`TESTING.md`](TESTING.md) for the full guide.
 

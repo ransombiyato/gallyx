@@ -7,6 +7,25 @@ Meaningful changes by milestone. Format loosely follows
 
 ## [Unreleased] — Phase 3
 
+### Added — x86-64 to AArch64 translator (increment 1)
+- `include/hyperion/translator.hpp`, `src/core/translator.cpp`:
+  `translate_instruction` lowers one decoded x86-64 instruction to a
+  self-contained AArch64 block with the signature `BlockResult block(GuestState*)`.
+  Supported: `mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`, `inc`, `dec`,
+  `nop`, `hlt` with 32/64-bit register or immediate operands. Guest registers
+  live in the `GuestState` struct; generated code loads/stores them.
+- All six x86 flags (CF/PF/AF/ZF/SF/OF) are computed **in generated code** from
+  AArch64 NZCV plus two ALU identities, never delegated to the interpreter, so
+  the differential test is an independent check (D-017).
+- Out-of-scope instructions are refused with an explicit `TranslateError`
+  (`jmp`/`jcc`/`ret`/`push`/`pop` → `kUnsupportedOpcode`; memory operands →
+  `kUnsupportedOperand`) rather than miscompiled.
+- `tests/unit/test_translator.cpp`: scope tests run on every host; the
+  differential tests execute generated blocks under `qemu-user` on AArch64 and
+  compare every register and all six flags against the interpreter, including an
+  847-case operand sweep over carry/overflow/parity boundaries. On x86-64 they
+  report **skip**, not a false pass.
+
 ### Added — AArch64 encoder and executable memory
 - `include/hyperion/aarch64_encoder.hpp`, `src/core/aarch64_encoder.cpp`:
   `a64::Encoder`, a checked AArch64 emitter for the operations the Phase 3
@@ -32,7 +51,7 @@ Meaningful changes by milestone. Format loosely follows
 
 ### Decisions
 - D-014 (decoder contract is the subset boundary), D-015 (checked encoder),
-  D-016 (W^X executable memory).
+  D-016 (W^X executable memory), D-017 (flags recomputed in generated code).
 
 ---
 

@@ -142,7 +142,11 @@ read-modify-write for partial widths; later phases may track "known high bits".
 - **Tier 0 (Phase 2):** reference interpreter. Always available, used as the
   differential oracle for everything above it.
 - **Tier 1 (Phase 3–4):** straightforward AArch64 code generation, one
-  translation block per basic block, minimal register allocation.
+  translation block per basic block, minimal register allocation. The first
+  increment (Phase 3) translates single instructions to a self-contained
+  `BlockResult block(GuestState*)` block; the guest registers live in memory and
+  are loaded/stored by the generated code, and every x86 flag is recomputed from
+  AArch64 NZCV (D-017).
 - **Tier 2 (Phase 5+):** optimized blocks for hot paths — better register
   allocation, constant propagation, dead-code elimination, block chaining.
 
@@ -207,14 +211,15 @@ vendored until that analysis is committed.
 
 | Directory | Component | Phase introduced |
 | --- | --- | --- |
-| `src/core/` | all core code today: version, host probe, guest state, decoder, interpreter, AArch64 encoder, executable memory | 0–3 |
+| `src/core/` | all core code today: version, host probe, guest state, decoder, interpreter, AArch64 encoder, executable memory, translator | 0–3 |
 | `src/cli/` | user interface | 0 |
 | `tests/`, `benchmarks/` | verification | 0 |
 
 **Reality note.** The component table in §2 names the logical components; the
 tree currently keeps all of them in `src/core/` (`decoder.cpp`,
-`interpreter.cpp`, `aarch64_encoder.cpp`, `exec_mem.cpp`). Splitting into
-`src/decoder/`, `src/codegen/` etc. was the original plan but was not done, and
-the project does not pretend otherwise. The split is deferred until the
-translator lands and the boundaries are exercised enough to place the cut well;
-until then a flat tree is easier to navigate than a premature one.
+`interpreter.cpp`, `aarch64_encoder.cpp`, `exec_mem.cpp`, `translator.cpp`).
+Splitting into `src/decoder/`, `src/codegen/` etc. was the original plan but was
+not done, and the project does not pretend otherwise. The split is deferred
+until the translator grows beyond single instructions and the boundaries are
+exercised enough to place the cut well; until then a flat tree is easier to
+navigate than a premature one.

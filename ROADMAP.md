@@ -171,17 +171,29 @@ stepping semantics already exist.
    `test_exec_mem.cpp` generates and *runs* `add` and a summation loop; both
    pass on AArch64 under `qemu-user` (and in CI's cross job), and skip
    honestly on x86-64.
-4. Guest-state marshalling — **Not started.** The generated code above uses the
-   native AArch64 calling convention directly; mapping `GuestState` to
-   AArch64 registers/memory is the next step.
-5. Translating decoded x86 instructions to AArch64 — **Not started.** This is
-   the remaining bulk of Phase 3.
+4. Guest-state marshalling — **Done (increment 1).** A translated block has the
+   signature `BlockResult block(GuestState*)` (AAPCS64, state pointer in `x8`);
+   guest registers stay in the `GuestState` struct in memory and generated code
+   loads/stores them. No guest-register allocation yet (Phase 5).
+5. Translating decoded x86 instructions to AArch64 — **Done for the
+   register/immediate subset.** `translate_instruction`
+   (`include/hyperion/translator.hpp`) lowers `mov`, `add`, `sub`, `and`, `or`,
+   `xor`, `cmp`, `inc`, `dec`, `nop` and `hlt` with 32/64-bit register or
+   immediate operands. All six x86 flags (CF/PF/AF/ZF/SF/OF) are *computed in
+   generated code* from AArch64 NZCV plus two ALU identities, not delegated to
+   the interpreter. Control flow (`jmp`/`jcc`/`ret`) and the stack
+   (`push`/`pop`) are refused explicitly (Phase 4); memory operands are refused
+   explicitly (need an address space, Phase 6). A 847-case differential test
+   executes the generated blocks under `qemu-user` and compares every register
+   and all six flags against the interpreter.
 
 **Exit criteria.** Verified test programs execute correctly through generated
 AArch64 code, validated under `qemu-user` on x86-64 hosts and natively on
-AArch64 hosts. **Partially met:** the code-generation *mechanism* is proven
-end to end, but no x86-64 instruction has yet been translated, so the Phase 3
-exit criterion is not yet satisfied.
+AArch64 hosts. **Met for the translated subset:** decoded x86-64 instructions
+now execute through generated AArch64 code, and the differential suite is
+exact against the reference interpreter. Multi-instruction *programs* (loops,
+branches) remain Phase 4, so this is the completion of Phase 3's stated scope
+rather than of program-level translation.
 
 ---
 

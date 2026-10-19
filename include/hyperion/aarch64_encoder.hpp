@@ -81,6 +81,32 @@ public:
     void cmp(Width w, Reg rn, Reg rm);
     void cmp_imm(Width w, Reg rn, std::uint32_t imm12, bool shift12 = false);
 
+    // --- flag-setting arithmetic (ADDS/SUBS) -----------------------------
+    // The x86 ALU flags are derived from these: ADDS/SUBS set N,Z,C,V in the
+    // AArch64 condition flags, and the translator reads them back with CSET.
+    void adds(Width w, Reg rd, Reg rn, Reg rm);
+    void subs(Width w, Reg rd, Reg rn, Reg rm);
+    void adds_imm(Width w, Reg rd, Reg rn, std::uint32_t imm12);
+    void subs_imm(Width w, Reg rd, Reg rn, std::uint32_t imm12);
+
+    // --- conditional set (CSINC alias) -----------------------------------
+    // CSET Rd, cond  ->  Rd = (cond ? 1 : 0). Used to materialise x86 flags.
+    void cset(Width w, Reg rd, Cond c);
+
+    // --- bitfield (UBFM aliases) -----------------------------------------
+    // LSR Rd, Rn, #shift. UBFX Rd, Rn, #lsb, #width (extract a bit field).
+    void lsr_imm(Width w, Reg rd, Reg rn, unsigned shift);
+    void ubfx(Width w, Reg rd, Reg rn, unsigned lsb, unsigned width);
+
+    // --- loads/stores (unsigned offset, scaled by access size) -----------
+    // LDR/STR for 32- and 64-bit access, LDRB/STRB for 8-bit. `byte_offset`
+    // must be a non-negative multiple of the access size, at most 4095*size.
+    // These are how generated code reads and writes GuestState.
+    void ldr(Width w, Reg rt, Reg rn, unsigned byte_offset);
+    void str(Width w, Reg rt, Reg rn, unsigned byte_offset);
+    void ldrb(Reg rt, Reg rn, unsigned byte_offset);
+    void strb(Reg rt, Reg rn, unsigned byte_offset);
+
     // --- moves -----------------------------------------------------------
     // Register move, as an ORR with the zero register (the canonical MOV
     // alias). A 32-bit move zero-extends into the 64-bit register, matching

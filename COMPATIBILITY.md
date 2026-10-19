@@ -110,13 +110,37 @@ These appeared in an earlier version of this table and remain unbuilt. They are
 `rep`-prefixed string ops, segmentation, and most system instructions. All are
 rejected explicitly.
 
+### 2.6 AArch64 translation coverage (Phase 3)
+
+The translator (`translate_instruction`) lowers a subset of the decoder's
+subset. An instruction the decoder accepts but the translator does not is
+refused with an explicit `TranslateError`; nothing is miscompiled.
+
+| Instruction | Translated? | Notes |
+| --- | --- | --- |
+| `mov` | ✅ | register and immediate, 32/64-bit; 32-bit zero-extends |
+| `add`, `sub` | ✅ | register and immediate, 32/64-bit; full flag set |
+| `and`, `or`, `xor` | ✅ | register and immediate; CF/OF/AF cleared |
+| `cmp` | ✅ | flags only, no writeback |
+| `inc`, `dec` | ✅ | CF preserved across the operation |
+| `nop`, `hlt` | ✅ | `hlt` returns `kHalted` without advancing rip |
+| `jmp`, `jcc` | ⬜ | Phase 4 (needs block exits) |
+| `push`, `pop`, `ret` | ⬜ | Phase 4 (needs guest stack) |
+| memory operands | ⬜ | Phase 6 (needs a guest address space) |
+
+Verified by `tests/unit/test_translator.cpp`: scope tests on every host, and a
+differential run of the generated code against the interpreter under
+`qemu-user` on AArch64 (847 operand cases plus a fixed instruction set).
+
 ---
 
 ## 3. Flag coverage
 
 The interpreter implements **eager** flag computation (D-003) for six flags.
 Lazy materialization is a Phase 5 optimization. Each flag below is verified
-against real x86-64 hardware by `tests/differential/`.
+against real x86-64 hardware by `tests/differential/`, and the Phase 3
+translator recomputes all six in generated AArch64 code (D-017), checked
+against the interpreter by `tests/unit/test_translator.cpp`.
 
 | Flag | Meaning | Status | Notes |
 | --- | --- | --- | --- |

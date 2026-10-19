@@ -246,6 +246,13 @@ changes failing correctness tests or regressing performance.
   ~12.8× faster than the reference interpreter (38.4 vs 491.9 ns per guest
   instruction, IQR < 2%). Full record and caveats in `BENCHMARKS.md` §4.2. This
   is a *relative* signal between Hyperion's own tiers, not a hardware claim.
+- ✅ **Dead-code elimination, part 1: parity fast path.** `emit_parity` XOR-folds
+  with shifted `EOR` (19 → 6 emitted instructions). Generated code 904 → 644
+  bytes (−28.8%, deterministic); Tier 1 −17.5% in an interleaved A/B.
+  `BENCHMARKS.md` §4.2.1.
+- ✅ **Dead-code elimination, part 2: per-instruction `rip` stores.** Blocks write
+  `rip` once at exit instead of after every body instruction. Generated code
+  644 → 584 bytes (−9.3%); Tier 1 ≈ −4%. `BENCHMARKS.md` §4.2.2.
 - ⬜ Register allocation.
 - ⬜ Block chaining.
 - ⬜ Lower-overhead dispatch.

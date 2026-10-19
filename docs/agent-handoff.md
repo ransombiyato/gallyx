@@ -18,7 +18,9 @@ no KVM. Development often happens on x86-64 Linux hosts.
 
 ## 2. Current state in one paragraph
 
-**Phases 0–4 are complete; Phase 5 has started with its baseline recorded.** The repository builds clean with `-Werror`, has a dependency-free
+**Phases 0–4 are complete; Phase 5 (performance optimization) is under way, with
+its baseline recorded and the first optimization (parity fast path) accepted and
+measured.** The repository builds clean with `-Werror`, has a dependency-free
 unit-test suite wired into CTest, and has a **verified cross-architecture
 validation pipeline** that cross-compiles the test suite to AArch64 and runs it
 under `qemu-user`. A host capability probe measures architecture/page size/cache
@@ -163,19 +165,26 @@ exist and pass.
    (`benchmarks/tier_bench.cpp`, `scripts/bench-tier-qemu.sh`, BENCHMARKS.md
    §4.2): Tier 1 = 38.4 ns/guest-ins vs Tier 0 = 491.9 ns/guest-ins (ratio
    0.078) on a fixed loop under `qemu-user`.
-4. **Next: the first optimization experiment — register allocation.** Every
-   guest instruction is currently a load/compute/store of `GuestState`. Start by
-   keeping the most-used guest registers in AArch64 registers *within* a block
-   (load at entry, spill at exit). Keep the block signature and the
-   authoritative-`rip` rule unchanged. Require the whole differential suite to
-   pass, then re-run `scripts/bench-tier-qemu.sh` and record before/after in
-   BENCHMARKS.md with an accept/reject verdict. Never change the baseline to
-   make a candidate look good.
-5. **Keep the oracle.** Run each multi-instruction program through both the
+4. ~~Optimization 1: parity (PF) fast path~~ **Done & measured.** `emit_parity`
+   now XOR-folds with shifted `EOR` (19 → 6 emitted instructions). Interleaved
+   A/B against the pre-change commit: generated code **904 → 644 bytes
+   (−28.8%)**, Tier 1 wall time **−17.5%** (BENCHMARKS.md §4.2.1). Full
+   differential suite green under `qemu-aarch64`. A deterministic code-size
+   guard (`translator.translated_code_size_is_bounded`) now fails CI on an
+   accidental code-size blow-up.
+5. **Next: register allocation (start small).** Every guest instruction is still
+   a load/compute/store of `GuestState`. Keep the most-used guest registers in
+   AArch64 registers *within* a block (load at entry, spill at exit). Keep the
+   block signature and the authoritative-`rip` rule unchanged. Require the whole
+   differential suite to pass, then re-run `scripts/bench-tier-qemu.sh` and
+   record before/after in BENCHMARKS.md with an accept/reject verdict. Never
+   change the baseline to make a candidate look good. Add a deterministic guard
+   for whatever the change should move, since `qemu-user` timing is noisy.
+6. **Keep the oracle.** Run each multi-instruction program through both the
    generated blocks and the interpreter's `run_program`, and require the final
    `GuestState` to match bit-for-bit. A mismatch must fail loudly; there is no
    tolerance for "close enough".
-6. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
+7. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
    pipeline builds the tests for AArch64, runs them under `qemu-user`, and runs
    the CLI smoke test with `HYPERION_EMULATOR`, so generated code is exercised in
    CI without the target device.

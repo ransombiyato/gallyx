@@ -41,6 +41,7 @@ struct CachedBlock {
     std::uint64_t start = 0;                 // first guest PC covered
     std::uint64_t target = 0;                // predicted successor (see BlockTranslation)
     std::size_t guest_instruction_count = 0; // instructions retired per execution
+    std::size_t code_bytes = 0;              // size of the generated AArch64 code
 };
 
 // The translation cache and dispatcher.
@@ -64,6 +65,12 @@ public:
     // Number of times a guest PC was translated (diagnostics/tests). Equal to
     // the number of cached blocks; exposed separately to make the intent clear.
     std::size_t translation_count() const { return blocks_.size(); }
+
+    // Total bytes of generated AArch64 code across all cached blocks. A
+    // deterministic proxy for translation quality: it changes only when the
+    // code generator changes, unlike timing measurements, so it makes a stable
+    // regression guard (see BENCHMARKS.md).
+    std::size_t total_code_bytes() const;
 
 private:
     // Translate the block starting at `pc`, or return nullptr if the

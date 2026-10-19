@@ -162,6 +162,11 @@ int main(int argc, char** argv) {
     bool tier1_ok = true;
     std::string tier1_reason = "host cannot execute generated AArch64 code";
 
+    // Translation size for this workload, captured once outside the timed loop
+    // so it can never affect the measurement. Deterministic, unlike timing.
+    std::size_t tier1_code_bytes = 0;
+    std::size_t tier1_block_count = 0;
+
     // One discarded warm-up run, then `repeats` timed samples.
     for (std::uint32_t i = 0; i <= opts.repeats; ++i) {
         const bool warmup = (i == 0);
@@ -197,6 +202,19 @@ int main(int argc, char** argv) {
 
     const hyperion::SampleSummary s0 = hyperion::summarize(tier0_ns);
     const hyperion::SampleSummary s1 = hyperion::summarize(tier1_ns);
+
+    if (tier1_available) {
+        FlatMemory mem(kBase, 4096);
+        std::memcpy(mem.data(), kLoopProgram.data(), kLoopProgram.size());
+        GuestState st;
+        st.rip = kBase;
+        st.reg(Gpr::kRax) = 1;
+        st.reg(Gpr::kRcx) = opts.iterations;
+        hyperion::TranslationCache cache;
+        cache.run(mem, st);
+        tier1_code_bytes = cache.total_code_bytes();
+        tier1_block_count = cache.block_count();
+    }
     const auto per_step = [&](double ns) {
         return steps == 0 ? 0.0 : ns / static_cast<double>(steps);
     };
@@ -233,6 +251,8 @@ int main(int argc, char** argv) {
             std::printf("    \"ns_median\": %.3f,\n", s1.median);
             std::printf("    \"ns_per_guest_instruction\": %.6f,\n", per_step(s1.median));
             std::printf("    \"iqr_fraction\": %.6f,\n", s1.iqr_fraction);
+            std::printf("    \"blocks\": %zu,\n", tier1_block_count);
+            std::printf("    \"generated_code_bytes\": %zu,\n", tier1_code_bytes);
             std::printf("    \"tier1_over_tier0_ratio\": %.6f\n", ratio);
         } else {
             std::printf("    \"reason\": \"%s\"\n", tier1_reason.c_str());

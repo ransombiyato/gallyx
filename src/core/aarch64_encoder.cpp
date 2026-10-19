@@ -120,6 +120,23 @@ void Encoder::eor(Width w, Reg rd, Reg rn, Reg rm) {
     emit(sf_of(w) | kLogicalRegBase | (2u << 29) | (rm << 16) | (rn << 5) | rd);
 }
 
+void Encoder::eor_shifted(Width w, Reg rd, Reg rn, Reg rm, Shift shift, unsigned amount) {
+    validate_reg(rd);
+    validate_reg(rn);
+    validate_reg(rm);
+    // Logical (shifted register): bits 23-22 select the shift type and bits
+    // 15-10 hold the shift amount (5 bits for 32-bit, 6 for 64-bit operands).
+    // Bit 21 is N and must be 0 here: N=1 selects the *inverted* (AND-family)
+    // form, and binutils encodes `eor Xd, Xn, Xm, LSR #n` with N=0.
+    const unsigned max_amount = (w == Width::k64) ? 63u : 31u;
+    if (amount > max_amount) {
+        throw std::invalid_argument("a64::Encoder: shift amount out of range");
+    }
+    const std::uint32_t shift_field = static_cast<std::uint32_t>(shift) << 22;
+    emit(sf_of(w) | kLogicalRegBase | (2u << 29) | shift_field |
+         (static_cast<std::uint32_t>(rm) << 16) | (amount << 10) | (rn << 5) | rd);
+}
+
 void Encoder::add_imm(Width w, Reg rd, Reg rn, std::uint32_t imm12, bool shift12) {
     validate_reg(rd);
     validate_reg(rn);

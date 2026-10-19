@@ -57,6 +57,9 @@ const char* to_string(Cond c);
 // Operand width selector for the data-processing instructions here.
 enum class Width : std::uint8_t { k32, k64 };
 
+// Shift selector for the shifted-register forms of the logical instructions.
+enum class Shift : std::uint8_t { kLsl = 0, kLsr = 1, kAsr = 2, kRor = 3 };
+
 using Label = std::size_t;
 
 // An in-memory sequence of AArch64 instructions with label-based branches.
@@ -68,6 +71,9 @@ public:
     void and_(Width w, Reg rd, Reg rn, Reg rm);
     void orr(Width w, Reg rd, Reg rn, Reg rm);
     void eor(Width w, Reg rd, Reg rn, Reg rm);
+    // EOR with a shifted register: Rd = Rn ^ (Rm shifted by `amount`).
+    // The shift amount is 0..31 for 32-bit and 0..63 for 64-bit operands.
+    void eor_shifted(Width w, Reg rd, Reg rn, Reg rm, Shift shift, unsigned amount);
 
     // --- data processing (immediate) ------------------------------------
     // ADD/SUB with a 12-bit unsigned immediate, optionally shifted left by 12.

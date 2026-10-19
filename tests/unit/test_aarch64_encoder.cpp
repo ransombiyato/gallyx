@@ -32,6 +32,7 @@
 
 using hyperion::a64::Cond;
 using hyperion::a64::Encoder;
+using hyperion::a64::Shift;
 using hyperion::a64::Width;
 
 HYPERION_TEST("aarch64_encoder", "data_processing_register_matches_binutils") {
@@ -264,6 +265,56 @@ HYPERION_TEST("aarch64_encoder", "bitfield_matches_binutils") {
         0x5304137Au, // ubfx w26, w27, #4, #1
     };
     HYPERION_CHECK(e.code() == expected);
+}
+
+HYPERION_TEST("aarch64_encoder", "eor_shifted_matches_binutils") {
+    Encoder e;
+    e.eor_shifted(Width::k64, 11, 9, 9, Shift::kLsr, 4);
+    e.eor_shifted(Width::k64, 11, 11, 11, Shift::kLsr, 2);
+    e.eor_shifted(Width::k64, 11, 11, 11, Shift::kLsr, 1);
+    e.eor_shifted(Width::k32, 11, 9, 9, Shift::kLsr, 4);
+    e.eor_shifted(Width::k32, 11, 11, 11, Shift::kLsr, 2);
+    e.eor_shifted(Width::k32, 11, 11, 11, Shift::kLsr, 1);
+    e.eor_shifted(Width::k64, 3, 1, 2, Shift::kLsl, 0); // plain eor x3, x1, x2
+    // All four shift types, so a wrong shift-field encoding cannot slip through.
+    e.eor_shifted(Width::k64, 5, 6, 7, Shift::kLsl, 3);
+    e.eor_shifted(Width::k64, 5, 6, 7, Shift::kAsr, 3);
+    e.eor_shifted(Width::k64, 5, 6, 7, Shift::kRor, 3);
+    e.eor_shifted(Width::k32, 5, 6, 7, Shift::kRor, 3);
+
+    const std::vector<std::uint32_t> expected = {
+        0xCA49112Bu, // eor x11, x9, x9, lsr #4
+        0xCA4B096Bu, // eor x11, x11, x11, lsr #2
+        0xCA4B056Bu, // eor x11, x11, x11, lsr #1
+        0x4A49112Bu, // eor w11, w9, w9, lsr #4
+        0x4A4B096Bu, // eor w11, w11, w11, lsr #2
+        0x4A4B056Bu, // eor w11, w11, w11, lsr #1
+        0xCA020023u, // eor x3, x1, x2
+        0xCA070CC5u, // eor x5, x6, x7, lsl #3
+        0xCA870CC5u, // eor x5, x6, x7, asr #3
+        0xCAC70CC5u, // eor x5, x6, x7, ror #3
+        0x4AC70CC5u, // eor w5, w6, w7, ror #3
+    };
+    HYPERION_CHECK(e.code() == expected);
+}
+
+HYPERION_TEST("aarch64_encoder", "eor_shifted_amount_overflow_is_rejected") {
+    Encoder e;
+    bool threw = false;
+    try {
+        e.eor_shifted(Width::k32, 1, 2, 3, Shift::kLsr, 32); // 32 > 31 for 32-bit
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    HYPERION_CHECK(threw);
+
+    threw = false;
+    try {
+        e.eor_shifted(Width::k64, 1, 2, 3, Shift::kLsr, 64); // 64 > 63 for 64-bit
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    HYPERION_CHECK(threw);
 }
 
 HYPERION_TEST("aarch64_encoder", "load_store_matches_binutils") {

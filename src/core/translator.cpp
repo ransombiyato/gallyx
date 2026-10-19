@@ -69,16 +69,14 @@ void store_gpr(a64::Encoder& e, a64::Reg src, Gpr r) {
 // Parity of the low byte of `src`, into `dst` (0 = odd, 1 = even).
 //
 // x86 PF is set when the number of set bits in the low byte is even. XOR-folding
-// the eight bits gives the odd/even bit; inverting it gives PF. We fold by
-// summing the bits (the low bit of the sum is their XOR) and then XOR with 1.
-// This is deliberately simple; Phase 5 can replace it with a table or CNT.
+// the eight bits gives the odd/even bit; inverting it gives PF. Three shifted
+// XORs fold 8 -> 4 -> 2 -> 1 bits, then a UBFX isolates the bit and an XOR with
+// 1 inverts it. This replaces a 16-instruction per-bit fold plus its setup (19
+// instructions in total) with 6.
 void emit_parity(a64::Encoder& e, a64::Reg dst, a64::Reg src) {
-    e.ubfx(a64::Width::k32, kT2, src, 0, 1);
-    e.mov_reg(a64::Width::k32, dst, kT2);
-    for (unsigned i = 1; i < 8; ++i) {
-        e.ubfx(a64::Width::k32, kT2, src, i, 1);
-        e.adds(a64::Width::k32, dst, dst, kT2); // dst accumulates 0..8
-    }
+    e.eor_shifted(a64::Width::k32, dst, src, src, a64::Shift::kLsr, 4); // b7..b4 ^ b3..b0
+    e.eor_shifted(a64::Width::k32, dst, dst, dst, a64::Shift::kLsr, 2);
+    e.eor_shifted(a64::Width::k32, dst, dst, dst, a64::Shift::kLsr, 1);
     e.ubfx(a64::Width::k32, dst, dst, 0, 1); // low bit = XOR of the eight bits
     e.movz(a64::Width::k32, kT3, 1);
     e.eor(a64::Width::k32, dst, dst, kT3); // PF = 1 - parity_bit

@@ -23,6 +23,27 @@ Meaningful changes by milestone. Format loosely follows
   ratio 0.078 (Tier 1 ~12.8× faster). Documented explicitly as a *relative*
   signal between Hyperion's own tiers, not a hardware performance claim.
 
+### Changed — Optimization 1: parity (PF) fast path (BENCHMARKS.md §4.2.1)
+- `emit_parity` (`src/core/translator.cpp`) rewritten from a per-bit
+  accumulation loop (19 emitted AArch64 instructions, including setup) to a
+  shifted-`EOR` XOR-fold (6). x86 PF semantics unchanged.
+- New encoder primitive `Encoder::eor_shifted` (EOR with a shifted register),
+  with encodings verified against `aarch64-linux-gnu-as` for all four shift
+  types. A first attempt wrongly set bit 21; the new encoder test caught it.
+- Measured by an interleaved A/B against the pre-change commit on the same host:
+  generated code for the fixed workload **904 → 644 bytes (−28.8%,
+  deterministic)**, Tier 1 wall time **−17.5%**, Tier 1/Tier 0 ratio
+  0.0817 → 0.0733. Correctness re-verified by the full differential suite under
+  `qemu-aarch64` (99 passed, 0 failed).
+
+### Added — deterministic translation-size diagnostics
+- `TranslationCache::total_code_bytes()` and `CachedBlock::code_bytes`, plus a
+  `tier1_translator.generated_code_bytes` field in the benchmark JSON. These are
+  deterministic, so they act as a regression guard where `qemu-user` timing
+  noise (IQR of several percent) would hide a code-size regression.
+- Test `translator.translated_code_size_is_bounded` pins the block count and an
+  upper bound on generated words for a fixed guest loop.
+
 ### Docs
 - Split `STATUS.md` phase sections correctly (two headings both said "Phase 3";
   the earlier block is Phase 2). Corrected the stale claim that no translator

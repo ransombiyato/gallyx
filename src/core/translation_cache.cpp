@@ -70,10 +70,19 @@ const CachedBlock* TranslationCache::translate_at(Memory& memory, std::uint64_t 
     block->start = pc;
     block->target = translated.target;
     block->guest_instruction_count = translated.guest_instruction_count;
+    block->code_bytes = translated.code.size();
 
     const CachedBlock* raw = block.get();
     blocks_.emplace(pc, std::move(block));
     return raw;
+}
+
+std::size_t TranslationCache::total_code_bytes() const {
+    std::size_t total = 0;
+    for (const auto& entry : blocks_) {
+        total += entry.second->code_bytes;
+    }
+    return total;
 }
 
 RunResult TranslationCache::run(Memory& memory, GuestState state, std::uint64_t max_steps) {

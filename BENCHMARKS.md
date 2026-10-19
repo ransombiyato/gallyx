@@ -201,6 +201,57 @@ the reference interpreter on this workload.
 scripts/bench-tier-qemu.sh --iterations 200000 --repeats 7
 ```
 
+#### 4.2.1 Optimization 1 — parity fast path (Phase 5)
+
+**Hypothesis.** Each guest ALU instruction that writes flags emits ~39 AArch64
+instructions, of which ~19 are the parity (PF) computation: a per-bit fold plus
+its setup. Replacing the bit-by-bit accumulation with a XOR-fold (8→4→2→1 bits)
+using AArch64 shifted-register `EOR` cuts that block to 6 emitted instructions.
+
+**Change.** `emit_parity` in `src/core/translator.cpp`; new encoder primitive
+`Encoder::eor_shifted`. Encodings verified against `aarch64-linux-gnu-as`
+(all four shift types) before use — the first attempt wrongly set bit 21, which
+the new encoder test caught.
+
+**Evidence.** Timing under `qemu-user` is noisy and the absolute ns drift
+between runs, so the primary evidence is *deterministic*: the generated-code
+size for the fixed workload, measured with `TranslationCache::total_code_bytes`.
+
+| Metric | Baseline (`f04c659`) | After parity fast path | Change |
+| --- | --- | --- | --- |
+| Generated AArch64 bytes (same workload) | 904 | 644 | **−28.8%** |
+| Tier 1 ns / guest instruction (interleaved A/B) | 38.20 | 31.50 | −17.5% |
+| Tier 1 / Tier 0 ratio (interleaved A/B) | 0.0817 | 0.0733 | −10.3% |
+
+The A/B is *interleaved*: the baseline and current binaries were built from the
+same tree state (both `RelWithDebInfo`, `-O2`) and run alternately five times,
+so machine drift cancels. Both tiers are correct in every run.
+
+**The delta is fully explained, which is the strongest evidence here.** The
+workload retires five flags-writing guest instructions per loop trip (`xor`,
+`add`, `dec`, `add`, `dec`). Each parity rewrite removes exactly 13 AArch64
+words (19 → 6). Five × 13 = 65 words = 260 bytes, which is precisely the
+measured 904 − 644 delta. No other part of the code generator changed size, so
+the optimization does exactly what it claims and nothing else.
+
+**Interpretation, and limits.**
+
+- The deterministic −28.8% code size is the trustworthy number. The 17.5%
+  wall-clock gain is consistent with it but should not be over-read: the whole
+  workload is dominated by `GuestState` load/store, so shrinking the flags
+  prologue helps less than the instruction count alone suggests.
+- This does **not** change the conclusion of 4.2: Tier 1 is still ~13× the
+  interpreter in this workload and still very slow in absolute terms. The next
+  structural wins (register allocation, block chaining) are untouched.
+
+**Regression guard.** `translator.translated_code_size_is_bounded` pins the
+block count and an upper bound on generated words for a fixed loop, so a future
+code-generator change that silently bloats output fails CI even when timing
+noise would hide it. The exact byte count is reported by the benchmark
+(`tier1_translator.generated_code_bytes`).
+
+**Reproduce:** `scripts/bench-tier-qemu.sh --iterations 200000 --repeats 15`.
+
 ### 4.3 Reference target device (Snapdragon 855)
 
 **unavailable.** The reference device is not present in this environment.

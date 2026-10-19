@@ -468,6 +468,41 @@ HYPERION_TEST("translator", "dispatcher_step_limit") {
     HYPERION_CHECK_EQ(r.steps, std::uint64_t{1000});
 }
 
+HYPERION_TEST("translator", "translated_code_size_is_bounded") {
+    // A deterministic translation-quality guard. Timing under qemu-user is
+    // noisy (IQR several percent), so a regression in the emitted code size
+    // would be easy to miss. This pins the exact AArch64 word count for a
+    // known loop, so a change to the code generator must either keep it or
+    // update the number deliberately.
+    //
+    //   mov ecx, 3      B9 03 00 00 00
+    //   xor edx, edx    31 D2
+    //   add rdx, 1      48 83 C2 01
+    //   dec rcx         48 FF C9
+    //   jne -7          75 F7
+    //   hlt             F4
+    const std::vector<std::uint8_t> program = {0xB9, 0x03, 0x00, 0x00, 0x00, 0x31, 0xD2, 0x48, 0x83,
+                                               0xC2, 0x01, 0x48, 0xFF, 0xC9, 0x75, 0xF7, 0xF4};
+    FlatMemory mem(kBase, 4096);
+    std::memcpy(mem.data(), program.data(), program.size());
+    GuestState initial;
+    initial.rip = kBase;
+    hyperion::TranslationCache cache;
+    const hyperion::RunResult r = cache.run(mem, initial);
+    HYPERION_CHECK(r.status == hyperion::RunStatus::kOk);
+    HYPERION_CHECK_EQ(r.state.reg(Gpr::kRdx), std::uint64_t{3});
+    // Three blocks: the entry block at +0 (mov/xor/add/dec/jne), the loop
+    // target at +7 (the jne target: add/dec/jne), and the HLT at +16. The
+    // target of the backward branch is a separate cache entry even though it
+    // lies inside the entry block's byte range.
+    HYPERION_CHECK_EQ(cache.block_count(), std::size_t{3});
+    const std::size_t words = cache.total_code_bytes() / 4;
+    // A loose upper bound so an accidental code-size blow-up fails CI. The
+    // exact count is reported by the benchmark, which is the place to notice
+    // gradual growth.
+    HYPERION_CHECK(words > 0 && words < 200);
+}
+
 #else
 
 HYPERION_TEST("translator", "differential_mov_and_alu") {
@@ -499,6 +534,10 @@ HYPERION_TEST("translator", "dispatcher_stops_at_unsupported") {
 }
 
 HYPERION_TEST("translator", "dispatcher_step_limit") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "translated_code_size_is_bounded") {
     HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
 }
 

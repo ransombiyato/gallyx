@@ -21,10 +21,11 @@ works, what was last verified, and what to do next.
 | --- | --- |
 | 1. Tier 0 vs Tier 1 benchmark harness | **Done** — `benchmarks/tier_bench.cpp`, `hyperion_tier_bench` |
 | 2. Reproducible baseline recorded before optimising | **Done** — BENCHMARKS.md §4.2, `scripts/bench-tier-qemu.sh` |
-| 3. Register allocation | **Not started** |
-| 4. Block chaining | **Not started** |
-| 5. Lower-overhead dispatch | **Not started** |
-| 6. Multi-tier compilation | **Not started** |
+| 3. Optimization 1: parity (PF) fast path | **Done & measured** — BENCHMARKS.md §4.2.1; −28.8% generated code for the fixed workload |
+| 4. Register allocation | **Not started** |
+| 5. Block chaining | **Not started** |
+| 6. Lower-overhead dispatch | **Not started** |
+| 7. Multi-tier compilation | **Not started** |
 
 **Baseline (must not be silently changed).** Fixed guest loop, 200,000
 iterations = 600,002 retired guest instructions, median of 7 samples under
@@ -33,6 +34,16 @@ iterations = 600,002 retired guest instructions, median of 7 samples under
 tiers, not a hardware performance claim; both tiers are additionally translated
 by qemu. Every optimisation below is judged against this, and a candidate that
 fails a correctness test is rejected regardless of speed.
+
+**Optimization 1 (parity fast path) — accepted.** `emit_parity` replaced its
+per-bit accumulation (19 emitted AArch64 instructions, including setup) with a
+shifted-`EOR` XOR-fold (6). Verified by an interleaved A/B against the baseline commit on the
+same host: generated code for the fixed workload fell 904 → 644 bytes (−28.8%,
+deterministic) and Tier 1 wall time fell ~17.5%. Correctness was checked by the
+full differential suite under `qemu-aarch64` (99 passed, 0 failed). The
+deterministic size is now a CI regression guard
+(`translator.translated_code_size_is_bounded`) because timing noise under
+`qemu-user` would hide a code-size regression.
 
 ---
 
@@ -398,13 +409,15 @@ stable-vs-noisy discrimination case).
 
 ## 4. Immediate next task
 
-**Phase 4 is closed (exit criteria met, recorded, CI green). Phase 5 has begun
-and its baseline is recorded. The next task is the first optimisation experiment,
-judged against that fixed baseline.**
+**Phase 4 is closed (exit criteria met, recorded, CI green). Phase 5 has begun,
+its baseline is recorded, and Optimization 1 (parity fast path) is complete and
+measured (BENCHMARKS.md §4.2.1).**
 
 Baseline to beat (AArch64 under `qemu-user`, fixed loop, median of 7):
 Tier 1 = **38.4 ns/guest-instruction**; Tier 0 = 491.9 ns/guest-instruction
-(ratio 0.078). Recorded in BENCHMARKS.md §4.2 and reproducible with
+(ratio 0.078). After Optimization 1 the interleaved A/B gives Tier 1 =
+**31.5 ns/guest-instruction** and generated code **904 → 644 bytes**. Recorded
+in BENCHMARKS.md §4.2 and §4.2.1, reproducible with
 `scripts/bench-tier-qemu.sh`.
 
 The single best next action:
@@ -417,6 +430,9 @@ The single best next action:
   interpreter as the oracle, and require the whole differential suite to pass
   before accepting the change. Then re-run `scripts/bench-tier-qemu.sh` and
   record the before/after in BENCHMARKS.md with a verdict.
+- Add a second deterministic guard for whatever the change is expected to move
+  (e.g. a guest-state access count), so the improvement is provable even when
+  `qemu-user` timing is noisy.
 
 Rules for every Phase 5 experiment (from `ROADMAP.md` and BENCHMARKS.md §5):
 

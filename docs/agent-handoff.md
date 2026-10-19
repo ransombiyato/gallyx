@@ -18,8 +18,7 @@ no KVM. Development often happens on x86-64 Linux hosts.
 
 ## 2. Current state in one paragraph
 
-**Phases 0, 1, 2 and 3 are complete; Phase 4's core is implemented and
-verified.** The repository builds clean with `-Werror`, has a dependency-free
+**Phases 0–4 are complete; Phase 5 has started with its baseline recorded.** The repository builds clean with `-Werror`, has a dependency-free
 unit-test suite wired into CTest, and has a **verified cross-architecture
 validation pipeline** that cross-compiles the test suite to AArch64 and runs it
 under `qemu-user`. A host capability probe measures architecture/page size/cache
@@ -143,8 +142,9 @@ Expected test names: `unit.native`, `bench.smoke`, `bench.methodology`,
 
 ## 5. Your next task
 
-**Phase 4's core is implemented and verified. Close it out, then start Phase 5
-— performance measurement and optimization.** Guest state, the decoder, the
+**Phase 4 is closed. Phase 5 (performance measurement and optimization) has
+begun; its baseline is recorded and the next step is the first optimization
+experiment, judged against that fixed baseline.** Guest state, the decoder, the
 reference interpreter, the subset contract (`COMPATIBILITY.md` §2), the hardware
 differential, the AArch64 encoder, executable memory, single-instruction
 translation, whole-block translation and the translation-cache dispatcher all
@@ -156,22 +156,26 @@ exist and pass.
    (`translate_block`). ~~Add a translation cache and dispatcher~~ **Done**
    (`TranslationCache`). Add encoder instructions as the translator needs them,
    each with a binutils-verified test.
-2. **Next: close Phase 4 out.** Commit and push this milestone, watch CI go
-   green, record the run in `STATUS.md` §2, and update `ROADMAP.md`/`CHANGELOG.md`.
-   The exit criterion ("a repeatable suite of small guest programs runs correctly
-   under the translator") is met; a few more guest programs (a nested loop, a
-   branch inside a loop, a block longer than the fetch window) would strengthen
-   it if budget allows.
-3. **Then: Phase 5 begins with measurement, not optimization.** Build a
-   Tier-1-vs-Tier-0 timing harness on the existing benchmark infrastructure so
-   every later change (register allocation, chaining, dispatch) is judged
-   against a fixed, reproducible baseline. Do not optimize before that baseline
-   exists.
-4. **Keep the oracle.** Run each multi-instruction program through both the
+2. ~~Close Phase 4 out~~ **Done.** Exit criterion met (nested loops, a branch
+   inside a loop, and the earlier programs all match the interpreter), CI green
+   (run `39294174801`), recorded in `STATUS.md` §2.
+3. ~~Build the Tier-1-vs-Tier-0 timing harness and record a baseline~~ **Done**
+   (`benchmarks/tier_bench.cpp`, `scripts/bench-tier-qemu.sh`, BENCHMARKS.md
+   §4.2): Tier 1 = 38.4 ns/guest-ins vs Tier 0 = 491.9 ns/guest-ins (ratio
+   0.078) on a fixed loop under `qemu-user`.
+4. **Next: the first optimization experiment — register allocation.** Every
+   guest instruction is currently a load/compute/store of `GuestState`. Start by
+   keeping the most-used guest registers in AArch64 registers *within* a block
+   (load at entry, spill at exit). Keep the block signature and the
+   authoritative-`rip` rule unchanged. Require the whole differential suite to
+   pass, then re-run `scripts/bench-tier-qemu.sh` and record before/after in
+   BENCHMARKS.md with an accept/reject verdict. Never change the baseline to
+   make a candidate look good.
+5. **Keep the oracle.** Run each multi-instruction program through both the
    generated blocks and the interpreter's `run_program`, and require the final
    `GuestState` to match bit-for-bit. A mismatch must fail loudly; there is no
    tolerance for "close enough".
-5. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
+6. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
    pipeline builds the tests for AArch64, runs them under `qemu-user`, and runs
    the CLI smoke test with `HYPERION_EMULATOR`, so generated code is exercised in
    CI without the target device.

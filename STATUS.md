@@ -1,16 +1,38 @@
 # STATUS
 
 **Last updated:** 2026-10-19
-**Current phase:** Phase 4 (basic dynamic binary translator) — in progress
-**Repository state:** buildable, tested, documented. **Two execution tiers now
-exist: the reference interpreter (Tier 0) and a translation cache that runs
-whole programs through generated AArch64 code (Tier 1). Multi-instruction
-programs with `jmp`/`jcc` control flow run correctly through Tier 1 and are
-checked bit-for-bit against the interpreter. The guest subset remains small;
+**Current phase:** Phase 5 (performance measurement and optimization) — started
+**Repository state:** buildable, tested, documented. **Two execution tiers exist:
+the reference interpreter (Tier 0) and a translation cache that runs whole
+programs through generated AArch64 code (Tier 1).** Phase 4's exit criteria are
+met and recorded. Phase 5 has begun with a *measured baseline before any
+optimisation*: on AArch64 under `qemu-user`, Tier 1 is ~12.8× faster than Tier 0
+on a fixed loop workload (BENCHMARKS.md §4.2). The guest subset remains small;
 see COMPATIBILITY.md.**
 
 This is the first file a returning agent should read. It records exactly what
 works, what was last verified, and what to do next.
+
+---
+
+## 0d. Phase 5 progress (performance measurement and optimization)
+
+| Work item | State |
+| --- | --- |
+| 1. Tier 0 vs Tier 1 benchmark harness | **Done** — `benchmarks/tier_bench.cpp`, `hyperion_tier_bench` |
+| 2. Reproducible baseline recorded before optimising | **Done** — BENCHMARKS.md §4.2, `scripts/bench-tier-qemu.sh` |
+| 3. Register allocation | **Not started** |
+| 4. Block chaining | **Not started** |
+| 5. Lower-overhead dispatch | **Not started** |
+| 6. Multi-tier compilation | **Not started** |
+
+**Baseline (must not be silently changed).** Fixed guest loop, 200,000
+iterations = 600,002 retired guest instructions, median of 7 samples under
+`qemu-aarch64`: Tier 0 = 491.9 ns/guest-ins, Tier 1 = 38.4 ns/guest-ins, ratio
+0.078 (Tier 1 ~12.8× faster). This is a *relative* signal between Hyperion's own
+tiers, not a hardware performance claim; both tiers are additionally translated
+by qemu. Every optimisation below is judged against this, and a candidate that
+fails a correctness test is rejected regardless of speed.
 
 ---
 
@@ -82,7 +104,7 @@ the same mistake.
 
 ---
 
-## 0b. Phase 3 progress (first native code generation)
+## 0a. Phase 2 progress (reference interpreter and instruction subset)
 
 | Work item | State |
 | --- | --- |
@@ -376,28 +398,32 @@ stable-vs-noisy discrimination case).
 
 ## 4. Immediate next task
 
-**Phase 4's core is implemented and verified. The next task is to close Phase 4
-out and record it, then begin Phase 5 (performance measurement and
-optimization).**
+**Phase 4 is closed (exit criteria met, recorded, CI green). Phase 5 has begun
+and its baseline is recorded. The next task is the first optimisation experiment,
+judged against that fixed baseline.**
 
-Phase 4 exit criterion: *a repeatable suite of small guest programs runs
-correctly under the translator.* That is met — see §2 and §0c. Before declaring
-Phase 4 complete, the remaining work is:
+Baseline to beat (AArch64 under `qemu-user`, fixed loop, median of 7):
+Tier 1 = **38.4 ns/guest-instruction**; Tier 0 = 491.9 ns/guest-instruction
+(ratio 0.078). Recorded in BENCHMARKS.md §4.2 and reproducible with
+`scripts/bench-tier-qemu.sh`.
 
-1. **Commit and push this milestone**, and watch CI go green (§2 has the local
-   evidence; the remote run must be recorded here once it completes).
-2. **Update `ROADMAP.md` and `CHANGELOG.md`** to mark Phase 4's items and record
-   what changed.
-3. **Extend the guest program suite** if time allows — a few more programs
-   (nested loops, a branch inside a loop, a longer straight-line block that
-   spans the fetch window) strengthen the exit criterion.
+The single best next action:
 
-Then Phase 5 begins, and the single best first action there is:
+- **Register allocation (start small).** Today every guest instruction is a
+  load/compute/store against `GuestState` in memory. As a first, provably-safe
+  step, keep the *most-used* guest registers in AArch64 registers within a
+  block: load them at block entry, operate in registers, spill at block exit.
+  Keep the block signature and the authoritative-`rip` rule unchanged, keep the
+  interpreter as the oracle, and require the whole differential suite to pass
+  before accepting the change. Then re-run `scripts/bench-tier-qemu.sh` and
+  record the before/after in BENCHMARKS.md with a verdict.
 
-- **Measure before optimizing.** Build a Tier-1-vs-Tier-0 timing harness on the
-  existing benchmark infrastructure so every later optimization (register
-  allocation, chaining, dispatch) has a fixed baseline to be judged against.
-  Do not start optimizing until that baseline exists and is reproducible.
+Rules for every Phase 5 experiment (from `ROADMAP.md` and BENCHMARKS.md §5):
+
+1. Do not change the baseline to make a candidate look good.
+2. A candidate that fails any correctness test is rejected, however fast.
+3. Record the commit SHA, command, and JSON in BENCHMARKS.md.
+4. Keep a known-good implementation; optimisations must be reversible.
 
 **The interpreter stays.** It is the oracle. Do not weaken it to make the
 translator look correct. Phase 5 exit criteria are in `ROADMAP.md`.
@@ -416,6 +442,7 @@ scripts/dev.sh build            # build
 scripts/dev.sh test             # native tests
 scripts/dev.sh cross-test       # AArch64 tests under qemu-user
 scripts/dev.sh bench --iterations 1000000 --repeats 9 --json
+scripts/bench-tier-qemu.sh --iterations 200000 --repeats 7   # Tier 0 vs Tier 1 (AArch64 under qemu)
 
 # installer (no root, installs into ~/.local by default)
 curl -fsSL https://raw.githubusercontent.com/ransombiyato/hyperion-dbt/main/install.sh | bash

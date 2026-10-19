@@ -11,6 +11,16 @@
 add_executable(hyperion_bench host_bench.cpp)
 target_link_libraries(hyperion_bench PRIVATE hyperion::core hyperion_warnings)
 
+# Tier 0 vs Tier 1 benchmark (Phase 5). Tier 1 numbers appear only on a host that
+# can execute generated AArch64 code; elsewhere they are reported unavailable.
+add_executable(hyperion_tier_bench tier_bench.cpp)
+target_link_libraries(hyperion_tier_bench PRIVATE hyperion::core hyperion_warnings)
+
+# Correctness smoke: both tiers produce the right result for a small loop. Runs
+# on every host (on x86-64 only tier 0 executes; the script tolerates that).
+add_test(NAME tier_bench.smoke COMMAND hyperion_tier_bench --iterations 1000 --repeats 3 --json)
+set_tests_properties(tier_bench.smoke PROPERTIES LABELS "bench;smoke")
+
 add_test(NAME bench.smoke COMMAND hyperion_bench --iterations 1000 --repeats 3 --json)
 set_tests_properties(bench.smoke PROPERTIES LABELS "bench;smoke")
 

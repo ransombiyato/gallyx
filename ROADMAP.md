@@ -229,7 +229,7 @@ code (3 basic blocks translated) and agrees with tier 0.
 
 ---
 
-## Phase 5 — Performance measurement and optimization ⬜
+## Phase 5 — Performance measurement and optimization 🟡
 
 **Objective.** Measured, reversible optimization.
 
@@ -238,6 +238,18 @@ allocation, block chaining, faster decoding, lower-overhead dispatch,
 instruction selection, constant propagation, dead-code elimination, code-cache
 policies, multi-tier compilation. Preserve a known-good implementation; reject
 changes failing correctness tests or regressing performance.
+
+**Progress.**
+
+- ✅ **Baseline recorded before any optimisation.** `hyperion_tier_bench` runs a
+  fixed guest loop through both tiers; measured under `qemu-user`, Tier 1 is
+  ~12.8× faster than the reference interpreter (38.4 vs 491.9 ns per guest
+  instruction, IQR < 2%). Full record and caveats in `BENCHMARKS.md` §4.2. This
+  is a *relative* signal between Hyperion's own tiers, not a hardware claim.
+- ⬜ Register allocation.
+- ⬜ Block chaining.
+- ⬜ Lower-overhead dispatch.
+- ⬜ Multi-tier compilation.
 
 **Exit criteria.** Reproducible performance measurements and documented
 optimization decisions.

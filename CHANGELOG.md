@@ -5,6 +5,31 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 5
+
+### Added — performance measurement
+- `benchmarks/tier_bench.cpp` (target `hyperion_tier_bench`): runs one fixed
+  guest loop through Tier 0 (interpreter) and Tier 1 (translator), reporting
+  median ns and ns per retired guest instruction with an IQR spread, using the
+  shared methodology (one discarded warm-up, repeated samples, a correctness
+  check on the final register). Tier 1 fields are reported **unavailable** on a
+  host that cannot execute generated AArch64 code, rather than fabricated.
+- `scripts/bench-tier-qemu.sh`: reproducible Tier 0 vs Tier 1 measurement on an
+  AArch64 host (under `qemu-user` on a development machine).
+
+### Recorded — first baseline (BENCHMARKS.md §4.2)
+- Fixed loop, 600,002 retired guest instructions, median of 7 under
+  `qemu-aarch64`: Tier 0 = 491.9 ns/guest-ins, Tier 1 = 38.4 ns/guest-ins,
+  ratio 0.078 (Tier 1 ~12.8× faster). Documented explicitly as a *relative*
+  signal between Hyperion's own tiers, not a hardware performance claim.
+
+### Docs
+- Split `STATUS.md` phase sections correctly (two headings both said "Phase 3";
+  the earlier block is Phase 2). Corrected the stale claim that no translator
+  exists.
+
+---
+
 ## [Unreleased] — Phase 4
 
 ### Added — basic dynamic binary translator

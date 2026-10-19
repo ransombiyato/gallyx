@@ -49,7 +49,7 @@ Presets are also provided: `cmake --preset debug`, `release`, `sanitize`,
 | `tests/differential/` | interpreter vs. real x86-64 hardware |
 | `tests/cli/` | end-to-end CLI smoke test (`cli_smoke.sh`) |
 | `tests/run_cross_tests.cmake` | cross-arch configure/build/run driver |
-| `benchmarks/` | harness smoke test (`bench.smoke`) |
+| `benchmarks/` | harness smoke tests (`bench.smoke`, `tier_bench.smoke`) |
 
 Registered CTest tests:
 
@@ -59,6 +59,7 @@ Registered CTest tests:
 | `differential.native_vs_interpreter` | the interpreter agrees with real x86-64 |
 | `cli.smoke` | `hyperion run` executes through both tiers and they agree |
 | `bench.smoke` | the benchmark harness runs and emits valid output |
+| `tier_bench.smoke` | the Tier 0 vs Tier 1 benchmark runs and both tiers are correct (on x86-64 only Tier 0 executes; Tier 1 is reported unavailable) |
 | `cross.aarch64_tests` | the suite passes when compiled for AArch64 and run under `qemu-user` |
 
 `tests/cli/cli_smoke.sh` writes a small x86-64 blob, runs it through tier 0 and

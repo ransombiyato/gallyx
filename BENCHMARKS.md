@@ -138,17 +138,68 @@ of the repeat loop. The regression is now guarded by the
 `bench.timing_not_eliminated` test.
 
 These are **calibration figures for the harness on a virtualized host**, not a
-performance claim about HYPERION. Nothing here says anything about translation
-throughput, because there is no translator yet.
+performance claim about HYPERION. They say nothing about translation throughput;
+that is measured separately in 4.2.
 
-### 4.2 Guest execution
+### 4.2 Guest execution — Tier 0 vs Tier 1 baseline (Phase 5)
 
-| Metric | Result |
+The translator exists now, so the guest-execution rows are measurable. The first
+Phase 5 task was to record a **baseline before optimising**, exactly as the
+roadmap requires.
+
+**Harness.** `benchmarks/tier_bench.cpp` (target `hyperion_tier_bench`). It runs
+one fixed guest program through both tiers with the shared methodology: one
+discarded warm-up, repeated timed samples, median with IQR spread, and a
+correctness check on the final `rdx` so a benchmark cannot measure a broken
+translator.
+
+**Workload.** `accumulate rax into rdx rcx times, halt`
+(`31 D2 | 48 01 C2 | 48 FF C9 | 75 F8 | F4`), `rax=1`, `rcx=iterations`. Each
+iteration retires 3 guest instructions (`add`, `dec`, `jnz`); the numbers below
+use 200,000 iterations = 600,002 retired instructions.
+
+**Environment.**
+
+| Field | Value |
 | --- | --- |
-| Translation throughput | **unavailable** — translator not implemented (Phase 3+) |
-| Guest program runtime | **unavailable** — translator not implemented |
-| Instruction cache hit rate | **unavailable** — no code cache (Phase 4) |
-| Comparison vs FEX/Box64/QEMU | **unavailable** — Phase 1 baseline work |
+| Host arch | aarch64 (executed under `qemu-aarch64`) |
+| Kernel | 6.8.0-1055-gke |
+| Logical CPUs | 4 |
+| Page size / cache line | 4096 / 32 bytes |
+| Build | RelWithDebInfo, gcc, `HYPERION_BUILD_BENCHMARKS=ON` |
+| Command | `scripts/bench-tier-qemu.sh --iterations 200000 --repeats 7` |
+| Commit | Phase 5 baseline (this commit) |
+
+**Result (median of 7 samples, 1 warm-up discarded):**
+
+| Tier | ns median | ns / guest instruction | IQR / median | Correct |
+| --- | --- | --- | --- | --- |
+| Tier 0 (interpreter) | 295,117,038 | 491.86 | 0.018 | yes |
+| Tier 1 (translator) | 23,041,650 | 38.40 | 0.008 | yes |
+
+Ratio (Tier 1 / Tier 0): **0.078**, i.e. Tier 1 is about **12.8× faster** than
+the reference interpreter on this workload.
+
+**Interpretation, and what this does *not* say.**
+
+- This is the ratio between *Hyperion's own two tiers*. It is a relative sanity
+  signal: it confirms the translator's design (one translation reused across a
+  hot loop, versus per-instruction interpretation) actually pays off.
+- It is **not** a hardware performance claim. Under `qemu-user` both tiers are
+  additionally translated by qemu, so absolute ns are meaningless and the ratio
+  is distorted by qemu's treatment of the two very different code shapes.
+- The reference target (Snapdragon 855 / Android 10) is still **unavailable**;
+  see 4.3. Do not assume target performance from these numbers.
+- Tier 1 is still very slow in absolute terms: no register allocation and no
+  block chaining, so each guest instruction becomes a load/compute/store of
+  `GuestState` and every block exit returns to a hash lookup. That is the
+  starting point Phase 5 optimises from.
+
+**Reproduce:**
+
+```
+scripts/bench-tier-qemu.sh --iterations 200000 --repeats 7
+```
 
 ### 4.3 Reference target device (Snapdragon 855)
 

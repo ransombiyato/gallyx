@@ -172,3 +172,80 @@ pages.
 
 **Consequences.** Slightly more bookkeeping per emitted block; correctness on
 hardened kernels and on the target device.
+
+---
+
+## D-011 — Scope includes kernel-dependent workloads; system-mode is not ruled out
+
+**Date:** 2026-10-19 · **Status:** accepted
+
+**Supersedes:** the Phase 0 assumption that "system-mode or kernel emulation"
+is an explicit non-goal. That assumption is withdrawn.
+
+**Context.** An early scoping choice limited HYPERION to user-mode translation
+and treated kernel/system-mode emulation as out of scope. That was made before
+any measurement of what the reference device (unprivileged, no KVM, ARM64
+Android) can actually do. It silently capped the project's compatibility
+ceiling: a user-mode translator cannot provide `systemd` as PID 1, containers,
+or other kernel-dependent behaviour, no matter how good its instruction
+coverage becomes.
+
+The project's stated goal is a broadly compatible Linux execution environment,
+not merely an instruction translator. That goal requires deciding what to do
+about kernel semantics rather than assuming they are unreachable.
+
+**Decision.** Kernel-level compatibility is **in scope for investigation**, not
+assumed impossible and not assumed solved. Concretely:
+
+1. The **user-mode translator remains the primary path** and the focus of
+   Phases 2–5. It has demonstrated feasibility on Android and the highest
+   performance ceiling.
+2. The **syscall layer must be abstracted behind an interface** so that syscalls
+   can later be directed either to the host kernel or to a user-space kernel
+   implementation. This is a design constraint on Phase 6, not a feature.
+3. **System-mode and kernel-as-a-process approaches are evaluated, not
+   implemented**, until a target-device question is answered (see D-012).
+
+**Consequences.** The design space is wider and the risk is higher. This is
+accepted because the narrower scope could not meet the actual goal. The
+evaluation and its measured evidence live in
+[`docs/architecture-feasibility.md`](docs/architecture-feasibility.md).
+Phases 2–6 are unaffected in ordering; Phase 6 gains an interface requirement.
+
+---
+
+## D-012 — Kernel-as-a-process (UML) is a candidate compatibility tier, pending AArch64 validation
+
+**Date:** 2026-10-19 · **Status:** provisional
+
+**Context.** A user-mode translator cannot provide real kernel semantics. One
+mechanism can: run a real Linux kernel as an unprivileged user-space process
+(User-Mode Linux). This was **measured**, not assumed.
+
+Measured on 2026-10-19, x86-64 Linux host, uid 10001, no root, no KVM:
+
+- UML booted kernel `6.12.101` from an isolated ext4 image (`/dev/ubda`), with
+  the host root confirmed *not* visible inside the guest.
+- `systemd 257.13-1~deb13u1` ran as PID 1 and reached `multi-user.target` and
+  `graphical.target`; `dbus`, `systemd-logind`, and `getty@tty1` started.
+- All namespace types (`user`, `mount`, `pid`, `uts`, `ipc`, `net`) worked
+  inside the guest.
+- Guest was single-CPU.
+
+**Decision.** Treat kernel-as-a-process as a **candidate compatibility tier**,
+and record it as *provisional* rather than adopted, because the decisive
+question is unanswered: **whether a maintainable AArch64 UML exists and runs
+under Android 10's kernel.** All evidence above is from an x86-64 host.
+
+No kernel-as-a-process code will be built before that question is answered by
+measurement on the target device.
+
+**Consequences.** If AArch64 UML works on the target, HYPERION can plausibly
+offer a compatibility tier for kernel-dependent workloads while keeping the
+fast user-mode path for ordinary programs. If it does not, kernel-dependent
+workloads remain out of reach without root, and that limitation must be stated
+plainly in `COMPATIBILITY.md`. Either way, the user-mode path is unaffected.
+
+**Risks.** Android's seccomp and SELinux policies may block the `ptrace` and
+`mmap` behaviour UML requires. Performance of the syscall boundary is
+unmeasured. See the risk table in the feasibility document.

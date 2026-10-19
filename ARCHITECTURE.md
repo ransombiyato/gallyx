@@ -7,6 +7,28 @@ Legend: `[ ]` planned · `[x]` implemented · `[~]` partially implemented
 
 ---
 
+## 0. Scope of this document
+
+This document describes the **user-mode translator**: the primary architecture,
+and the one the phases in [`ROADMAP.md`](ROADMAP.md) build. It assumes the
+guest program runs as an ordinary host process and its syscalls are handled by
+the host kernel.
+
+That is deliberately *not* the whole compatibility story. Providing a broadly
+compatible Linux execution environment — including kernel-dependent workloads
+such as `systemd` as PID 1 or containers — requires kernel semantics the host
+kernel will not grant an unprivileged process. The design space, the options,
+and the measured evidence for how far each can go are in
+[`docs/architecture-feasibility.md`](docs/architecture-feasibility.md).
+
+The key architectural consequence for this document is a **constraint, not a
+feature**: the syscall layer (§ below) must be isolated behind an interface so
+that the same translator can later direct syscalls either to the host kernel or
+to a user-space kernel implementation. Nothing about that second path is
+implemented today.
+
+---
+
 ## 1. Problem statement
 
 Translate and execute x86-64 Linux user-mode binaries on an AArch64 Linux

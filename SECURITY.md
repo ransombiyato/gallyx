@@ -98,6 +98,28 @@ When execution lands, the boundaries will be:
 **Never** run untrusted guest code outside the intended isolation boundary, and
 never run it with elevated privileges.
 
+### 4.1 Kernel-as-a-process tier: additional boundaries (provisional)
+
+If the kernel-as-a-process tier (`docs/architecture-feasibility.md`,
+`DECISIONS.md` D-012) is ever adopted, it changes this threat model and must be
+re-reviewed before any code is written. Notes for that review:
+
+- The guest kernel is **not a security boundary by itself.** UML is a
+  compatibility mechanism, not a sandbox; running an untrusted kernel inside it
+  does not confine that kernel's effects to a hypervisor-grade boundary.
+- The guest kernel is **unprivileged with respect to the host**, which is a real
+  containment property and must be preserved: no root, no KVM, no host devices.
+- The guest kernel's host-side syscalls are the new attack surface, and the
+  UML `ptrace`/`seccomp` interception paths in particular.
+- A malicious guest could attempt to use the guest kernel to attack the host
+  kernel. That is a host-kernel security question, not something HYPERION can
+  fix, and it must be stated plainly rather than implied to be safe.
+- File and network isolation for the guest must be configured explicitly; it is
+  not granted by default.
+
+**Current status:** none of this is implemented, and the tier is unvalidated on
+the reference device. No untrusted workload should be run through it.
+
 ---
 
 ## 5. Reporting a vulnerability

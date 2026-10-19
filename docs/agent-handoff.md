@@ -27,6 +27,17 @@ harness emits JSON with guest-execution metrics marked unavailable. **There is
 no instruction decoding, interpretation, translation, or syscall layer.**
 Phase 1 (baseline/prior-art) is the next phase.
 
+**Scope was corrected on 2026-10-19.** Kernel/system-mode emulation is no longer
+an explicit non-goal (`DECISIONS.md` D-011). Kernel-level compatibility is in
+scope for *investigation*; the user-mode translator remains the primary path.
+The kernel-as-process option was de-risked by measurement and by desk research
+(`docs/architecture-feasibility.md`). **No kernel-level code exists or should be
+written yet.**
+
+> **The environment does not persist.** A new session starts with no toolchain.
+> Run `scripts/bootstrap.sh` first, and do not treat a stale `build/` directory
+> as evidence that tests pass — rerun them.
+
 ---
 
 ## 3. Verify the current state (do this first)
@@ -51,11 +62,13 @@ Expected test names: `unit.native`, `bench.smoke`, `cross.aarch64_tests`.
 ## 4. Read these, in order
 
 1. `STATUS.md` — precise current state and the immediate next task.
-2. `ROADMAP.md` — all phases and their acceptance criteria.
+2. `ROADMAP.md` — all phases, the scope correction, and acceptance criteria.
 3. `ARCHITECTURE.md` — design and component boundaries.
-4. `DECISIONS.md` — why things are the way they are (D-001 … D-010).
-5. `CONTRIBUTING.md` — conventions and the milestone workflow.
-6. `docs/known-issues.md` — current limitations.
+4. `docs/architecture-feasibility.md` — why kernel-level scope was reopened,
+   and the measured evidence.
+5. `DECISIONS.md` — why things are the way they are (D-001 … D-012).
+6. `CONTRIBUTING.md` — conventions and the milestone workflow.
+7. `docs/known-issues.md` — current limitations.
 
 ---
 
@@ -71,8 +84,13 @@ Then extend `benchmarks/` with a documented methodology and record measured
 host baselines in `BENCHMARKS.md`, and record the reuse-vs-build decision in
 `DECISIONS.md`. Full Phase 1 acceptance criteria are in `ROADMAP.md`.
 
+Optionally (cheap, raises confidence in the kernel-as-process tier): cross-build
+the AArch64 UML port and confirm a binary is produced. Report only what you
+measure.
+
 **Do not** start Phase 2 (instruction execution) until Phase 1 exit criteria
-are met.
+are met. **Do not** write kernel-level code — the tier is unvalidated on the
+reference device.
 
 ---
 
@@ -94,19 +112,29 @@ are met.
 8. **Do not overwrite unrelated work.** Never touch existing Arch/FEXDroid
    installations or other projects.
 9. **Never push a failing build or red CI.**
+10. **Keep the syscall layer behind an interface.** It must be possible to
+    direct syscalls to the host kernel or to a user-space kernel without
+    rewriting the translator (`DECISIONS.md` D-011).
+11. **Do not claim target-device support from host measurements.** Snapdragon
+    855 / Android 10 has never been tested in this environment.
 
 ---
 
 ## 7. Environment specifics for this workspace
 
-- **Development host is x86-64** (AMD EPYC, Debian 13, 4 CPUs, 15 GiB RAM).
-  You cannot natively run AArch64 binaries here — use the cross + qemu pipeline.
+- **Development host is x86-64** (Debian 13). You cannot natively run AArch64
+  binaries here — use the cross + qemu pipeline.
+- **Nothing persists between sessions.** A fresh container has no `cmake`,
+  `ninja`, `clang`, `qemu-aarch64`, or AArch64 cross compiler, even if a
+  `build/` directory survives. Run `scripts/bootstrap.sh` before concluding
+  anything is broken.
 - **`qemu-user` is a correctness oracle only**, never a performance model.
 - **Passwordless `sudo`** is available for package installation.
 - The reference Snapdragon 855 device is **not** present; target-device claims
   must be measured on real hardware (`docs/target-environment.md`).
-- Branch policy: develop on `phase-<n>-<name>`; `main` is protected by
-  convention; open a pull request.
+- **Branch policy (changed 2026-10-19):** develop directly on `main`. The
+  maintainer asked for this. `phase-0-foundation` was fast-forwarded into
+  `main`; do not open a pull request per milestone unless asked.
 
 ---
 
@@ -122,10 +150,15 @@ are met.
 | Benchmarks | `benchmarks/` |
 | Scripts | `scripts/dev.sh`, `scripts/bootstrap.sh` |
 | CI | `.github/workflows/ci.yml` |
+| Feasibility experiment | `experiments/uml/` |
+| Architecture analysis | `docs/architecture-feasibility.md` |
 
 Future component directories (`src/decoder/`, `src/ir/`, `src/interp/`,
 `src/codegen/`, `src/runtime/`, `src/syscall/`) are created when their phase
 begins — their absence is a deliberate signal of what does not exist yet.
+
+`experiments/` is **not** part of the translator. It holds evidence-gathering
+for architecture decisions and must never be linked into the product.
 
 ---
 

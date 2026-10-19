@@ -7,7 +7,50 @@ Meaningful changes by milestone. Format loosely follows
 
 ## [Unreleased] — Phase 1
 
-_Nothing yet._
+### Changed — scope correction (2026-10-19)
+- **Withdrawn** the Phase 0 assumption that kernel/system-mode emulation is an
+  explicit non-goal. It capped the project's compatibility ceiling below its
+  actual goal and was made without measurement. See `DECISIONS.md` D-011.
+- Added `docs/architecture-feasibility.md`: an evaluation of user-mode
+  translation, system-mode emulation, and hybrid kernel-as-a-process designs,
+  with the Android host-kernel constraints that bound all of them.
+- Added `DECISIONS.md` D-012 recording the kernel-as-process tier as
+  **provisional**, pending validation on the reference device.
+- Added a constraint on Phase 6: the syscall layer must be abstracted behind an
+  interface so syscalls can be directed to the host kernel or a user-space
+  kernel. Nothing about that second path is implemented.
+
+### Added — feasibility evidence
+- `experiments/uml/` — a reproducible experiment that boots a **real Linux
+  kernel as an unprivileged user-space process** (no root, no KVM) and drives
+  it to a `systemd` multi-user boot.
+- Measured result: UML kernel `6.12.101` booted from an isolated ext4 image
+  (host root verified *not* visible), `systemd 257.13-1~deb13u1` ran as PID 1
+  and reached `multi-user.target` and `graphical.target`; `dbus`,
+  `systemd-logind` and `getty@tty1` started; all six namespace types worked
+  inside the guest.
+- Desk research confirming an **AArch64** UML port exists
+  (`zalexdev/linux-um-arm64`, `ARCH=um SUBARCH=arm64`), verified to contain real
+  architecture code and Android/bionic support. **Not** built or run by this
+  project, and **not** tested on the reference device.
+
+### Changed — documentation
+- `ARCHITECTURE.md` gained a scope section stating that it describes the
+  user-mode translator and pointing to the feasibility analysis.
+- `ROADMAP.md` gained a scope-correction section; Phase 9 gained a
+  kernel-dependent-workload work item; Phase 1 gained an optional cross-build
+  of the AArch64 UML port.
+- `STATUS.md` rewritten to record the environment-persistence finding and the
+  corrected scope.
+- `.gitignore` covers UML experiment artifacts.
+
+### Fixed — process
+- Recorded that this environment **does not persist between sessions** and that
+  stale `build/` artifacts from a previous session must not be mistaken for
+  passing tests. All Phase 0 results were re-verified from a clean tree.
+- `experiments/uml/run.sh` strips ANSI escapes before matching systemd target
+  lines (systemd embeds colour codes inside target names, which silently broke
+  the original pattern).
 
 ---
 

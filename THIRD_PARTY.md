@@ -49,6 +49,9 @@ The project is licensed **Apache-2.0**. Considerations for future reuse:
 | LLVM (as a library) | Apache-2.0 WITH LLVM-exception | Compatible if used as a library |
 | Zydis (x86 decoder) | MIT | Compatible; evaluation in Phase 1 |
 | Capstone | BSD-3-Clause | Compatible; evaluation in Phase 1 |
+| Linux kernel UML (`ARCH=um`) | GPL-2.0 | Kernel source, GPL-2.0. If the kernel-as-process tier is adopted it is run as a **separate process**, not linked into HYPERION, so it does not affect HYPERION's licence — the same reasoning as QEMU. Building it still means shipping/deriving GPL-2.0 kernel code, which must be handled deliberately. |
+| `zalexdev/linux-um-arm64` | GPL-2.0 | The AArch64 UML port (`ARCH=um SUBARCH=arm64`). **Out of tree**: 38 unmerged commits on a kernel tree. Using it means depending on an unmerged fork (R7 in `docs/architecture-feasibility.md`). Not adopted. |
+| `user-mode-linux` (Debian package) | GPL-2.0 | Used **only** by `experiments/uml/` as an external tool. Not linked, not shipped, not part of the product. |
 
 **QEMU is used strictly as an external validation tool.** Its GPL-2.0 code is
 never linked into HYPERION. This is recorded here so no future agent

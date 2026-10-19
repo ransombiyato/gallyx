@@ -15,6 +15,12 @@ assumed* — see [`docs/target-environment.md`](docs/target-environment.md).
 > the documentation is complete. **There is no instruction execution yet.**
 > No guest program can be run. See [`STATUS.md`](STATUS.md) for the exact
 > current state and [`ROADMAP.md`](ROADMAP.md) for the staged plan.
+>
+> **Scope note (2026-10-19).** Kernel/system-mode emulation is no longer ruled
+> out. A measured experiment showed a real Linux kernel running unprivileged
+> with `systemd` as PID 1, and an AArch64 port of that mechanism exists. It is
+> under investigation, not implemented — see
+> [`docs/architecture-feasibility.md`](docs/architecture-feasibility.md).
 
 ---
 
@@ -51,6 +57,7 @@ tests/harness/          Dependency-free C++ test harness
 tests/unit/             Unit tests
 tests/run_cross_tests.cmake  Cross-arch validation driver
 benchmarks/             Benchmark harness
+experiments/            Feasibility experiments (NOT part of the translator)
 scripts/                Developer task runner and environment bootstrap
 docs/                   Agent handoff, known issues, target environment
 .github/workflows/      CI
@@ -75,6 +82,7 @@ Documentation index:
 | [`docs/known-issues.md`](docs/known-issues.md) | Bugs, limitations and blocked work |
 | [`docs/target-environment.md`](docs/target-environment.md) | Reference device and host matrix |
 | [`docs/glossary.md`](docs/glossary.md) | Terminology used in this project |
+| [`docs/architecture-feasibility.md`](docs/architecture-feasibility.md) | Scope analysis: user-mode vs system-mode vs hybrid, with measured evidence |
 
 ---
 
@@ -122,13 +130,25 @@ See [`TESTING.md`](TESTING.md) for the full guide.
 - User-mode x86-64 Linux binary translation to AArch64.
 - Correctness-first execution with a reference interpreter as oracle.
 - Measured, reproducible performance work.
+- **Investigation of kernel-level compatibility** (added 2026-10-19). A user-mode
+  translator cannot provide `systemd` as PID 1, containers, or other
+  kernel-dependent behaviour. How far those can be reached on an unprivileged
+  device is analysed in
+  [`docs/architecture-feasibility.md`](docs/architecture-feasibility.md), which
+  records a measured experiment and a provisional design. **Nothing of this is
+  implemented, and no kernel-level code will be written until it is validated on
+  the reference device.**
 
 **Explicit non-goals (for now)**
 
-- System-mode or kernel emulation.
 - Running Windows or macOS binaries.
 - Requiring root or KVM on the target device.
 - Bit-exact cycle-accurate CPU emulation.
+
+**Withdrawn non-goal.** "System-mode or kernel emulation" was previously listed
+here as out of scope. That was withdrawn on 2026-10-19 because it was decided
+without measurement and it capped the project below its stated goal. See
+`DECISIONS.md` D-011.
 
 ## Contributing
 

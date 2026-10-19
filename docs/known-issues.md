@@ -12,6 +12,8 @@ noted in `CHANGELOG.md`.
 | --- | --- | --- |
 | BLOCK-001 | No measurements from the reference target device (Snapdragon 855, Android 10). | Physical access to the device, or a comparable AArch64 Android host. Until then, all target-device claims are unverified. |
 | BLOCK-002 | Development host is x86-64, so AArch64 code cannot be executed natively. | Mitigated by the cross + `qemu-user` pipeline (D-007). True AArch64 execution requires AArch64 hardware. |
+| BLOCK-003 | The kernel-as-process tier cannot be committed to until the AArch64 UML port is run on the reference device. | AArch64 Android hardware. Until then the tier stays provisional (D-012) and no kernel-level code is written. |
+| BLOCK-004 | The environment does not persist between sessions: a fresh container has no toolchain even if `build/` survives. | Run `scripts/bootstrap.sh`. Do not treat stale artifacts as evidence. See `STATUS.md` §2. |
 
 ---
 
@@ -24,8 +26,10 @@ noted in `CHANGELOG.md`.
 | LIM-003 | No translation cache or code generator. | Phases 3–4. |
 | LIM-004 | `qemu-user` validates correctness, not performance. | Never quote qemu numbers as performance. |
 | LIM-005 | Benchmark harness measures host only. | `guest_execution.available = false` until the translator exists (D-009). |
-| LIM-006 | No Windows/macOS guest support, no system-mode emulation. | Out of scope. |
+| LIM-006 | No Windows/macOS guest support. | Out of scope, permanently. |
 | LIM-007 | Target device has no KVM and no root; the design must not assume either. | Enforced as a project rule. |
+| LIM-008 | **Kernel-level compatibility is investigated, not implemented.** | The user-mode translator cannot provide `systemd` as PID 1, containers, or kernel-dependent services. The kernel-as-process tier is provisional and unvalidated on the target (D-011, D-012). |
+| LIM-009 | AArch64 UML is an **out-of-tree** dependency (38 unmerged commits). | If the tier is adopted, it carries a maintenance liability (R7 in `docs/architecture-feasibility.md`). |
 
 ---
 

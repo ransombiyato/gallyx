@@ -23,6 +23,34 @@ Status legend: ✅ complete · 🔄 in progress · ⬜ not started
 
 ---
 
+## Scope correction (2026-10-19)
+
+The original Phase 0 plan stated that kernel/system-mode emulation was an
+explicit non-goal. **That assumption has been withdrawn.** It was made before
+any measurement of the reference device and it capped the achievable
+compatibility below the project's actual goal, which is a broadly compatible
+Linux execution environment — not merely an instruction translator.
+
+What changed, and what did not:
+
+- **Unchanged:** the user-mode translator is the primary path, and Phases 2-5
+  build it. Nothing in the phase order moves.
+- **Changed:** kernel-level compatibility is now in scope for *investigation*
+  (`DECISIONS.md` D-011, D-012). A measured experiment showed that a real Linux
+  kernel can run as an unprivileged process, with `systemd` reaching
+  `multi-user.target`; an AArch64 port of that mechanism exists.
+- **New constraint:** the Phase 6 syscall layer must sit behind an interface so
+  the same translator can direct syscalls either to the host kernel or to a
+  user-space kernel. This is a design constraint, not a feature to build now.
+- **New risk:** the AArch64 port is unmerged and untested on the reference
+  device (R7, R1 in `docs/architecture-feasibility.md`).
+
+Full analysis and evidence: [`docs/architecture-feasibility.md`](docs/architecture-feasibility.md).
+No kernel-level code is to be written until the tier is validated on the
+reference device.
+
+---
+
 ## Phase 0 — Project foundation ✅
 
 **Objective.** A buildable, testable, documented repository that a new agent
@@ -70,6 +98,10 @@ no syscall layer.
    build configuration and methodology.
 5. Record baseline numbers where obtainable; mark unavailable measurements as
    unavailable — **never fabricate**.
+6. **(added by the scope correction, optional)** Cross-build the AArch64 UML
+   port and confirm the binary is produced. This is a cheap way to raise
+   confidence in the kernel-as-process tier (R1) without committing to it.
+   Report only what is measured.
 
 **Exit criteria.**
 
@@ -185,7 +217,20 @@ preserves successful ones.
 desktop applications; PRoot/Android constraints. Prefer upstream components
 where safer than reinventing complex functionality.
 
-**Exit criteria.** Published compatibility matrix with reproducible results.
+**Kernel-dependent workloads (added by the 2026-10-19 scope correction).** For
+programs that need real kernel semantics (services, containers, `systemd`),
+evaluate the kernel-as-process tier against the reference device:
+
+1. Build the AArch64 UML port and confirm it runs under Android 10's kernel
+   with no root and no KVM (resolves R1/R2).
+2. Measure its boot cost and syscall-boundary cost. No performance claim
+   without numbers.
+3. Implement it **only if** steps 1-2 succeed, behind the syscall-layer
+   interface, and never as a replacement for the user-mode path.
+
+**Exit criteria.** Published compatibility matrix with reproducible results,
+stating plainly which workloads the user-mode path cannot run and whether the
+kernel-as-process tier is available on the target.
 
 ---
 

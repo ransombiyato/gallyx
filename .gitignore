@@ -31,3 +31,9 @@ venv/
 # Benchmark artifacts
 benchmarks/results/*.local.json
 .agent_tmp/
+
+# UML feasibility experiments (large, regenerable via experiments/uml/run.sh)
+.uml-rootfs/
+.uml-tmp/
+*.img
+wget-log*

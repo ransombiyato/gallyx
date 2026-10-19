@@ -380,3 +380,32 @@ generated code and the interpreter share no flag logic. The cost is that PF and
 AF are relatively expensive; Phase 5 replaces PF with a table or `CNT` lookup
 once performance is measured. This decision also means an unsupported flag
 combination must fail loudly rather than fall back to the interpreter.
+
+---
+
+## D-018 — The dispatcher's step limit is a hard bound; blocks are indivisible
+
+**Date:** Phase 4.
+**Status:** Accepted.
+
+**Context.** The Tier 1 dispatcher runs whole translation blocks, not single
+instructions, so it cannot stop in the middle of a block. The first
+implementation checked the step limit *before* running a block and then added
+the block's instruction count, which let a run limited to N instructions retire
+more than N. The nested-loop differential caught this: tier 1 reported 1,000,001
+retired instructions against a limit of 1,000,000, while the interpreter stopped
+at exactly 1,000,000.
+
+**Decision.** `max_steps` is a hard bound. Before running a block, the dispatcher
+checks whether the block's instruction count fits in the remaining budget; if it
+does not, the run stops with `kStepLimit` without starting the block. A
+step-limited Tier 1 run may therefore stop a few instructions short of the limit
+and report fewer steps than the interpreter, but it can never exceed the limit
+or run past it.
+
+**Consequences.** Step counts are exactly comparable between tiers for programs
+that halt (the only case the differential asserts equality on). For programs
+that hit the limit, the differential asserts `tier1_steps <= interpreter_steps
+<= max_steps`. A future tier that can interrupt a block mid-way would remove the
+granularity difference; until then this is documented as LIM-013 in
+`docs/known-issues.md`.

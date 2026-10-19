@@ -56,6 +56,17 @@ Meaningful changes by milestone. Format loosely follows
 - **Short program images failed to translate.** The dispatcher's code-fetch
   window shrank only to 15 bytes, so a 13-byte blob could not be read. The window
   now shrinks to a single byte.
+- **The dispatcher could exceed the step limit.** It checked the limit before
+  running a block and then added the whole block's count, so a 1,000,000-step
+  run could retire 1,000,001 instructions. A block that does not fit the
+  remaining budget is now not started, so the bound is hard.
+
+### Added — more guest programs
+- `translator.differential_nested_loops` (two backward branches) and
+  `translator.differential_branch_inside_loop` (taken/not-taken exits that
+  reconverge and alternate). Both compare against `run_program` and also assert
+  an independently computed final value, so agreement cannot be a shared
+  mistake.
 
 ---
 

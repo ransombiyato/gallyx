@@ -88,18 +88,23 @@ RunResult TranslationCache::run(Memory& memory, GuestState state, std::uint64_t 
 
     std::uint64_t steps = 0;
     while (true) {
-        if (steps >= max_steps) {
-            out.status = RunStatus::kStepLimit;
-            out.message = "step limit reached without halting";
-            out.steps = steps;
-            return out;
-        }
-
         const std::uint64_t pc = out.state.rip;
         const CachedBlock* block = translate_at(memory, pc);
         if (block == nullptr) {
             out.status = RunStatus::kUnsupported;
             out.message = "unsupported instruction at pc=0x" + std::to_string(pc);
+            out.steps = steps;
+            return out;
+        }
+
+        // max_steps is a hard bound on guest instructions executed. A block is
+        // indivisible, so a block that cannot fit in the remaining budget is not
+        // started at all. This means a step-limited run may stop a little short
+        // of the limit and can report fewer steps than the interpreter (which
+        // steps one instruction at a time), but it never exceeds the bound.
+        if (block->guest_instruction_count > max_steps - steps) {
+            out.status = RunStatus::kStepLimit;
+            out.message = "step limit reached without halting";
             out.steps = steps;
             return out;
         }

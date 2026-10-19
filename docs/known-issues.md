@@ -21,25 +21,37 @@ noted in `CHANGELOG.md`.
 
 | ID | Limitation | Notes |
 | --- | --- | --- |
-| LIM-001 | **No instruction decoding, interpretation or translation.** | Phase 0 is foundation only. Nothing can execute a guest program. |
-| LIM-002 | No syscall or ABI layer. | Phase 6. |
-| LIM-003 | No translation cache or code generator. | Phases 3–4. |
+| LIM-002 | No syscall or ABI layer. | Phase 6. Guest `syscall` is not decoded. |
+| LIM-003 | The translation cache **never invalidates**. | Self-modifying guest code runs stale translations. Deliberate boundary for the first version; precise invalidation is Phase 7. |
 | LIM-004 | `qemu-user` validates correctness, not performance. | Never quote qemu numbers as performance. |
-| LIM-005 | Benchmark harness measures host only. | `guest_execution.available = false` until the translator exists (D-009). |
+| LIM-005 | Benchmark harness measures host only. | `guest_execution.available = false` until a Tier 1/Tier 0 benchmark exists (D-009). No Tier-1 performance measurement exists yet. |
 | LIM-006 | No Windows/macOS guest support. | Out of scope, permanently. |
 | LIM-007 | Target device has no KVM and no root; the design must not assume either. | Enforced as a project rule. |
 | LIM-008 | **Kernel-level compatibility is investigated, not implemented.** | The user-mode translator cannot provide `systemd` as PID 1, containers, or kernel-dependent services. The kernel-as-process tier is provisional and unvalidated on the target (D-011, D-012). |
 | LIM-009 | AArch64 UML is an **out-of-tree** dependency (38 unmerged commits). | If the tier is adopted, it carries a maintenance liability (R7 in `docs/architecture-feasibility.md`). |
+| LIM-010 | **No guest stack or memory operands.** | `push`/`pop`/`ret` and any ModRM memory operand are refused with an explicit error. Needs a guest address space (Phase 6). The translated subset is register/immediate ALU plus `mov`/`nop`/`hlt`/`jmp`/`jcc`. |
+| LIM-011 | **No register allocation.** | Guest registers live in `GuestState` in memory and the generated code loads/stores them every instruction. Correct but slow; Phase 5. |
+| LIM-012 | **No block chaining.** | Every block exit returns to the dispatcher for a hash lookup. Correct but slow; Phase 5. |
+| LIM-013 | **Step-limit granularity differs between tiers.** | The interpreter steps one instruction at a time; the dispatcher runs whole blocks. On a step-limited run, tier 1 may stop a few instructions short of the limit (it never exceeds it). Only relevant to non-halting programs. |
+| LIM-014 | `qemu-user` runs generated code, but it is **not the reference device**. | No measurement exists on the Snapdragon 855 / Android 10 target. |
 
 ---
 
 ## Correctness bugs
 
-_None — no execution engine exists yet._
+No open correctness bugs. Recorded history:
+
+| ID | Symptom | Status |
+| --- | --- | --- |
+| BUG-001 | 64-bit `ADD` never set carry (`sum > mask` is impossible when the mask is `~0`). Found by the hardware differential. | Fixed (Phase 2). |
+| BUG-002 | `Jcc` short jumps (`0x70..0x7F`) were decoded as `rel32`, producing wild targets. Found by the hardware differential. | Fixed (Phase 2). |
+| BUG-003 | A block whose *first* instruction was unsupported was emitted as an empty fall-through, so the dispatcher looped forever. | Fixed (Phase 4); `translator.dispatcher_stops_at_unsupported` guards it. |
+| BUG-004 | The code-fetch window shrank only to 15 bytes, so a program image shorter than that could not be translated. | Fixed (Phase 4); the CLI smoke test guards it. |
+| BUG-005 | The dispatcher checked the step limit before running a block and then added the whole block count, so a 1,000,000-step run could retire 1,000,001 instructions. Found by the nested-loop differential. | Fixed (Phase 4); the step bound is now hard. |
 
 When a bug is found, record: ID, symptom, minimal reproducer, affected commit,
-severity (correctness/performance/cosmetic), status, and the test that will
-guard against regression.
+severity (correctness/performance/cosmetic), status, and the test that guards
+against regression.
 
 ---
 

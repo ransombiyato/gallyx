@@ -41,7 +41,7 @@ accelerator.
 program halts, an unsupported instruction is reached, or a guest-instruction
 step limit is hit. It never executes an instruction the translator refused.
 
-**Two real bugs were found by testing this increment and fixed:**
+**Three real bugs were found by testing this increment and fixed:**
 
 1. **Infinite loop on an unsupported first instruction.** A block whose *first*
    instruction is unsupported was emitted as a zero-instruction fall-through
@@ -53,6 +53,13 @@ step limit is hit. It never executes an instruction the translator refused.
 2. **Short program images failed to translate.** The dispatcher's code-fetch
    window shrank only down to 15 bytes, so a 13-byte blob (the CLI smoke
    program) could not be read at all. The window now shrinks to a single byte.
+3. **The dispatcher could exceed the step limit.** It checked the limit *before*
+   running a block and then added the whole block's instruction count, so a run
+   limited to 1,000,000 instructions could retire 1,000,001 (found by the
+   nested-loop differential, which compared against the interpreter). A block is
+   indivisible, so the dispatcher now refuses to *start* a block that does not
+   fit in the remaining budget; a step-limited run may stop a few instructions
+   short of the limit but never exceeds it.
 
 **Decoder addition.** `0xEB` (`jmp rel8`) was added — a very common real-world
 encoding and the natural companion to the `0x70..0x7F` short `jcc`. It has a
@@ -63,6 +70,15 @@ repeatable suite of small guest programs runs correctly under the translator,
 not that the instruction set is large. The subset is unchanged from Phase 3
 plus control flow; `push`/`pop`/`ret` and memory operands stay refused because
 they need a guest address space (Phase 6).
+
+**Guest program suite.** Five whole programs run through the dispatcher and are
+compared against the interpreter: a single counted loop, taken/not-taken
+branches across all flag inputs, **nested loops** (two backward branches), a
+**branch inside a loop** whose taken and not-taken exits reconverge and whose
+direction alternates each iteration, and an infinite loop (reported as a step
+limit, not a hang). Two of them also assert an independently computed final
+value, so a case cannot pass by the interpreter and the translator agreeing on
+the same mistake.
 
 ---
 
@@ -251,15 +267,15 @@ aarch64-linux-gnu-g++ 14.2.0.
 | Check | Command | Result |
 | --- | --- | --- |
 | Native build (`-Werror`) | `cmake --build build/dev` | PASS — no warnings |
-| Native tests | `ctest --test-dir build/dev` | PASS — **7/7** entries (96 unit cases + 8 differential) |
+| Native tests | `ctest --test-dir build/dev` | PASS — **7/7** entries (98 unit cases + 8 differential) |
 | Differential vs. hardware | `./build/dev/tests/hyperion_differential_tests` | PASS — 8/8 compared against real x86-64 |
 | CLI smoke (both tiers) | `ctest --test-dir build/dev -R cli.smoke` | PASS — tiers agree, `steps=17` |
 | Cross build | `cmake --build build/cross-aarch64` | PASS — AArch64 binaries produced |
-| Cross tests under qemu | `qemu-aarch64 .../hyperion_unit_tests` | PASS — **94 passed, 0 failed, 2 skipped** |
+| Cross tests under qemu | `qemu-aarch64 .../hyperion_unit_tests` | PASS — **96 passed, 0 failed, 2 skipped** |
 | AArch64 differential | `qemu-aarch64 .../hyperion_differential_tests` | SKIP — 0 passed, **8 skipped** (no x86-64 oracle) |
 | Translator blocks vs. interpreter (AArch64) | `translator.block_*` under qemu | PASS — block cuts at terminators/unsupported/buffer end |
-| Whole-program differentials (AArch64) | `translator.differential_program_*` under qemu | PASS — counted loop + branch directions match `run_program` |
-| Dispatcher limits (AArch64) | `translator.dispatcher_*` under qemu | PASS — stops at unsupported; reports step limit, does not hang |
+| Whole-program differentials (AArch64) | `translator.differential_program_*` under qemu | PASS — counted loop, nested loops, branch-inside-loop all match `run_program` |
+| Dispatcher limits (AArch64) | `translator.dispatcher_*` under qemu | PASS — stops at unsupported; step limit is a hard bound, does not hang |
 | Translation cache (AArch64) | `translation_cache.caches_*` under qemu | PASS — caches blocks, agrees with interpreter |
 | CLI tier 1 executes generated code | `HYPERION_EMULATOR=qemu-aarch64 ... cli_smoke.sh` | PASS — **3 basic blocks translated**, `steps=17` |
 | ASan/UBSan (clang) | `ctest --test-dir build/san` | PASS — 7/7 |
@@ -271,13 +287,21 @@ aarch64-linux-gnu-g++ 14.2.0.
 | UML feasibility (smoke) | `experiments/uml/run.sh smoke` | PASS — kernel boots unprivileged; all 6 namespace types OK |
 | UML feasibility (systemd) | `experiments/uml/run.sh systemd` | PASS — systemd 257 as PID 1 → `multi-user.target` |
 
-The native suite is 7 CTest entries: `unit.native` (one entry running **96**
+The native suite is 7 CTest entries: `unit.native` (one entry running **98**
 unit test cases across 10 files), `differential.native_vs_interpreter` (**8**
 cases compared against real x86-64 hardware), `cli.smoke`, `bench.smoke`,
 `bench.methodology`, `bench.timing_not_eliminated` and
 `bench.rejects_single_sample`.
 
 ### Remote verification (GitHub Actions)
+
+CI run `39294174801` on `main` (commit `2148492`, Phase 4 translator):
+**conclusion `success`** — all five jobs passed: `ASan/UBSan` (3m4s),
+`build & test (gcc)` (27s), `clang-format` (6s), `build & test (clang)` (34s),
+`AArch64 cross tests (qemu-user)` (54s). The AArch64 job executes the translated
+blocks under `qemu-user`, runs the whole-program differentials, and runs the CLI
+smoke test with `HYPERION_EMULATOR`, so tier 1 is proven to translate and run
+generated code in CI.
 
 CI run `39281904991` on `main` (commit `f1feee1`, Phase 3 translator):
 **conclusion `success`** — all five jobs passed: `AArch64 cross tests (qemu-user)`

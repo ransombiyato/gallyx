@@ -302,14 +302,19 @@ void check_program_matches(const std::vector<std::uint8_t>& program, GuestState 
     const hyperion::RunResult actual = cache.run(tier1_mem, initial, max_steps);
 
     HYPERION_CHECK_EQ(static_cast<int>(actual.status), static_cast<int>(expected.status));
-    HYPERION_CHECK_EQ(actual.steps, expected.steps);
-    if (expected.status == hyperion::RunStatus::kOk ||
-        expected.status == hyperion::RunStatus::kStepLimit) {
+    if (expected.status == hyperion::RunStatus::kOk) {
+        // A halted program must agree exactly, including the instruction count.
+        HYPERION_CHECK_EQ(actual.steps, expected.steps);
         for (std::size_t i = 0; i < hyperion::kGprCount; ++i) {
             HYPERION_CHECK_EQ(actual.state.gpr[i], expected.state.gpr[i]);
         }
         HYPERION_CHECK_EQ(actual.state.rip, expected.state.rip);
         HYPERION_CHECK(actual.state.flags == expected.state.flags);
+    } else if (expected.status == hyperion::RunStatus::kStepLimit) {
+        // Blocks are indivisible, so tier 1 may stop a few instructions short of
+        // the limit, but it must never exceed it and must never run past it.
+        HYPERION_CHECK(actual.steps <= expected.steps);
+        HYPERION_CHECK(actual.steps <= max_steps);
     }
 }
 
@@ -363,6 +368,76 @@ HYPERION_TEST("translator", "differential_branch_directions") {
     }
 }
 
+HYPERION_TEST("translator", "differential_nested_loops") {
+    // Nested counted loops, both branching backwards, so the block cache is
+    // re-entered at two distinct PCs. Bytes verified with `as`/`objdump`.
+    //   xor edx, edx            ; 31 D2
+    // outer:
+    //   mov ecx, 3              ; B9 03 00 00 00
+    // inner:
+    //   add rdx, 1              ; 48 83 C2 01
+    //   dec rcx                 ; 48 FF C9
+    //   jnz inner               ; 75 F7
+    //   dec rsi                 ; 48 FF CE
+    //   jnz outer               ; 75 ED
+    //   hlt                     ; F4
+    const std::vector<std::uint8_t> program = {
+        0x31, 0xD2, 0xB9, 0x03, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC2, 0x01,
+        0x48, 0xFF, 0xC9, 0x75, 0xF7, 0x48, 0xFF, 0xCE, 0x75, 0xED, 0xF4,
+    };
+    for (std::uint64_t outer : {std::uint64_t{0}, std::uint64_t{1}, std::uint64_t{7}}) {
+        GuestState initial;
+        initial.rip = kBase;
+        initial.reg(Gpr::kRsi) = outer;
+        // outer == 0 is an infinite loop: `dec rsi` wraps to all-ones and never
+        // reaches zero. A small step limit keeps that case fast while still
+        // proving both tiers report a step limit (not a hang or a wrong halt).
+        check_program_matches(program, initial, 100'000);
+    }
+    // Independent expected value: 3*outer additions of 1 into rdx.
+    FlatMemory mem(kBase, 4096);
+    std::memcpy(mem.data(), program.data(), program.size());
+    hyperion::TranslationCache cache;
+    GuestState initial;
+    initial.rip = kBase;
+    initial.reg(Gpr::kRsi) = 7;
+    const hyperion::RunResult r = cache.run(mem, initial);
+    HYPERION_CHECK(r.status == hyperion::RunStatus::kOk);
+    HYPERION_CHECK_EQ(r.state.reg(Gpr::kRdx), std::uint64_t{21});
+}
+
+HYPERION_TEST("translator", "differential_branch_inside_loop") {
+    // A conditional *inside* a loop: the taken and not-taken exits reconverge at
+    // a shared continuation, and the branch alternates direction every
+    // iteration. Bytes verified with `as`/`objdump`.
+    //   xor edx, edx            ; 31 D2
+    //   mov ecx, 8              ; B9 08 00 00 00
+    // loop:
+    //   mov rbx, rcx            ; 48 89 CB
+    //   and rbx, 1              ; 48 83 E3 01
+    //   jz  skip                ; 74 04
+    //   add rdx, 10             ; 48 83 C2 0A
+    // skip:
+    //   add rdx, 1              ; 48 83 C2 01
+    //   dec rcx                 ; 48 FF C9
+    //   jnz loop                ; 75 EA
+    //   hlt                     ; F4
+    const std::vector<std::uint8_t> program = {
+        0x31, 0xD2, 0xB9, 0x08, 0x00, 0x00, 0x00, 0x48, 0x89, 0xCB, 0x48, 0x83, 0xE3, 0x01, 0x74,
+        0x04, 0x48, 0x83, 0xC2, 0x0A, 0x48, 0x83, 0xC2, 0x01, 0x48, 0xFF, 0xC9, 0x75, 0xEA, 0xF4,
+    };
+    GuestState initial;
+    initial.rip = kBase;
+    check_program_matches(program, initial);
+    // Independent expected value: 8 iterations, +10 on the 4 odd counters.
+    FlatMemory mem(kBase, 4096);
+    std::memcpy(mem.data(), program.data(), program.size());
+    hyperion::TranslationCache cache;
+    const hyperion::RunResult r = cache.run(mem, initial);
+    HYPERION_CHECK(r.status == hyperion::RunStatus::kOk);
+    HYPERION_CHECK_EQ(r.state.reg(Gpr::kRdx), std::uint64_t{48});
+}
+
 HYPERION_TEST("translator", "dispatcher_stops_at_unsupported") {
     // mov eax, 1 ; push rax ; hlt. The dispatcher translates `mov`, then stops
     // at `push` with kUnsupported and leaves rip on the push, never running the
@@ -408,6 +483,14 @@ HYPERION_TEST("translator", "differential_program_loops") {
 }
 
 HYPERION_TEST("translator", "differential_branch_directions") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "differential_nested_loops") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "differential_branch_inside_loop") {
     HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
 }
 

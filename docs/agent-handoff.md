@@ -18,7 +18,7 @@ no KVM. Development often happens on x86-64 Linux hosts.
 
 ## 2. Current state in one paragraph
 
-**Phase 0 and Phase 1 are complete. Phase 2 is nearly complete.** The repository
+**Phases 0, 1 and 2 are complete.** The repository
 builds clean with `-Werror`, has a dependency-free unit-test suite wired into
 CTest, and has a **verified cross-architecture validation pipeline** that
 cross-compiles the test suite to AArch64 and runs it under `qemu-user`. A host
@@ -107,31 +107,31 @@ Expected test names: `unit.native`, `bench.smoke`, `bench.methodology`,
 
 ## 5. Your next task
 
-**Finish Phase 2, then start Phase 3.** Guest state, the decoder, the reference
-interpreter and the hardware differential test already exist and pass. The
-remaining Phase 2 work is small:
+**Phase 2 is complete. Start Phase 3 — first native code generation.** Guest
+state, the decoder, the reference interpreter, the subset contract
+(`COMPATIBILITY.md` §2), the hardware differential and the program-image runner
+all exist and pass.
 
-1. **Document the subset in `COMPATIBILITY.md`.** It still describes Phase 0/1.
-   List every supported opcode, addressing form and operand size, and every
-   `DecodeError` case. This is the contract the Phase 3 code generator must
-   meet, so write it as a specification, not a summary.
-2. **Add a "run a program image" helper** so multi-instruction programs (with
-   branches and loops) can be executed by the interpreter and asserted on. The
-   stepping semantics already work; this is a convenience layer for tests.
+1. Build an AArch64 instruction encoder/emitter for the Phase 2 subset. Start
+   with `mov`, `add`, `sub`, `and`, `orr`, `eor`, `cmp`, `b.cond` and grow it.
+2. Add executable-code management (an `mmap`'d W^X region and
+   `__builtin___clear_cache`) and a convention for entering/leaving generated
+   code with the `GuestState` in memory.
+3. Translate one instruction at a time at first, then validate every result
+   against the interpreter oracle through the existing differential harness.
+4. Test the generated code on the real AArch64 path — the `cross.aarch64_tests`
+   pipeline already runs AArch64 binaries under `qemu-user`, so no target device
+   is needed for CI.
 
-Then begin **Phase 3 — first native code generation**: emit AArch64 for the
-verified subset, validate generated code against the interpreter oracle, and
-reuse the existing `cross.aarch64_tests` pipeline to execute it under
-`qemu-user`. The interpreter must stay available as the oracle — do not delete
-it.
+**The interpreter stays.** It is the oracle. Do not weaken it to make the code
+generator look correct.
 
-Full Phase 2/3 acceptance criteria are in `ROADMAP.md`.
+Full Phase 3 acceptance criteria are in `ROADMAP.md`.
 
-**Do not** start Phase 3 (code generation) until Phase 2 exit criteria are met.
 **Do not** write kernel-level code — the tier is unvalidated on the reference
 device.
 
-Optional Phase 1 leftovers, neither blocking Phase 2: unblocking the AArch64 UML
+Optional Phase 1 leftovers, neither blocking Phase 3: unblocking the AArch64 UML
 build (a host glibc/kernel-header problem, see `docs/prior-art.md` §6), and a
 first CI performance-trend baseline.
 

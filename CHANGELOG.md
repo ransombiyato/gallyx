@@ -23,7 +23,23 @@ Meaningful changes by milestone. Format loosely follows
   PF, AF, ZF, SF, OF), effective-address computation, and x86-64's 32-bit
   zero-extension rule. This is the **correctness oracle** for Phase 3.
 - 38 new unit test cases: `test_guest_state.cpp` (7), `test_decoder.cpp` (19),
-  `test_interpreter.cpp` (12).
+  `test_interpreter.cpp` (16, including four that run whole programs).
+
+### Added — program-image runner and the subset contract
+- `run_program(memory, state, max_steps)`: runs a program image until HLT/RET,
+  a fault, or a step limit, and returns the final state, retired-instruction
+  count and a reason. A convenience layer over `step()` with no new semantics;
+  the default step limit exists so a non-halting guest program is *reported*,
+  not allowed to hang the suite.
+- Tests run a real `dec`/`jnz` loop (sum 1..10 = 55) and cross-check the result
+  against native x86-64; a second test proves an infinite loop reports
+  `kStepLimit`; a third proves execution stops at the first unsupported
+  instruction rather than running past it.
+- `COMPATIBILITY.md` §2 rewritten from a *plan* into a *specification*: it now
+  documents exactly what the decoder accepts (opcodes, encodings, operand
+  sizes, addressing forms, `DecodeError` cases) and lists the planned-but-
+  unbuilt instructions in a separate section so the plan is not mistaken for
+  working code. §3 and §4 updated to the real flag and register coverage.
 
 ### Added — hardware differential test
 - `tests/differential/test_differential.cpp`: compares the interpreter against

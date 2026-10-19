@@ -457,4 +457,33 @@ StepResult step(GuestState& state, Memory& memory) {
     return result;
 }
 
+RunResult run_program(Memory& memory, GuestState state, std::uint64_t max_steps) {
+    RunResult out;
+    out.state = state;
+    for (std::uint64_t i = 0; i < max_steps; ++i) {
+        const StepResult r = step(out.state, memory);
+        switch (r.status) {
+        case StepStatus::kOk:
+            ++out.steps;
+            break;
+        case StepStatus::kHalted:
+            ++out.steps;
+            out.status = RunStatus::kOk;
+            out.message = r.message;
+            return out;
+        case StepStatus::kFault:
+            out.status = RunStatus::kFault;
+            out.message = r.message;
+            return out;
+        case StepStatus::kUnsupported:
+            out.status = RunStatus::kUnsupported;
+            out.message = r.message;
+            return out;
+        }
+    }
+    out.status = RunStatus::kStepLimit;
+    out.message = "step limit reached without halting";
+    return out;
+}
+
 } // namespace hyperion

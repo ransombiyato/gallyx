@@ -2,8 +2,9 @@
 
 Tracks implemented versus missing instruction and ABI features.
 
-> **Nothing is implemented yet.** This file defines the vocabulary and the
-> tracking rules so that coverage is recorded honestly from Phase 2 onward.
+> **Phase 2 status:** a small, documented instruction subset is implemented and
+> tested (§2). Everything else is explicitly rejected. There is no AArch64 code
+> generation, no translation cache and no syscall layer yet.
 
 Legend: ✅ implemented + tested · 🟡 implemented, untested · 🧪 prototype · ❌ unsupported (explicit) · ⬜ planned
 
@@ -21,46 +22,117 @@ Legend: ✅ implemented + tested · 🟡 implemented, untested · 🧪 prototype
 
 ---
 
-## 2. Instruction subset — Phase 2 target
+## 2. Instruction subset — implemented (Phase 2)
 
-The Phase 2 subset is deliberately small and explicit.
+This section is the **contract** the Phase 3 code generator must meet. It
+describes what `src/core/decoder.cpp` accepts *today*, verified by
+`tests/unit/test_decoder.cpp` and `tests/differential/`. Anything not listed
+here is rejected with a specific `DecodeError` — the decoder never guesses.
 
-| Group | Instructions | Status | Phase |
+### 2.1 Supported instructions
+
+| Instruction | Encodings accepted | Operand sizes | Notes |
 | --- | --- | --- | --- |
-| Data movement | `mov r64, imm64`, `mov r64, r64`, `mov r64, [mem]`, `mov [mem], r64` | ⬜ | 2 |
-| 32-bit forms | `mov r32, imm32`, `mov r32, r32` (zero-extending) | ⬜ | 2 |
-| Arithmetic | `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test` (64/32-bit) | ⬜ | 2 |
-| Unary | `inc`, `dec`, `neg`, `not` | ⬜ | 2 |
-| Shift/rotate | `shl`, `shr`, `sar` (by immediate and by `CL`) | ⬜ | 2 |
-| Multiply | `imul` (2- and 3-operand forms), `mul` | ⬜ | 2 |
-| Address computation | `lea` | ⬜ | 2 |
-| Stack | `push`, `pop` | ⬜ | 2 |
-| Control flow | `jmp`, `jcc` (all 16 conditions), `call`, `ret` | ⬜ | 2 |
-| Misc | `nop` | ⬜ | 2 |
-| Syscall entry | `syscall` (dispatch stub; full ABI in Phase 6) | ⬜ | 2/6 |
-| Division | `idiv`, `div` | ⬜ | 2 (stretch) |
+| `mov r, r/m` | `0x8B` | 32, 64 | reg ← reg/mem |
+| `mov r/m, r` | `0x89` | 32, 64 | reg/mem ← reg |
+| `mov r, imm` | `0xB8+rd` | 32, 64 | 32-bit imm; 64-bit form reads 8-byte imm |
+| `add` | `0x01`, `0x03`, `0x81/0`, `0x83/0` | 32, 64 | r/m,r · r,r/m · imm32 · imm8(sx) |
+| `or` | `0x09`, `0x0B`, `0x81/1`, `0x83/1` | 32, 64 | as above |
+| `and` | `0x21`, `0x23`, `0x81/4`, `0x83/4` | 32, 64 | as above |
+| `sub` | `0x29`, `0x2B`, `0x81/5`, `0x83/5` | 32, 64 | as above |
+| `xor` | `0x31`, `0x33`, `0x81/6`, `0x83/6` | 32, 64 | as above |
+| `cmp` | `0x39`, `0x3B`, `0x81/7`, `0x83/7` | 32, 64 | flags only; no write-back |
+| `inc` | `0xFF/0` | 32, 64 | preserves CF |
+| `dec` | `0xFF/1` | 32, 64 | preserves CF |
+| `push r64` | `0x50+rd` | 64 | `rsp -= 8; [rsp] = r` |
+| `pop r64` | `0x58+rd` | 64 | `r = [rsp]; rsp += 8` |
+| `jmp rel32` | `0xE9` | — | absolute target = next rip + rel32 |
+| `jcc rel8` | `0x70..0x7F` | — | all 16 conditions; **short form only** |
+| `nop` | `0x90` | — | |
+| `hlt` | `0xF4` | — | stops execution (see §2.4) |
+| `ret` | `0xC3` | — | modelled as "stop" (see §2.4) |
 
-**Out of Phase 2 scope:** SIMD/SSE/AVX, x87, MMX, atomics, `rep`-prefixed
-string ops, segmentation, most system instructions. These must be rejected
-explicitly.
+For the `0x81`/`0x83` immediate forms with a 64-bit operand, the immediate is
+**sign-extended** to 64 bits (`imm32`→64, `imm8`→64), exactly as x86-64 does.
+`0x80` (8-bit group 1) is rejected.
+
+### 2.2 Addressing forms
+
+`ModRM` mod=00/01/10 with rm≠100 (no SIB) and rm=100 (SIB) are supported:
+
+- `[disp32]`, `[base]`, `[base + disp8]`, `[base + disp32]`
+- `[base + index*scale + disp8/disp32]` with scale ∈ {1, 2, 4, 8}
+- REX.R/REX.X/REX.B extend the reg/index/base fields to r8–r15.
+
+**Not supported (rejected):** RIP-relative addressing (mod=00, rm=101) and the
+8-bit (`0x88`/`0x8A`) forms.
+
+### 2.3 Rejection behaviour (`DecodeError`)
+
+| Error | Raised when |
+| --- | --- |
+| `kTruncated` | the instruction extends past the supplied bytes |
+| `kUnknownOpcode` | opcode not in the supported set (incl. `0F`-map, `adc`/`sbb`) |
+| `kUnsupportedPrefix` | `0x66`, `LOCK`, and other prefixes not modelled |
+| `kUnsupportedOperand` | operand form outside the subset (e.g. 8-bit mov) |
+| `kUnsupportedModrm` | ModRM/SIB combination not supported yet (e.g. RIP-relative) |
+
+A rejected instruction must leave guest state **unchanged** and `rip`
+**unmoved**; `tests/unit/test_interpreter.cpp` asserts this.
+
+### 2.4 Deliberate simplifications
+
+- `hlt` and `ret` both stop the interpreter and report `kHalted`. Real
+  user-mode x86-64 would `#GP` on `hlt` and would pop a return address on
+  `ret`. These are modelling choices for the Phase 2 test harness, recorded
+  here so they are not mistaken for correct behaviour. They will be revisited
+  in Phase 4 (block exits) and Phase 6 (signals).
+- `ret` does **not** pop the stack.
+
+### 2.5 Planned for Phase 2 but NOT implemented
+
+These appeared in an earlier version of this table and remain unbuilt. They are
+**not** covered by any test:
+
+| Group | Instructions | Status |
+| --- | --- | --- |
+| `test` | `0x85` | ⬜ planned |
+| Unary | `neg`, `not` | ⬜ planned |
+| Shift/rotate | `shl`, `shr`, `sar` (imm and `CL`) | ⬜ planned |
+| Multiply | `imul`, `mul` | ⬜ planned |
+| Address | `lea` | ⬜ planned |
+| Control flow | `call`, `ret` (real), `jcc rel32` (`0F 8x`) | ⬜ planned |
+| Syscall | `syscall` (`0F 05`) | ⬜ planned (Phase 6) |
+| Division | `div`, `idiv` | ⬜ planned (stretch) |
+| 8-bit forms | `mov r8`, `add r8`, … | ⬜ planned |
+
+**Out of Phase 2 scope entirely:** SIMD/SSE/AVX, x87, MMX, atomics,
+`rep`-prefixed string ops, segmentation, and most system instructions. All are
+rejected explicitly.
 
 ---
 
 ## 3. Flag coverage
 
+The interpreter implements **eager** flag computation (D-003) for six flags.
+Lazy materialization is a Phase 5 optimization. Each flag below is verified
+against real x86-64 hardware by `tests/differential/`.
+
 | Flag | Meaning | Status | Notes |
 | --- | --- | --- | --- |
-| CF | Carry | ⬜ | no direct AArch64 equivalent for all cases |
-| ZF | Zero | ⬜ | maps to NZCV `Z` |
-| SF | Sign | ⬜ | maps to NZCV `N` |
-| OF | Overflow | ⬜ | maps to NZCV `V` |
-| PF | Parity (low byte) | ⬜ | no AArch64 equivalent; must be computed |
-| AF | Auxiliary carry | ⬜ | no AArch64 equivalent; must be computed |
-| DF | Direction | ⬜ | needed for string ops (Phase 7) |
-| IF/TF/IOPL | System | ⬜ | user-mode subset only |
+| CF | Carry / borrow | ✅ | set by add/sub; cleared by logic ops; preserved by inc/dec |
+| ZF | Zero | ✅ | set by all modelled ALU ops |
+| SF | Sign (bit 31/63) | ✅ | set by all modelled ALU ops |
+| OF | Signed overflow | ✅ | set by add/sub/inc/dec; cleared by logic ops |
+| PF | Parity of low byte | ✅ | `__builtin_parity`; no AArch64 equivalent, must be computed |
+| AF | Auxiliary carry (bit 3) | ✅ | no AArch64 equivalent, must be computed |
+| DF | Direction | ⬜ | only needed for string ops (Phase 7) |
+| IF/TF/IOPL | System flags | ⬜ | not modelled; user-mode subset only |
 
-Phase 2 implements **eager** flag computation (D-003). Lazy materialization is
-a Phase 5 optimization.
+`pack_flags`/`unpack_flags` map these to/from architectural RFLAGS bits
+(CF=0, PF=2, AF=4, ZF=6, SF=7, OF=11), and bit 1 is always set as on real
+hardware. Unmodelled bits are ignored on unpack and dropped on pack — this is
+intentional and tested.
 
 ---
 
@@ -68,15 +140,20 @@ a Phase 5 optimization.
 
 | State | Status | Notes |
 | --- | --- | --- |
-| GPR r64 (RAX…R15) | ⬜ | full 64-bit values |
-| GPR 32/16/8-bit aliases | ⬜ | partial-write semantics, incl. `AH/BH/CH/DH` |
-| RIP | ⬜ | tracked per block |
-| RFLAGS | ⬜ | eager in Phase 2 |
-| RSP / stack | ⬜ | guest stack managed in guest address space |
+| GPR r64 (RAX…R15) | ✅ | full 64-bit values; index order matches x86-64 encoding |
+| GPR 32-bit aliases | ✅ | 32-bit writes zero-extend to 64 (tested against hardware) |
+| GPR 16/8-bit aliases | ⬜ | not modelled; 8-bit mov is rejected, no 16-bit prefix |
+| RIP | ✅ | advanced per instruction; branches set an absolute target |
+| RFLAGS | ✅ | six flags (CF/PF/AF/ZF/SF/OF), eager; see §3 |
+| RSP / stack | 🟡 | `push`/`pop` work over `FlatMemory`; no guest stack mapping yet |
 | XMM / SSE | ⬜ | Phase 7 |
 | x87 / MMX | ⬜ | Phase 7, likely via reuse |
 | FS/GS base, segment bases | ⬜ | Phase 6 (TLS) |
 | MXCSR | ⬜ | Phase 7 |
+
+`FlatMemory` is a single flat region used by the interpreter. It is **not** a
+guest address space: there is no paging, no mapping of the guest stack, and no
+`mmap`. That arrives in Phase 4/6.
 
 ---
 

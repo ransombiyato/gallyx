@@ -17,16 +17,24 @@ works, what was last verified, and what to do next.
 | 1. Guest-state representation (GPRs, RFLAGS) | **Done** — `include/hyperion/guest_state.hpp` |
 | 2. x86-64 decoder for a documented subset | **Done** — `include/hyperion/decoder.hpp`, `src/core/decoder.cpp` |
 | 3. Reference interpreter (correctness oracle) | **Done** — `src/core/interpreter.cpp` |
-| 4. Unit tests: decoder, interpreter, guest state | **Done** — 39 new cases (see §2) |
+| 4. Unit tests: decoder, interpreter, guest state | **Done** — 42 new cases (see §2) |
 | 5. Differential test vs. real x86-64 hardware | **Done** — `tests/differential/`, 8 cases |
-| 6. Documented instruction subset in COMPATIBILITY.md | **Pending** — next task |
-| 7. Branch/loop execution over a program image | **Pending** — Phase 4 territory |
+| 6. Documented instruction subset in COMPATIBILITY.md | **Done** — §2 is the Phase 3 contract |
+| 7. Branch/loop execution over a program image | **Done** — `run_program()` + loop tests |
 
-**Instruction subset (Phase 2).** MOV (reg/imm/mem, 8/16/32/64 forms for
-reg/imm, 32/64 for memory), ADD, SUB, AND, OR, XOR, CMP, INC, DEC, PUSH, POP,
-JMP, Jcc (rel8 short forms), NOP, HLT, and RET-as-stop. Addressing supports
-base+index*scale+disp with a SIB byte. **Everything else is explicitly
-rejected** with a specific `DecodeError`; the decoder never guesses.
+**Instruction subset (Phase 2).** MOV, ADD, SUB, AND, OR, XOR, CMP, INC, DEC,
+PUSH, POP, JMP (rel32), Jcc (rel8), NOP, HLT, and RET-as-stop, at 32- and
+64-bit operand sizes, with REX/ModRM/SIB addressing. **The authoritative
+specification is `COMPATIBILITY.md` §2**, which also lists the planned-but-
+unbuilt instructions separately. Everything else is explicitly rejected with a
+specific `DecodeError`; the decoder never guesses.
+
+**`run_program()`.** A convenience layer over `step()` that runs a program
+image until HLT/RET, an error, or a step limit. It adds no new semantics, but
+it makes multi-instruction programs testable — `test_interpreter.cpp` runs a
+real `dec`/`jnz` loop (sum 1..10 = 55) and cross-checks it against native
+x86-64, and asserts that an infinite loop reports a step limit rather than
+hanging.
 
 **Two real bugs were found by the differential test and fixed** (this is the
 whole point of having one):
@@ -132,7 +140,7 @@ aarch64-linux-gnu-g++ 14.2.0.
 | Check | Command | Result |
 | --- | --- | --- |
 | Native build (`-Werror`) | `cmake --build build/dev` | PASS — no warnings |
-| Native tests | `ctest --test-dir build/dev` | PASS — **6/6** entries (54 unit cases + 8 differential) |
+| Native tests | `ctest --test-dir build/dev` | PASS — **6/6** entries (58 unit cases + 8 differential) |
 | Differential vs. hardware | `./build/dev/tests/hyperion_differential_tests` | PASS — 8/8 compared against real x86-64 |
 | Cross build | `cmake --build build/cross-test` | PASS — AArch64 binaries produced |
 | Cross tests under qemu | `ctest --test-dir build/cross-test` | PASS — **3/3** |
@@ -147,7 +155,7 @@ aarch64-linux-gnu-g++ 14.2.0.
 | UML feasibility (smoke) | `experiments/uml/run.sh smoke` | PASS — kernel boots unprivileged; all 6 namespace types OK |
 | UML feasibility (systemd) | `experiments/uml/run.sh systemd` | PASS — systemd 257 as PID 1 → `multi-user.target` |
 
-The native suite is 6 CTest entries: `unit.native` (one entry running **54**
+The native suite is 6 CTest entries: `unit.native` (one entry running **58**
 unit test cases across 6 files), `differential.native_vs_interpreter` (**8**
 cases compared against real x86-64 hardware), `bench.smoke`,
 `bench.methodology`, `bench.timing_not_eliminated` and
@@ -201,29 +209,32 @@ stable-vs-noisy discrimination case).
 
 ## 4. Immediate next task
 
-**Phase 2 items 1-5 are done and verified.** Guest state, the decoder, the
-reference interpreter, the unit tests and the hardware differential all exist
-and pass. The remaining Phase 2 work is documentation, then Phase 3.
+**Phase 2 is complete and verified.** Guest state, the decoder, the reference
+interpreter, the documented subset contract (`COMPATIBILITY.md` §2), the
+hardware differential and the program-image runner all exist and pass. The
+Phase 2 exit criterion — "the supported subset passes differential tests
+against an independent reference" — is met for the implemented subset.
 
-Smallest meaningful next task (finish Phase 2):
+The next task is **Phase 3 — first native code generation**:
 
-1. Document the exact supported subset and the rejection behaviour in
-   `COMPATIBILITY.md` (it currently describes Phase 0/1 only). List every
-   supported opcode, the addressing forms, the operand sizes, and every
-   `DecodeError` case. This is the contract Phase 3's code generator must meet.
-2. Add a small "run a program image" helper so multi-instruction programs (with
-   branches and loops) can be executed by the interpreter and asserted on. The
-   interpreter already steps correctly; this is a convenience layer for tests,
-   not new semantics.
-3. Then begin Phase 3 (first AArch64 code generation) using the interpreter as
-   the oracle, reusing the `cross.aarch64_tests` pipeline already in CI.
+1. Build an AArch64 instruction encoder/emitter for the Phase 2 subset. Start
+   with a tiny set (`mov`, `add`, `sub`, `and`, `orr`, `eor`, `cmp`, `b.cond`)
+   and grow it as the generator needs it.
+2. Add executable-code management (an `mmap`'d W^X region, `__builtin___clear_cache`)
+   and a calling convention for entering/leaving generated code with the
+   `GuestState` in memory.
+3. Generate code one instruction at a time first (a "trivial" translator), then
+   validate every result against the interpreter oracle using the existing
+   differential harness. **The interpreter stays** — it is the oracle.
+4. Run the generated code on the real AArch64 path: the `cross.aarch64_tests`
+   pipeline already executes AArch64 binaries under `qemu-user`, so generated
+   code can be tested in CI without the target device.
 
-**Acceptance criteria for Phase 2** are in `ROADMAP.md`. Do not begin Phase 3
-until they are met — the remaining blocker is the COMPATIBILITY.md subset
-contract.
+Do not delete or weaken the interpreter to make the code generator look
+correct. Phase 3 exit criteria are in `ROADMAP.md`.
 
-Two optional Phase 1 follow-ups remain if wanted: unblocking the UML build, and
-a first CI performance-trend baseline. Neither blocks Phase 2.
+Optional Phase 1 leftovers remain if wanted (unblocking the UML build, a CI
+performance-trend baseline), but neither blocks Phase 3.
 
 ---
 

@@ -212,6 +212,105 @@ HYPERION_TEST("interpreter", "flags_pack_unpack_round_trip") {
     HYPERION_CHECK((packed & 0x2ULL) != 0);
 }
 
+HYPERION_TEST("interpreter", "run_program_executes_a_loop") {
+    // A real loop: sum = 1+2+...+10, using dec/jnz.
+    //
+    //   mov ecx, 10          ; B9 0A 00 00 00
+    //   xor eax, eax         ; 31 C0
+    // loop:
+    //   add eax, ecx         ; 01 C8
+    //   dec ecx              ; FF C9
+    //   jnz loop             ; 75 F9   (-7 -> back to 'add')
+    //   hlt                  ; F4
+    //
+    // Expected eax = 55. This exercises arithmetic, flags, a backwards short
+    // branch, and repeated execution through the whole pipeline.
+    const std::vector<std::uint8_t> code = {
+        0xB9, 0x0A, 0x00, 0x00, 0x00, // mov ecx, 10
+        0x31, 0xC0,                   // xor eax, eax
+        0x01, 0xC8,                   // add eax, ecx
+        0xFF, 0xC9,                   // dec ecx
+        0x75, 0xFA,                   // jnz -6 (to 'add eax, ecx')
+        0xF4,                         // hlt
+    };
+    FlatMemory memory(kBase, 4096);
+    std::memcpy(memory.data(), code.data(), code.size());
+    GuestState state;
+    state.rip = kBase;
+    const auto r = hyperion::run_program(memory, state);
+    HYPERION_CHECK(r.status == hyperion::RunStatus::kOk);
+    HYPERION_CHECK_EQ(r.state.reg(Gpr::kRax), 55ULL); // 1+2+...+10
+    HYPERION_CHECK_EQ(r.state.reg(Gpr::kRcx), 0ULL);
+    HYPERION_CHECK_EQ(r.steps, 2ULL + 10ULL * 3ULL + 1ULL); // mov,xor + 10*(add,dec,jnz) + hlt
+}
+
+HYPERION_TEST("interpreter", "run_program_reports_step_limit") {
+    // An infinite loop must be reported, not hang. jmp -2 jumps to itself.
+    const std::vector<std::uint8_t> code = {0xE9, 0xFB, 0xFF, 0xFF,
+                                            0xFF}; // jmp rel32 -5 (self-loop)
+    FlatMemory memory(kBase, 4096);
+    std::memcpy(memory.data(), code.data(), code.size());
+    GuestState state;
+    state.rip = kBase;
+    const auto r = hyperion::run_program(memory, state, 1000);
+    HYPERION_CHECK(r.status == hyperion::RunStatus::kStepLimit);
+    HYPERION_CHECK_EQ(r.steps, 1000ULL);
+}
+
+HYPERION_TEST("interpreter", "run_program_stops_at_unsupported_instruction") {
+    // A program that reaches an unsupported instruction must stop there and
+    // report it, not run past it.
+    const std::vector<std::uint8_t> code = {0x90, 0x0F, 0x0B}; // nop; ud2
+    FlatMemory memory(kBase, 4096);
+    std::memcpy(memory.data(), code.data(), code.size());
+    GuestState state;
+    state.rip = kBase;
+    const auto r = hyperion::run_program(memory, state);
+    HYPERION_CHECK(r.status == hyperion::RunStatus::kUnsupported);
+    HYPERION_CHECK_EQ(r.steps, 1ULL);          // the nop retired
+    HYPERION_CHECK_EQ(r.state.rip, kBase + 1); // stopped at the ud2
+}
+
+HYPERION_TEST("interpreter", "run_program_matches_hardware_for_a_loop") {
+#if defined(__x86_64__)
+    // Differential: run the same loop natively and in the interpreter.
+    // Sum of 1..10 = 55, computed the same way both times.
+    const std::vector<std::uint8_t> code = {
+        0xB9, 0x0A, 0x00, 0x00, 0x00, // mov ecx, 10
+        0x31, 0xC0,                   // xor eax, eax
+        0x01, 0xC8,                   // add eax, ecx
+        0xFF, 0xC9,                   // dec ecx
+        0x75, 0xFA,                   // jnz -6
+        0xF4,                         // hlt (replaced by ret for native)
+    };
+    FlatMemory memory(kBase, 4096);
+    std::memcpy(memory.data(), code.data(), code.size());
+    GuestState state;
+    state.rip = kBase;
+    const auto r = hyperion::run_program(memory, state);
+    HYPERION_CHECK(r.status == hyperion::RunStatus::kOk);
+
+    // Native: the same loop, ending in ret, called as a function.
+    const std::uint32_t native_result = []() -> std::uint32_t {
+        std::uint32_t eax = 0;
+        std::uint32_t ecx = 10;
+        asm volatile("xorl %%eax, %%eax\n\t"
+                     "1:\n\t"
+                     "addl %%ecx, %%eax\n\t"
+                     "decl %%ecx\n\t"
+                     "jnz 1b\n\t"
+                     : "=a"(eax)
+                     : "c"(ecx)
+                     : "cc");
+        return eax;
+    }();
+    HYPERION_CHECK_EQ(static_cast<std::uint32_t>(r.state.reg(Gpr::kRax)), native_result);
+    HYPERION_CHECK_EQ(static_cast<std::uint32_t>(r.state.reg(Gpr::kRax)), 55U);
+#else
+    HYPERION_SKIP("requires an x86-64 host for the native reference");
+#endif
+}
+
 HYPERION_TEST("interpreter", "condition_evaluation_table") {
     Flags f;
     f.zf = true;

@@ -124,24 +124,35 @@ workload. See `docs/known-issues.md`.
 
 ---
 
-## Phase 2 — Minimal instruction execution ⬜
+## Phase 2 — Minimal instruction execution 🟡
 
 **Objective.** Correctly execute a small, explicitly documented instruction
 subset.
 
 **Work items.**
 
-1. Define the subset (start: `mov` reg/imm/mem, `add`, `sub`, `and`, `or`,
-   `xor`, `cmp`, `test`, `inc`/`dec`, `jmp`, `jcc`, `call`, `ret`, `push`,
-   `pop`, `nop`, `lea`, `syscall` stub) in `COMPATIBILITY.md`.
-2. Implement the decoder for that subset.
+1. Define the subset in `COMPATIBILITY.md`. ✅ **Done** — §2 is now a precise
+   specification of the implemented subset (and lists what is *not* implemented
+   separately, so the plan is not mistaken for reality).
+2. Implement the decoder for that subset. ✅ **Done** —
+   `src/core/decoder.cpp`; unsupported input is rejected with a specific
+   `DecodeError`.
 3. Implement guest state and instruction semantics in the IR/interpreter.
+   ✅ **Done** — `guest_state.*`, `interpreter.*`.
 4. Build automated tests for registers, flags, arithmetic, memory, control flow.
-5. Differential-test the interpreter against an independent reference
-   (a native x86-64 oracle and/or QEMU).
+   ✅ **Done** — 54 unit cases.
+5. Differential-test the interpreter against an independent reference.
+   ✅ **Done** — 8 cases against **real x86-64 hardware** (`tests/differential/`).
 
 **Exit criteria.** The supported subset passes differential tests against an
 independent reference. Unsupported instructions fail explicitly, never silently.
+**Met for the implemented subset.** Not met for the *planned* items in
+`COMPATIBILITY.md` §2.5 (`test`, `neg`, `not`, shifts, `imul`, `lea`, real
+`call`/`ret`, `jcc rel32`, `syscall`, `div`), which are deferred.
+
+**Remaining before Phase 3:** a convenience helper to run a multi-instruction
+program image (with branches/loops) through the interpreter for testing. The
+stepping semantics already exist.
 
 ---
 

@@ -113,6 +113,17 @@ public:
     void ldrb(Reg rt, Reg rn, unsigned byte_offset);
     void strb(Reg rt, Reg rn, unsigned byte_offset);
 
+    // --- load/store pair (64-bit) ----------------------------------------
+    // Used to save and restore callee-saved host registers around a block.
+    // `offset` is the signed immediate (a multiple of 8 in [-512, 504]).
+    //   *_off:  signed offset, no writeback (e.g. `stp x21, x22, [sp, #16]`)
+    //   stp_pre: pre-index writeback        (e.g. `stp x19, x20, [sp, #-32]!`)
+    //   ldp_post: post-index writeback      (e.g. `ldp x19, x20, [sp], #32`)
+    void stp_off(Reg rt, Reg rt2, Reg rn, int offset);
+    void ldp_off(Reg rt, Reg rt2, Reg rn, int offset);
+    void stp_pre(Reg rt, Reg rt2, Reg rn, int offset);
+    void ldp_post(Reg rt, Reg rt2, Reg rn, int offset);
+
     // --- moves -----------------------------------------------------------
     // Register move, as an ORR with the zero register (the canonical MOV
     // alias). A 32-bit move zero-extends into the 64-bit register, matching

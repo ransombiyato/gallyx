@@ -57,6 +57,27 @@ HYPERION_TEST("aarch64_encoder", "data_processing_register_matches_binutils") {
     HYPERION_CHECK(e.code() == expected);
 }
 
+HYPERION_TEST("aarch64_encoder", "store_pair_matches_binutils") {
+    // Expected words are the exact output of GNU as / objdump (binutils 2.44):
+    //   stp x19, x20, [sp, #-32]!
+    //   stp x21, x22, [sp, #16]
+    //   ldp x21, x22, [sp, #16]
+    //   ldp x19, x20, [sp], #32
+    Encoder e;
+    e.stp_pre(19, 20, 31, -32);
+    e.stp_off(21, 22, 31, 16);
+    e.ldp_off(21, 22, 31, 16);
+    e.ldp_post(19, 20, 31, 32);
+
+    const std::vector<std::uint32_t> expected = {
+        0xA9BE53F3u, // stp x19, x20, [sp, #-32]!
+        0xA9015BF5u, // stp x21, x22, [sp, #16]
+        0xA9415BF5u, // ldp x21, x22, [sp, #16]
+        0xA8C253F3u, // ldp x19, x20, [sp], #32
+    };
+    HYPERION_CHECK(e.code() == expected);
+}
+
 HYPERION_TEST("aarch64_encoder", "moves_match_binutils") {
     Encoder e;
     e.movz(Width::k64, 0, 0x1234);

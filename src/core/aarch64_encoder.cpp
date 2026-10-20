@@ -235,6 +235,7 @@ namespace {
 // LDR/STR (unsigned offset, scaled): size(2) 111 0 01 opc(2) imm12 Rn Rt.
 // The immediate is the byte offset divided by the access size.
 constexpr std::uint32_t kLoadStoreBase = 0x39000000u;
+constexpr std::uint32_t kLoadStorePairBase = 0x28000000u;
 } // namespace
 
 void Encoder::ldr(Width w, Reg rt, Reg rn, unsigned byte_offset) {
@@ -281,6 +282,54 @@ void Encoder::strb(Reg rt, Reg rn, unsigned byte_offset) {
         throw std::invalid_argument("a64::Encoder: strb offset out of range");
     }
     emit(kLoadStoreBase | (byte_offset << 10) | (rn << 5) | rt);
+}
+
+// STP/LDP use the signed-offset load/store-pair encoding. The 7-bit signed
+// immediate is scaled by 8 for 64-bit pairs.
+namespace {
+std::uint32_t scaled_pair_imm(int offset) {
+    if (offset % 8 != 0 || offset < -512 || offset > 504) {
+        throw std::invalid_argument(
+            "a64::Encoder: stp/ldp offset must be a multiple of 8 in [-512, 504]");
+    }
+    return static_cast<std::uint32_t>((offset >> 3) & 0x7F);
+}
+} // namespace
+
+void Encoder::stp_off(Reg rt, Reg rt2, Reg rn, int offset) {
+    validate_reg(rt);
+    validate_reg(rt2);
+    validate_reg(rn);
+    // opc = 10 (64-bit), L = 0 (store), mode = 10 (signed offset).
+    emit(kLoadStorePairBase | (2u << 30) | (2u << 23) | (scaled_pair_imm(offset) << 15) |
+         (rt2 << 10) | (rn << 5) | rt);
+}
+
+void Encoder::ldp_off(Reg rt, Reg rt2, Reg rn, int offset) {
+    validate_reg(rt);
+    validate_reg(rt2);
+    validate_reg(rn);
+    // opc = 10 (64-bit), L = 1 (load), mode = 10 (signed offset).
+    emit(kLoadStorePairBase | (2u << 30) | (1u << 22) | (2u << 23) |
+         (scaled_pair_imm(offset) << 15) | (rt2 << 10) | (rn << 5) | rt);
+}
+
+void Encoder::stp_pre(Reg rt, Reg rt2, Reg rn, int offset) {
+    validate_reg(rt);
+    validate_reg(rt2);
+    validate_reg(rn);
+    // opc = 10 (64-bit), L = 0 (store), mode = 11 (pre-index).
+    emit(kLoadStorePairBase | (2u << 30) | (3u << 23) | (scaled_pair_imm(offset) << 15) |
+         (rt2 << 10) | (rn << 5) | rt);
+}
+
+void Encoder::ldp_post(Reg rt, Reg rt2, Reg rn, int offset) {
+    validate_reg(rt);
+    validate_reg(rt2);
+    validate_reg(rn);
+    // opc = 10 (64-bit), L = 1 (load), mode = 01 (post-index).
+    emit(kLoadStorePairBase | (2u << 30) | (1u << 22) | (1u << 23) |
+         (scaled_pair_imm(offset) << 15) | (rt2 << 10) | (rn << 5) | rt);
 }
 
 void Encoder::mov_reg(Width w, Reg rd, Reg rm) {

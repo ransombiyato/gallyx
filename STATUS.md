@@ -434,6 +434,13 @@ plus `cross.aarch64_tests`, which runs **117** unit cases under `qemu-user`).
 
 ### Remote verification (GitHub Actions)
 
+CI run `39403321275` on `main` (commit `04c200d`, Phase 5 optimization 6 +
+tool cache): **conclusion `success`** — all six jobs passed: `clang-format` (7s),
+`build & test (clang)` (22s), `syscall inventory & shellcheck` (10s),
+`ASan/UBSan` (31s), `AArch64 cross tests (qemu-user)` (48s), and
+`build & test (gcc)` (27s). The AArch64 job executes the new
+register-allocation differential tests under `qemu-user`.
+
 CI run `39392485238` on `main` (commit `c40f3fc`, Phase 5 optimizations 3–5):
 **conclusion `success`** — all six jobs passed: `build & test (gcc)`,
 `build & test (clang)`, `AArch64 cross tests (qemu-user)`, `clang-format`,

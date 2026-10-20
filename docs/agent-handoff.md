@@ -65,9 +65,10 @@ Guest-register allocation now exists **within a block** (the hottest registers a
 held in callee-saved host registers, with a profitability guard that declines
 allocation on tiny blocks), but there is no cross-block allocation or spilling.
 The syscall layer exists and is a **partial slice**: `read`/`write`/`close`/
-`lseek`/`exit`/`exit_group` and `mmap`/`mprotect`/`munmap`/`brk` are implemented,
-everything else returns `-ENOSYS`. `open`/`openat` are deliberately not
-implemented, so a guest can read only descriptors the host adopted. The guest
+`fstat`/`lseek`/`exit`/`exit_group`, `mmap`/`mprotect`/`munmap`/`brk` and
+`openat` are implemented, everything else returns `-ENOSYS`. `openat` is limited
+to `AT_FDCWD` and a bounded guest pathname, and it forwards to the host kernel —
+Hyperion is **not a sandbox** (SECURITY.md, DECISIONS.md D-025). The guest
 stack (`push`/`pop`/`ret`) and memory operands are still *refused explicitly*
 rather than miscompiled; memory operands need the code generator to emit
 loads/stores (Phase 6/7). The interpreter remains the only *complete* execution
@@ -178,13 +179,14 @@ build.
 **Phases 0–4 are closed. Phase 5 is active (six optimizations accepted and
 measured: parity fast path, dead-`rip` elimination, flag liveness, direct-mapped
 dispatch, ALU immediate folding, guest-register allocation). Phase 6's syscall
-inventory is complete and CI-validated, and **three** syscall slices are
+inventory is complete and CI-validated, and **four** syscall slices are
 implemented and tested in both tiers: the first (`write`/`exit`/`exit_group`),
-the second (the guest address space plus `mmap`/`mprotect`/`munmap`/`brk`), and
-the third (a guest descriptor table plus `read`/`close`/`lseek`).
-The next concrete step is `open`/`openat` and the file-inspection syscalls
-(`fstat`/`newfstatat`, `getdents64`) over the existing descriptor table, then
-memory operands in the code generator.** Guest state, the
+the second (the guest address space plus `mmap`/`mprotect`/`munmap`/`brk`),
+the third (a guest descriptor table plus `read`/`close`/`lseek`), and the
+fourth (`openat`/`fstat`).
+The next concrete step is the remaining U4 syscalls a real program needs to
+start (`arch_prctl`, `getdents64`, `access`, `readlink`, `getrandom`,
+`newfstatat`), then memory operands in the code generator.** Guest state, the
 decoder, the reference interpreter, the subset contract (`COMPATIBILITY.md` §2),
 the hardware differential, the AArch64 encoder, executable memory,
 single-instruction translation, whole-block translation, the translation-cache
@@ -249,28 +251,36 @@ and pass.
    unimplemented. Tested end-to-end (DECISIONS.md D-023).
 9. ~~Build a guest descriptor table and `read`/`close`/`lseek`.~~ **Done &
    tested.** `MinimalSyscallHandler` owns a guest descriptor table (guest fd →
-   host `FILE*`) seeded with fd 0/1/2; `adopt()` attaches an already-open host
+   host stream) seeded with fd 0/1/2; `adopt()` attaches an already-open host
    stream under another guest fd; a guest fd not in the table is `-EBADF`.
    `read`(0), `close`(3) and `lseek`(8) are implemented and marked `implemented`
-   in the inventory. `open`/`openat` are deliberately deferred (DECISIONS.md
-   D-024). 11 new tests.
-10. **Next (Phase 6): `open`/`openat` and file inspection.** Add `openat` (and
-   the `fstat`/`newfstatat` guest `struct stat` layout, which differs from the
-   host's — the ABI-sensitive part), then `getdents64`/`access`/`readlink`, so a
-   guest can open and inspect a file, not only read an inherited descriptor.
-   Extend the existing descriptor table so `openat` allocates the lowest free
-   guest fd, and decide the path policy explicitly (sandbox root / allow-list)
-   rather than forwarding guest paths straight to the host. Validate every guest
-   buffer against the address space (`-EFAULT`), return `-EBADF`/`-ENOENT` as the
-   kernel does, move each number's `status` in `docs/syscalls/inventory.tsv` to
+   in the inventory. `open`/`openat` were deferred in this increment (D-024).
+   11 new tests.
+10. ~~Implement `openat`(257) and `fstat`(5).~~ **Done & tested.**
+    `openat` is limited to `AT_FDCWD` and a bounded guest pathname; unhandled
+    flags or a real `dirfd` return `-ENOSYS` and count as unimplemented. The
+    opened stream is handler-owned (`GuestDescriptor::owned`) and released by
+    `close`; `adopt()`ed streams stay borrowed. `fstat` writes the **guest**
+    (x86-64) `struct stat` layout field-by-field, because the host layout differs
+    on AArch64. Path policy is an explicit decision: forward to the host kernel
+    (D-025) — Hyperion is not a sandbox. 10 new tests; `openat`/`fstat` marked
+    `implemented` in the inventory.
+11. **Next (Phase 6): the remaining U4 syscalls a real program needs to start.**
+   `arch_prctl`(158) (FS/GS base — needed before glibc startup),
+   `getdents64`(217), `access`(21), `readlink`(89)/`readlinkat`(267),
+   `getrandom`(318), `set_tid_address`(218), `rseq`(334), `prlimit64`(302),
+   `newfstatat`(262) and `statx`(332). Reuse the `fstat` field-by-field layout
+   pattern for the path-based stat calls. Validate every guest buffer against the
+   address space (`-EFAULT`), return `-EBADF`/`-ENOENT`/`-ENOSYS` as the kernel
+   does, move each number's `status` in `docs/syscalls/inventory.tsv` to
    `implemented`, regenerate (`python3 tools/gen_syscall_inventory.py`), add a
    focused test per call, and update STATUS.md §0e.
-11. **Then (Phase 6/7): memory operands in the code generator.** The AArch64
+12. **Then (Phase 6/7): memory operands in the code generator.** The AArch64
     generator is register-only (`translator.cpp validate_body` rejects any
     memory operand), so Tier 1 stops honestly at the first load/store. Every
     real program loads and stores, so this is the gating item for running
     anything nontrivial in Tier 1, and it pairs naturally with `read`/`openat`.
-12. **Also open (Phase 5): block chaining.** Today every block exit returns to
+13. **Also open (Phase 5): block chaining.** Today every block exit returns to
     the dispatcher for a lookup. Link a block's exit directly to its successor's
     generated code so a hot loop stays in generated code, guarded by the same
     authoritative-`rip` rule, with the dispatcher as the fallback for any

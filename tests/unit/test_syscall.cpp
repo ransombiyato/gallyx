@@ -9,8 +9,11 @@
 // tests that require executing generated AArch64 code are guarded on
 // __aarch64__, matching the rest of the suite.
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include "harness/test_harness.hpp"
@@ -533,15 +536,218 @@ HYPERION_TEST("syscall", "adopt_refuses_an_occupied_descriptor") {
     HYPERION_CHECK(!handler.adopt(3, nullptr));
 }
 
-HYPERION_TEST("syscall", "open_is_still_unimplemented") {
+HYPERION_TEST("syscall", "open_legacy_number_is_still_unimplemented") {
     MinimalSyscallHandler handler;
     FlatMemory memory = program({});
-    // open(2) is deliberately not implemented: the guest may read inherited
-    // descriptors but cannot open host files yet.
+    // open(2) (number 2) is not implemented; openat(2) (257) is. A guest that
+    // uses the legacy number gets -ENOSYS, not a silently wrong result.
     GuestState o = syscall_state(2, {kBase + 0x200, 0, 0});
     const auto r = handler.handle(o, memory);
     HYPERION_CHECK(r.status == SyscallStatus::kUnimplemented);
     HYPERION_CHECK_EQ(o.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnosys));
+}
+
+// --- openat / fstat (Phase 6, fourth slice) --------------------------------
+//
+// These exercise the real host filesystem, because openat() forwards to the
+// host kernel (SECURITY.md: Hyperion is not a sandbox). A temporary file is
+// created with mkstemp so the test is self-contained and cleans up after itself.
+
+// A temporary file path, removed on destruction.
+struct TempFile {
+    std::string path;
+    int fd = -1;
+    TempFile() {
+        char tmpl[] = "/tmp/hyperion_openat_XXXXXX";
+        fd = ::mkstemp(tmpl);
+        if (fd >= 0) {
+            path = tmpl;
+        }
+    }
+    ~TempFile() {
+        if (fd >= 0) {
+            ::close(fd);
+        }
+        if (!path.empty()) {
+            ::unlink(path.c_str());
+        }
+    }
+    TempFile(const TempFile&) = delete;
+    TempFile& operator=(const TempFile&) = delete;
+};
+
+// Copy a C string into guest memory at `addr`.
+void put_cstr(FlatMemory& memory, std::uint64_t addr, const char* text) {
+    const std::size_t n = std::strlen(text) + 1;
+    HYPERION_CHECK(memory.write(addr, reinterpret_cast<const std::uint8_t*>(text), n));
+}
+
+std::uint64_t read_u64(FlatMemory& memory, std::uint64_t addr) {
+    std::uint8_t b[8];
+    HYPERION_CHECK(memory.read(addr, b, 8));
+    std::uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) {
+        v |= static_cast<std::uint64_t>(b[static_cast<std::size_t>(i)]) << (8 * i);
+    }
+    return v;
+}
+
+std::uint32_t read_u32(FlatMemory& memory, std::uint64_t addr) {
+    std::uint8_t b[4];
+    HYPERION_CHECK(memory.read(addr, b, 4));
+    std::uint32_t v = 0;
+    for (int i = 0; i < 4; ++i) {
+        v |= static_cast<std::uint32_t>(b[static_cast<std::size_t>(i)]) << (8 * i);
+    }
+    return v;
+}
+
+HYPERION_TEST("syscall", "openat_opens_a_real_file_and_returns_a_guest_fd") {
+    TempFile tf;
+    HYPERION_CHECK(tf.fd >= 0);
+    HYPERION_CHECK(::write(tf.fd, "hyperion\n", 9) == 9);
+
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, tf.path.c_str());
+
+    GuestState s = syscall_state(hyperion::sysno::kOpenat,
+                                 {hyperion::kAtFdcwd, kBase + 0x400, 0 /*O_RDONLY*/, 0});
+    const auto r = handler.handle(s, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kHandled);
+    const std::int64_t gfd = static_cast<std::int64_t>(s.reg(Gpr::kRax));
+    HYPERION_CHECK(gfd >= 3); // 0/1/2 are taken; the lowest free slot is 3
+
+    // The descriptor is real: read the file back through it.
+    GuestState rd =
+        syscall_state(hyperion::sysno::kRead, {static_cast<std::uint64_t>(gfd), kBase + 0x600, 9});
+    HYPERION_CHECK(handler.handle(rd, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(rd.reg(Gpr::kRax), std::uint64_t{9});
+    std::uint8_t got[9] = {};
+    HYPERION_CHECK(memory.read(kBase + 0x600, got, 9));
+    HYPERION_CHECK_EQ(std::memcmp(got, "hyperion\n", 9), 0);
+}
+
+HYPERION_TEST("syscall", "openat_missing_file_is_enoent") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, "/tmp/hyperion_definitely_does_not_exist_9c1f");
+
+    GuestState s =
+        syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, kBase + 0x400, 0, 0});
+    const auto r = handler.handle(s, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnoent));
+}
+
+HYPERION_TEST("syscall", "openat_bad_path_pointer_is_efault") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    // A pointer outside the mapped region: the pathname read must fail cleanly.
+    GuestState s =
+        syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, 0xDEADBEEF0000ULL, 0, 0});
+    const auto r = handler.handle(s, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEfault));
+}
+
+HYPERION_TEST("syscall", "openat_with_a_real_dirfd_is_unimplemented") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, ".");
+    // dirfd = 3 (not AT_FDCWD): a real *at() is not implemented, so the call is
+    // reported unimplemented rather than resolved against the wrong base.
+    GuestState s = syscall_state(hyperion::sysno::kOpenat, {3, kBase + 0x400, 0, 0});
+    const auto r = handler.handle(s, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kUnimplemented);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnosys));
+}
+
+HYPERION_TEST("syscall", "openat_unhandled_flag_is_unimplemented") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, ".");
+    // O_DIRECTORY (0x10000) is outside the honoured set: not silently dropped.
+    GuestState s =
+        syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, kBase + 0x400, 0x10000, 0});
+    const auto r = handler.handle(s, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kUnimplemented);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnosys));
+}
+
+HYPERION_TEST("syscall", "openat_writes_and_closes_release_the_guest_fd") {
+    TempFile tf;
+    HYPERION_CHECK(tf.fd >= 0);
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, tf.path.c_str());
+
+    GuestState o =
+        syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, kBase + 0x400, 0, 0});
+    HYPERION_CHECK(handler.handle(o, memory).status == SyscallStatus::kHandled);
+    const std::int64_t gfd = static_cast<std::int64_t>(o.reg(Gpr::kRax));
+    HYPERION_CHECK(gfd >= 3);
+
+    // Close it: the descriptor is gone (a second close is -EBADF) and the slot
+    // is reused by the next open.
+    GuestState c = syscall_state(hyperion::sysno::kClose, {static_cast<std::uint64_t>(gfd)});
+    HYPERION_CHECK(handler.handle(c, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(c.reg(Gpr::kRax), std::uint64_t{0});
+
+    GuestState c2 = syscall_state(hyperion::sysno::kClose, {static_cast<std::uint64_t>(gfd)});
+    handler.handle(c2, memory);
+    HYPERION_CHECK_EQ(c2.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEbadf));
+
+    GuestState o2 =
+        syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, kBase + 0x400, 0, 0});
+    handler.handle(o2, memory);
+    HYPERION_CHECK_EQ(static_cast<std::int64_t>(o2.reg(Gpr::kRax)), gfd); // slot reused
+}
+
+HYPERION_TEST("syscall", "fstat_reports_size_in_the_guest_layout") {
+    TempFile tf;
+    HYPERION_CHECK(tf.fd >= 0);
+    HYPERION_CHECK(::write(tf.fd, "0123456789", 10) == 10);
+
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, tf.path.c_str());
+    GuestState o =
+        syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, kBase + 0x400, 0, 0});
+    HYPERION_CHECK(handler.handle(o, memory).status == SyscallStatus::kHandled);
+    const std::uint64_t gfd = o.reg(Gpr::kRax);
+
+    GuestState fs = syscall_state(hyperion::sysno::kFstat, {gfd, kBase + 0x800});
+    HYPERION_CHECK(handler.handle(fs, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(fs.reg(Gpr::kRax), std::uint64_t{0});
+
+    // st_size is at offset 48 in the x86-64 struct stat. This is the ABI-sensitive
+    // check: the host layout differs on AArch64, so a memcpy of the host struct
+    // would put the wrong value here.
+    HYPERION_CHECK_EQ(read_u64(memory, kBase + 0x800 + hyperion::guest_stat::kOffStSize),
+                      std::uint64_t{10});
+    // st_mode at 24: a regular file has S_IFREG (0x8000) in the top bits.
+    const std::uint32_t mode = read_u32(memory, kBase + 0x800 + hyperion::guest_stat::kOffStMode);
+    HYPERION_CHECK((mode & 0xF000u) == 0x8000u);
+}
+
+HYPERION_TEST("syscall", "fstat_bad_fd_is_ebadf_and_bad_buffer_is_efault") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    GuestState s = syscall_state(hyperion::sysno::kFstat, {99, kBase + 0x800});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEbadf));
+
+    // A valid fd (stdin) but an unmapped stat buffer: -EFAULT.
+    GuestState s2 = syscall_state(hyperion::sysno::kFstat, {0, 0xDEADBEEF0000ULL});
+    handler.handle(s2, memory);
+    HYPERION_CHECK_EQ(s2.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEfault));
+}
+
+HYPERION_TEST("syscall", "openat_is_advertised_as_minimal") {
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kOpenat));
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kFstat));
+    HYPERION_CHECK(!hyperion::is_minimal_syscall(257 + 1000));
 }
 
 // A guest program that mmaps a page and stores a byte through the returned

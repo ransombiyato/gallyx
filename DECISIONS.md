@@ -599,10 +599,11 @@ host stream under another guest fd with `MinimalSyscallHandler::adopt()`. The
 handler does **not** own the streams: `close` removes the guest's view of a
 descriptor but never `fclose`s the borrowed stream.
 
-`open`/`openat` are deliberately **deferred**: adding them means the guest
-chooses the host path, which is a policy decision (sandbox root, allow-list,
-`AT_FDCWD` handling) that deserves its own increment rather than being smuggled
-in with `read`. Until then a guest can read only descriptors the host adopted.
+`open`/`openat` were deferred in this increment (see D-025 for the decision that
+later landed them): adding them means the guest chooses the host path, which is
+a policy decision (sandbox root, allow-list, `AT_FDCWD` handling) that deserved
+its own increment rather than being smuggled in with `read`. Until then a guest
+can read only descriptors the host adopted.
 
 **Consequences.** A guest integer can never name an arbitrary host descriptor:
 the table is the boundary. The trade-off is expressiveness — a `FILE*` table
@@ -610,3 +611,37 @@ cannot represent `O_NONBLOCK`, `O_APPEND`, `pread`/`pwrite`, `fcntl` or `dup`,
 which is acceptable while `open` is absent and will be revisited when it lands.
 `read` validates the guest destination through the same `Memory` interface as
 `write`, so a bad pointer is `-EFAULT`, not a host read.
+
+---
+
+## D-025 — `openat` forwards guest paths to the host kernel; Hyperion is not a sandbox
+
+**Context.** D-024 deferred `open`/`openat` because letting the guest choose a
+host path is a policy question. The options were: (a) forward the guest path
+straight to the host kernel, (b) confine the guest under a sandbox root or an
+allow-list, or (c) keep `open` unimplemented and force embedders to `adopt()`
+every file. Option (c) blocks nearly every real program. Option (b) is a
+security posture that SECURITY.md explicitly disclaims: Hyperion "is not a
+sandbox, a hypervisor, or a security boundary."
+
+**Decision.** Forward guest paths to the host kernel (option a), and state it
+loudly. `openat`(257) is implemented for `AT_FDCWD` only; any other `dirfd`
+returns `-ENOSYS` (a real `*at()` is not implemented, and resolving against the
+wrong base would be worse than refusing). The pathname is read from guest memory
+with a bounded `read_guest_cstr` (`-EFAULT` on a bad pointer, `-ENAMETOOLONG`
+past `PATH_MAX`). Only an explicit set of `O_*` flags is honoured
+(`O_RDONLY`/`O_WRONLY`/`O_RDWR`/`O_CREAT`/`O_TRUNC`/`O_APPEND`/`O_EXCL`); any
+other flag returns `-ENOSYS` and is reported **unimplemented**, never silently
+dropped. The opened stream is handler-owned (`GuestDescriptor::owned`), so
+`close` releases it; `adopt()`ed streams remain borrowed.
+
+**Consequences.** The guest can open whatever the *host process* may open —
+exactly the SECURITY.md boundary ("no host filesystem access beyond what the
+guest's own syscalls request and the host kernel permits"). Anyone who needs a
+stricter boundary must impose it externally (chroot/namespace/container/PRoot);
+Hyperion will not pretend to provide one. This keeps `openat` honest and
+composable: a sandbox can later be layered as an `openat` interposer without
+changing the ABI the guest sees. `fstat`(5) lands in the same increment and
+writes the **guest** (x86-64) `struct stat` layout field-by-field, because the
+host layout differs on AArch64 — a `memcpy` would silently misplace fields, the
+same class of bug the register-allocation sign-conversion fix targeted.

@@ -5,6 +5,31 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 6 (openat + fstat)
+
+### Added — `openat`(257) and `fstat`(5) (fourth syscall slice)
+- `openat`(257): opens a host file on the guest's behalf and allocates the
+  lowest free guest descriptor ≥ 3 (as the kernel does). Limited to `AT_FDCWD`
+  and a bounded guest pathname (read with `read_guest_cstr`, `-EFAULT` on a bad
+  pointer, `-ENAMETOOLONG` past `PATH_MAX`). An `O_*` flag outside the honoured
+  set (`O_RDONLY`/`O_WRONLY`/`O_RDWR`/`O_CREAT`/`O_TRUNC`/`O_APPEND`/`O_EXCL`),
+  or a real `dirfd`, returns `-ENOSYS` and is reported *unimplemented* rather
+  than resolved against the wrong base or given weaker semantics. The opened
+  stream is handler-owned and released by `close`; a stream attached with
+  `adopt()` remains borrowed. This is not a sandbox: `openat` forwards to the
+  host kernel (SECURITY.md).
+- `fstat`(5): reports the **guest** (x86-64) `struct stat` layout, built
+  field-by-field from the host's rather than `memcpy`'d, because the host layout
+  differs on AArch64. `-EBADF` for a bad descriptor, `-EFAULT` for an
+  out-of-range stat buffer.
+- `MinimalSyscallHandler`'s descriptor table is now
+  `std::vector<GuestDescriptor>` (`stream` + `owned`), so `close` closes a
+  stream the handler opened but leaves an adopted one to its owner.
+- Ten new unit tests (`syscall.openat_*`, `syscall.fstat_*`), including the
+  ABI-sensitive check that `st_size` lands at the x86-64 offset 48 and `st_mode`
+  carries `S_IFREG`. Inventory: `openat` and `fstat` moved from `not-started` to
+  `implemented`; docs/syscalls regenerated.
+
 ## [Unreleased] — Phase 6 (guest descriptor table + read/close/lseek)
 
 ### Fixed — clang build (CI `build & test (clang)` and `ASan/UBSan`)

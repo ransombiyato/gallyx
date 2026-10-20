@@ -6,8 +6,13 @@
 #include "hyperion/syscall.hpp"
 
 #include <array>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
+#include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -84,22 +89,45 @@ long default_sink(int fd, const std::uint8_t* data, std::size_t count) {
 // Look up a guest descriptor in the table. Returns nullptr for a descriptor that
 // is negative, out of range, or a hole; callers map that to -EBADF. Keeping the
 // conversion in one place means no signed index ever reaches vector::operator[].
-std::FILE* lookup_stream(const std::vector<std::FILE*>& files, std::int64_t fd) {
+const GuestDescriptor* lookup_fd(const std::vector<GuestDescriptor>& files, std::int64_t fd) {
     if (fd < 0) {
         return nullptr;
     }
     const auto idx = static_cast<std::size_t>(fd);
-    if (idx >= files.size()) {
+    if (idx >= files.size() || files[idx].stream == nullptr) {
         return nullptr;
     }
-    return files[idx];
+    return &files[idx];
+}
+
+std::FILE* lookup_stream(const std::vector<GuestDescriptor>& files, std::int64_t fd) {
+    const GuestDescriptor* e = lookup_fd(files, fd);
+    return e == nullptr ? nullptr : e->stream;
+}
+
+// Allocate the lowest free guest descriptor >= 3 for an opened stream, as the
+// kernel does. Returns -EMFILE when the table is exhausted.
+std::int64_t alloc_fd(std::vector<GuestDescriptor>& files, std::FILE* stream, bool owned) {
+    for (std::size_t i = 3; i < files.size(); ++i) {
+        if (files[i].stream == nullptr) {
+            files[i] = GuestDescriptor{stream, owned};
+            return static_cast<std::int64_t>(i);
+        }
+    }
+    // Grow the table, but bound it so a runaway guest cannot exhaust memory.
+    constexpr std::size_t kMaxGuestFds = 4096;
+    if (files.size() >= kMaxGuestFds) {
+        return -kEmfile;
+    }
+    files.push_back(GuestDescriptor{stream, owned});
+    return static_cast<std::int64_t>(files.size() - 1);
 }
 
 // read(fd, buf, count): read `count` guest bytes from the adopted host stream
 // into guest memory. A guest pointer the memory model rejects yields -EFAULT; a
 // descriptor that is not in the table yields -EBADF. The host read is bounded
 // by the chunk size so a huge `count` cannot ask for one unbounded allocation.
-std::int64_t do_read(GuestState& s, Memory& memory, const std::vector<std::FILE*>& files) {
+std::int64_t do_read(GuestState& s, Memory& memory, const std::vector<GuestDescriptor>& files) {
     const std::int64_t fd = static_cast<std::int64_t>(arg(s, 0));
     const std::uint64_t buf = arg(s, 1);
     const std::uint64_t count = arg(s, 2);
@@ -139,22 +167,27 @@ std::int64_t do_read(GuestState& s, Memory& memory, const std::vector<std::FILE*
     return static_cast<std::int64_t>(done);
 }
 
-// close(fd): drop the guest descriptor. The handler does not own the underlying
-// host stream, so it is not fclose'd (the embedder does that); it is only
-// removed from the guest's view.
-std::int64_t do_close(GuestState& s, std::vector<std::FILE*>& files) {
+// close(fd): drop the guest descriptor. A stream the handler opened is closed;
+// one the embedder adopted is only removed from the guest's view (its owner
+// closes it).
+std::int64_t do_close(GuestState& s, std::vector<GuestDescriptor>& files) {
     const std::int64_t fd = static_cast<std::int64_t>(arg(s, 0));
-    if (lookup_stream(files, fd) == nullptr) {
+    const GuestDescriptor* e = lookup_fd(files, fd);
+    if (e == nullptr) {
         return -kEbadf;
     }
-    files[static_cast<std::size_t>(fd)] = nullptr;
+    // Close a stream the handler opened; leave an adopted one for its owner.
+    if (e->owned) {
+        std::fclose(e->stream);
+    }
+    files[static_cast<std::size_t>(fd)] = GuestDescriptor{};
     return 0;
 }
 
 // lseek(fd, offset, whence): reposition an adopted stream. Only seekable
 // streams are supported; a pipe/terminal (stdin from a tty) is ESPIPE, exactly
 // as the kernel reports. A negative resulting offset is EINVAL.
-std::int64_t do_lseek(GuestState& s, const std::vector<std::FILE*>& files) {
+std::int64_t do_lseek(GuestState& s, const std::vector<GuestDescriptor>& files) {
     const std::int64_t fd = static_cast<std::int64_t>(arg(s, 0));
     const std::int64_t offset = static_cast<std::int64_t>(arg(s, 1));
     const std::uint64_t whence = arg(s, 2);
@@ -185,6 +218,183 @@ std::int64_t do_lseek(GuestState& s, const std::vector<std::FILE*>& files) {
         return -kEinval;
     }
     return static_cast<std::int64_t>(pos);
+}
+
+// Read a NUL-terminated guest string into `out`. The guest controls the length,
+// so the copy is bounded by kMaxPath: a missing terminator within that bound is
+// -ENAMETOOLONG, not an unbounded read. A pointer the memory model rejects is
+// -EFAULT. Returns 0 on success, or a negative errno.
+std::int64_t read_guest_cstr(Memory& memory, std::uint64_t address, std::string& out) {
+    constexpr std::size_t kMaxPath = 4096; // Linux PATH_MAX
+    out.clear();
+    out.reserve(64);
+    for (std::size_t i = 0; i < kMaxPath; ++i) {
+        std::uint8_t ch = 0;
+        if (!memory.read(address + i, &ch, 1)) {
+            return -kEfault;
+        }
+        if (ch == 0) {
+            return 0;
+        }
+        out.push_back(static_cast<char>(ch));
+    }
+    return -kEnametoolong;
+}
+
+// Map the guest O_* bits to the host's. Only the flags this increment honours
+// are translated; an unhandled flag is reported as unimplemented rather than
+// silently dropped, so a guest never gets weaker semantics than it asked for.
+struct OpenFlags {
+    int host = 0;
+    bool implemented = true;
+};
+
+OpenFlags translate_open_flags(std::uint64_t flags) {
+    OpenFlags r;
+    switch (flags & open_flags::kOAccmode) {
+    case open_flags::kORdonly:
+        r.host |= O_RDONLY;
+        break;
+    case open_flags::kOWronly:
+        r.host |= O_WRONLY;
+        break;
+    case open_flags::kORdwr:
+        r.host |= O_RDWR;
+        break;
+    default:
+        return {0, false}; // the reserved access mode (3) is invalid
+    }
+    if ((flags & open_flags::kOCreat) != 0) {
+        r.host |= O_CREAT;
+    }
+    if ((flags & open_flags::kOTrunc) != 0) {
+        r.host |= O_TRUNC;
+    }
+    if ((flags & open_flags::kOAppend) != 0) {
+        r.host |= O_APPEND;
+    }
+    if ((flags & open_flags::kOExcl) != 0) {
+        r.host |= O_EXCL;
+    }
+    // Anything outside the honoured set (O_DIRECTORY, O_NONBLOCK, O_CLOEXEC, …)
+    // is not silently ignored: the call is reported unimplemented.
+    constexpr std::uint64_t kHonoured = open_flags::kOAccmode | open_flags::kOCreat |
+                                        open_flags::kOTrunc | open_flags::kOAppend |
+                                        open_flags::kOExcl;
+    if ((flags & ~kHonoured) != 0) {
+        return {0, false};
+    }
+    return r;
+}
+
+// openat(dirfd, pathname, flags, mode). Only AT_FDCWD is supported: a real
+// directory descriptor is a *at() feature this increment does not implement, so
+// it returns -ENOSYS rather than resolving against the wrong base. The path is
+// read from guest memory (bounded, -EFAULT on a bad pointer) and handed to the
+// host kernel; this is not a sandbox (see SECURITY.md).
+std::int64_t do_openat(GuestState& s, Memory& memory, std::vector<GuestDescriptor>& files) {
+    const std::int64_t dirfd = static_cast<std::int64_t>(arg(s, 0));
+    const std::uint64_t path_addr = arg(s, 1);
+    const std::uint64_t flags = arg(s, 2);
+    const std::uint64_t mode = arg(s, 3);
+
+    if (static_cast<std::uint64_t>(dirfd) != kAtFdcwd) {
+        return -kEnosys; // only AT_FDCWD is implemented
+    }
+    std::string path;
+    const std::int64_t rc = read_guest_cstr(memory, path_addr, path);
+    if (rc != 0) {
+        return rc;
+    }
+    const OpenFlags of = translate_open_flags(flags);
+    if (!of.implemented) {
+        return -kEnosys;
+    }
+
+    // Use the low-level open() so no guest-supplied name is interpreted by the
+    // C library's own path handling; O_CREAT/O_EXCL need the mode argument.
+    const int host_fd = ::open(path.c_str(), of.host | O_CLOEXEC, static_cast<mode_t>(mode));
+    if (host_fd < 0) {
+        return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+    }
+    std::FILE* f =
+        ::fdopen(host_fd, (of.host & O_RDWR) != 0 ? "r+" : ((of.host & O_WRONLY) != 0 ? "w" : "r"));
+    if (f == nullptr) {
+        const int saved = errno;
+        ::close(host_fd);
+        return -static_cast<std::int64_t>(saved == 0 ? kEio : saved);
+    }
+    const std::int64_t gfd = alloc_fd(files, f, /*owned=*/true);
+    if (gfd < 0) {
+        std::fclose(f);
+        return gfd;
+    }
+    return gfd;
+}
+
+// Write a std::uint64_t/32-bit field into a byte buffer in host order. The guest
+// is x86-64 (little-endian) and every supported host is little-endian, so a
+// direct store is correct; this keeps the field writes explicit and type-safe.
+void put_u64(std::uint8_t* buf, std::size_t off, std::uint64_t value) {
+    for (int i = 0; i < 8; ++i) {
+        buf[off + static_cast<std::size_t>(i)] =
+            static_cast<std::uint8_t>((value >> (8 * i)) & 0xFF);
+    }
+}
+
+void put_u32(std::uint8_t* buf, std::size_t off, std::uint32_t value) {
+    for (int i = 0; i < 4; ++i) {
+        buf[off + static_cast<std::size_t>(i)] =
+            static_cast<std::uint8_t>((value >> (8 * i)) & 0xFF);
+    }
+}
+
+// fstat(fd, statbuf): report metadata for a guest descriptor. The guest is
+// x86-64 and the host may be AArch64, whose struct stat has a different layout,
+// so the guest struct is built field by field from the host's — never memcpy'd.
+std::int64_t do_fstat(GuestState& s, Memory& memory, const std::vector<GuestDescriptor>& files) {
+    const std::int64_t fd = static_cast<std::int64_t>(arg(s, 0));
+    const std::uint64_t buf = arg(s, 1);
+
+    std::FILE* f = lookup_stream(files, fd);
+    if (f == nullptr) {
+        return -kEbadf;
+    }
+    struct stat st{};
+    if (::fstat(::fileno(f), &st) != 0) {
+        return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+    }
+
+    std::array<std::uint8_t, guest_stat::kSize> out{};
+    put_u64(out.data(), guest_stat::kOffStDev, static_cast<std::uint64_t>(st.st_dev));
+    put_u64(out.data(), guest_stat::kOffStIno, static_cast<std::uint64_t>(st.st_ino));
+    put_u64(out.data(), guest_stat::kOffStNlink, static_cast<std::uint64_t>(st.st_nlink));
+    put_u32(out.data(), guest_stat::kOffStMode, static_cast<std::uint32_t>(st.st_mode));
+    put_u32(out.data(), guest_stat::kOffStUid, static_cast<std::uint32_t>(st.st_uid));
+    put_u32(out.data(), guest_stat::kOffStGid, static_cast<std::uint32_t>(st.st_gid));
+    put_u64(out.data(), guest_stat::kOffStRdev, static_cast<std::uint64_t>(st.st_rdev));
+    put_u64(out.data(), guest_stat::kOffStSize, static_cast<std::uint64_t>(st.st_size));
+    put_u64(out.data(), guest_stat::kOffStBlksize, static_cast<std::uint64_t>(st.st_blksize));
+    put_u64(out.data(), guest_stat::kOffStBlocks, static_cast<std::uint64_t>(st.st_blocks));
+    // Guest timespec fields (tv_sec, tv_nsec), each 16 bytes. The host field
+    // names differ (st_atim on Linux), so copy through a local.
+    put_u64(out.data(), guest_stat::kOffStAtime,
+            static_cast<std::uint64_t>(static_cast<std::int64_t>(st.st_atim.tv_sec)));
+    put_u64(out.data(), guest_stat::kOffStAtime + 8,
+            static_cast<std::uint64_t>(static_cast<std::int64_t>(st.st_atim.tv_nsec)));
+    put_u64(out.data(), guest_stat::kOffStMtime,
+            static_cast<std::uint64_t>(static_cast<std::int64_t>(st.st_mtim.tv_sec)));
+    put_u64(out.data(), guest_stat::kOffStMtime + 8,
+            static_cast<std::uint64_t>(static_cast<std::int64_t>(st.st_mtim.tv_nsec)));
+    put_u64(out.data(), guest_stat::kOffStCtime,
+            static_cast<std::uint64_t>(static_cast<std::int64_t>(st.st_ctim.tv_sec)));
+    put_u64(out.data(), guest_stat::kOffStCtime + 8,
+            static_cast<std::uint64_t>(static_cast<std::int64_t>(st.st_ctim.tv_nsec)));
+
+    if (!memory.write(buf, out.data(), out.size())) {
+        return -kEfault;
+    }
+    return 0;
 }
 
 // Translate the guest PROT_* bits into the address space's MemPerm. Unknown bits
@@ -277,7 +487,8 @@ MinimalSyscallHandler::MinimalSyscallHandler(OutputSink sink, GuestAddressSpace*
     // process: 0 = stdin, 1 = stdout, 2 = stderr. `write` still routes 1/2 to the
     // sink; `read`/`lseek` use the stream table, so a guest that reads fd 0 gets
     // the process's stdin (which a test can replace with adopt()).
-    files_ = {stdin, stdout, stderr};
+    files_ = {GuestDescriptor{stdin, false}, GuestDescriptor{stdout, false},
+              GuestDescriptor{stderr, false}};
 }
 
 bool MinimalSyscallHandler::adopt(int guest_fd, std::FILE* stream) {
@@ -285,13 +496,13 @@ bool MinimalSyscallHandler::adopt(int guest_fd, std::FILE* stream) {
         return false;
     }
     const auto idx = static_cast<std::size_t>(guest_fd);
-    if (idx < files_.size() && files_[idx] != nullptr) {
+    if (idx < files_.size() && files_[idx].stream != nullptr) {
         return false; // already occupied
     }
     if (idx >= files_.size()) {
-        files_.resize(idx + 1, nullptr);
+        files_.resize(idx + 1);
     }
-    files_[idx] = stream;
+    files_[idx] = GuestDescriptor{stream, /*owned=*/false};
     return true;
 }
 
@@ -314,6 +525,21 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
     }
     case sysno::kClose: {
         const std::int64_t r = do_close(state, files_);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kOpenat: {
+        const std::int64_t r = do_openat(state, memory, files_);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        // -ENOSYS means the request (a non-AT_FDCWD dirfd, or an unhandled flag)
+        // is outside this increment: report it unimplemented so it is counted,
+        // rather than as a handled call that happens to return an error.
+        result.status = (r == -kEnosys) ? SyscallStatus::kUnimplemented : SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kFstat: {
+        const std::int64_t r = do_fstat(state, memory, files_);
         state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
         result.status = SyscallStatus::kHandled;
         return result;
@@ -375,9 +601,9 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
 
 bool is_minimal_syscall(std::uint64_t number) {
     return number == sysno::kRead || number == sysno::kWrite || number == sysno::kClose ||
-           number == sysno::kLseek || number == sysno::kExit || number == sysno::kExitGroup ||
-           number == sysno::kMmap || number == sysno::kMprotect || number == sysno::kMunmap ||
-           number == sysno::kBrk;
+           number == sysno::kFstat || number == sysno::kLseek || number == sysno::kExit ||
+           number == sysno::kExitGroup || number == sysno::kMmap || number == sysno::kMprotect ||
+           number == sysno::kMunmap || number == sysno::kBrk || number == sysno::kOpenat;
 }
 
 } // namespace hyperion

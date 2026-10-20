@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-10-20
 **Current phase:** Phase 5 (performance measurement and optimization) — active;
-Phase 6 (Linux ABI and syscall compatibility) — third slice implemented
+Phase 6 (Linux ABI and syscall compatibility) — fourth slice implemented
 **Repository state:** buildable, tested, documented, CI green. **Two execution
 tiers exist: the reference interpreter (Tier 0) and a translation cache that runs
 whole programs through generated AArch64 code (Tier 1).** Phase 4's exit criteria
@@ -13,10 +13,11 @@ accepted and measured** (parity fast path, dead-`rip` elimination, flag
 liveness, direct-mapped dispatch, ALU immediate folding, guest-register
 allocation — BENCHMARKS.md §4.2.1–4.2.6). Phase 6's syscall inventory is
 complete and validated
-(docs/syscalls/), and **three syscall slices are implemented in both tiers**: the
+(docs/syscalls/), and **four syscall slices are implemented in both tiers**: the
 first (`write`/`exit`/`exit_group`), the second, which added the guest
-address space and `mmap`/`mprotect`/`munmap`/`brk`, and the third, which added a
-guest descriptor table with `read`/`close`/`lseek`. Unimplemented numbers still
+address space and `mmap`/`mprotect`/`munmap`/`brk`, the third, which added a
+guest descriptor table with `read`/`close`/`lseek`, and the fourth, which added
+`openat`/`fstat`. Unimplemented numbers still
 return `-ENOSYS` explicitly. The guest instruction subset remains small; see
 COMPATIBILITY.md.**
 
@@ -44,19 +45,23 @@ works, what was last verified, and what to do next.
 | 6. Explicit `-ENOSYS` for every other number | **Implemented** — never silently succeeds; counted in `RunResult::unimplemented_syscalls` |
 | 7. Guest address space (`GuestAddressSpace`) | **Done & tested** — `include/hyperion/address_space.hpp`, `src/core/address_space.cpp`; per-region permissions, page-granular checks, heap reserved at construction |
 | 8. `mmap`/`mprotect`/`munmap`/`brk` over the address space (second slice) | **Implemented** — anonymous `mmap` only; file-backed requests return `-ENOSYS` and count as unimplemented |
-| 9. Guest descriptor table + `read`(0)/`close`(3)/`lseek`(8) (third slice) | **Implemented & tested** — `MinimalSyscallHandler::adopt()` attaches an already-open host stream under a guest fd; `open`/`openat` deliberately not implemented |
-| 10. Broader syscall coverage (`openat`/`stat`/`arch_prctl`/…) | **Not started** — next slice |
+| 9. Guest descriptor table + `read`(0)/`close`(3)/`lseek`(8) (third slice) | **Implemented & tested** — `MinimalSyscallHandler::adopt()` attaches an already-open host stream under a guest fd |
+| 10. `openat`(257)/`fstat`(5) (fourth slice) | **Implemented & tested** — `openat` limited to `AT_FDCWD` and a bounded guest pathname; opens are handler-owned and closed on `close`; `fstat` builds the *guest* (x86-64) `struct stat` field-by-field, so the host layout (AArch64) cannot leak through |
+| 11. Broader syscall coverage (`stat`/`lstat`/`newfstatat`/`arch_prctl`/…) | **Not started** — next slice |
 
-**Implemented-syscall status (verified).** Ten numbers are implemented today:
-`read`(0), `write`(1), `close`(3), `lseek`(8), `mmap`(9), `mprotect`(10),
-`munmap`(11), `brk`(12), `exit`(60), `exit_group`(231). Everything else returns
-`-ENOSYS`. `mmap` is scoped: anonymous private mappings only.
-`mprotect`/`munmap` require a fully-mapped, page-aligned range. `read`/`close`/
-`lseek` operate on a handler-owned guest descriptor table (guest fd → host
-stream); the handler never `fclose`s a borrowed stream, and `open`/`openat` are
-not implemented, so a guest can read inherited descriptors but cannot open host
-files yet. The inventory marks these ten `implemented` and all others
-`not-started`; the validator enforces the status vocabulary.
+**Implemented-syscall status (verified).** Twelve numbers are implemented today:
+`read`(0), `write`(1), `close`(3), `fstat`(5), `lseek`(8), `mmap`(9),
+`mprotect`(10), `munmap`(11), `brk`(12), `exit`(60), `exit_group`(231),
+`openat`(257). Everything else returns `-ENOSYS`. `mmap` is scoped: anonymous
+private mappings only. `mprotect`/`munmap` require a fully-mapped, page-aligned
+range. `read`/`close`/`lseek`/`openat`/`fstat` operate on a handler-owned guest
+descriptor table (guest fd → host stream); the handler never `fclose`s a borrowed
+stream, and it *does* close a stream it opened via `openat`. `openat` supports
+`AT_FDCWD` and a bounded guest pathname; any other `dirfd`, or an unhandled flag,
+returns `-ENOSYS` and is counted as unimplemented. This is **not a sandbox**:
+`openat` forwards to the host kernel, so the guest can open whatever the host
+process may open (SECURITY.md). The inventory marks these twelve `implemented`
+and all others `not-started`; the validator enforces the status vocabulary.
 
 **Address-space facts (verified).** `GuestAddressSpace` is the guest's virtual
 memory: a set of regions with `MemPerm` (read/write/exec) and page-granular
@@ -432,8 +437,11 @@ below and a container reset that removed `/usr`; the toolchain was restored from
 | Lint | `shellcheck scripts/*.sh` | clean |
 | Syscall inventory | `python3 tools/gen_syscall_inventory.py --check` | OK |
 
-Re-verified again after the Phase 6 increment 3
-commit (guest descriptor table + `read`/`close`/`lseek`): native 136/0,
+Re-verified again after the Phase 6 increment 4
+commit (openat + fstat): native 145/0, cross 153/0 under `qemu-user`,
+ASan/UBSan 9/9, clang-build 9/9, format clean, shellcheck clean,
+syscall inventory valid. Previously, after increment 3
+(guest descriptor table + `read`/`close`/`lseek`): native 136/0,
 cross 153/0 under `qemu-user`, ASan/UBSan 9/9, syscall filter 30/30.
 Previously, after increment 2 (guest address space + memory syscalls,
 commit `454c546`): native 125/0, cross 140/0, ASan/UBSan 9/9, CI run
@@ -654,24 +662,25 @@ stable-vs-noisy discrimination case).
 
 ## 4. Immediate next task
 
-**Phase 6's third syscall slice (a guest descriptor table plus
-`read`/`close`/`lseek`) is implemented and tested in both tiers. Phase 5 has six
-accepted, measured optimizations (BENCHMARKS.md §4.2.1–4.2.6), all
-deterministic-evidence based.**
+**Phase 6's fourth syscall slice (`openat` + `fstat`) is implemented and tested
+in both tiers. Phase 5 has six accepted, measured optimizations (BENCHMARKS.md
+§4.2.1–4.2.6), all deterministic-evidence based.**
 
 The single best next action (Phase 6, extend coverage in U4 order):
 
-- **Add `openat` (or `open`), then `fstat`/`newfstatat`, then the remaining U4
-  readers** (`getdents64`, `access`, `readlink`, `getrandom`, `set_tid_address`,
-  `rseq`, `prlimit64`), so a guest can open and inspect a file, not only read an
-  inherited descriptor. `read`/`close`/`lseek` now exist and are wired to a
-  handler-owned descriptor table; extend the same table so `openat` allocates a
-  new guest fd (lowest free slot, as the kernel does) and `fstat` reports the
-  guest `struct stat` layout (which differs from the host's — that is the
-  ABI-sensitive part). Validate every guest buffer pointer against the address
-  space before use; return `-EBADF`/`-EFAULT`/`-ENOENT` exactly as the kernel
-  does. Move each number's `status` in `docs/syscalls/inventory.tsv` from
-  `not-started` to `implemented`, regenerate the docs
+- **Add the remaining U4 syscalls a real program needs to start and run**:
+  `arch_prctl`(158) (set up the thread-local/FS base — required before glibc
+  startup), `getdents64`(217) (read a directory), `access`(21),
+  `readlink`(89)/`readlinkat`(267), `getrandom`(318), `set_tid_address`(218),
+  `rseq`(334), `prlimit64`(302), `newfstatat`(262) and `statx`(332). `openat`
+  and `fstat` now exist and share the handler-owned descriptor table; `fstat`
+  builds the guest `struct stat` layout field-by-field rather than copying the
+  host's (the ABI-sensitive part, and the pattern to reuse for `stat`/`lstat`/
+  `newfstatat`/`statx`). Validate every guest buffer pointer against the address
+  space before use; return `-EBADF`/`-EFAULT`/`-ENOENT`/`-ENOSYS` exactly as the
+  kernel does, and keep the "unimplemented is counted, never silent" rule. Move
+  each number's `status` in `docs/syscalls/inventory.tsv` from `not-started` to
+  `implemented`, regenerate the docs
   (`python3 tools/gen_syscall_inventory.py`), add a focused test per call, and
   update the §0e table and implemented-count.
 

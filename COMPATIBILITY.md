@@ -4,11 +4,11 @@ Tracks implemented versus missing instruction and ABI features.
 
 > **Status:** a small, documented instruction subset is implemented and tested
 > (§2). Everything else is explicitly rejected. AArch64 code generation, a
-> block-at-a-time translation cache, a guest address space, and three syscall
+> block-at-a-time translation cache, a guest address space, and four syscall
 > slices (`write`/`exit`/`exit_group`; `mmap`/`mprotect`/`munmap`/`brk`;
-> `read`/`close`/`lseek` over a guest descriptor table) exist; register
-> allocation is implemented, while memory operands in the code generator, block
-> chaining and `open`/`openat` do not (§5).
+> `read`/`close`/`lseek` over a guest descriptor table; `openat`/`fstat`) exist;
+> register allocation is implemented, while memory operands in the code
+> generator and block chaining do not (§5).
 
 Legend: ✅ implemented + tested · 🟡 implemented, untested · 🧪 prototype · ❌ unsupported (explicit) · ⬜ planned
 
@@ -202,24 +202,36 @@ Phase 6/7.
 
 ## 5. Linux ABI / syscall coverage
 
-Phase 6, third slice. The `syscall` instruction is decoded and routed through
-`SyscallHandler` in both tiers. **Ten syscalls are implemented** (`read`,
-`write`, `close`, `lseek`, `mmap`, `mprotect`, `munmap`, `brk`, `exit`,
-`exit_group`); every other number returns `-ENOSYS` explicitly (never a silent
-success) and is counted in `RunResult::unimplemented_syscalls`. Guest pointers
-are validated against the mapped region (`-EFAULT`), so a guest can never read
-host memory. Per-syscall status lives in `docs/syscalls/inventory.tsv` (the
-canonical source); this table is the summary.
+Phase 6, fourth slice. The `syscall` instruction is decoded and routed through
+`SyscallHandler` in both tiers. **Twelve syscalls are implemented** (`read`,
+`write`, `close`, `fstat`, `lseek`, `mmap`, `mprotect`, `munmap`, `brk`, `exit`,
+`exit_group`, `openat`); every other number returns `-ENOSYS` explicitly (never a
+silent success) and is counted in `RunResult::unimplemented_syscalls`. Guest
+pointers are validated against the mapped region (`-EFAULT`), so a guest can
+never read host memory. Per-syscall status lives in `docs/syscalls/inventory.tsv`
+(the canonical source); this table is the summary.
 
-`read`/`close`/`lseek` operate on a **guest descriptor table** owned by the
-handler, not on host file descriptors: the handler maps guest fd → host stream
-and refuses a guest fd that is not in the table with `-EBADF`, so a guest cannot
-name an arbitrary host descriptor. The table starts with fd 0/1/2 on the
-process's stdin/stdout/stderr, and an embedder can attach an already-open stream
-under another guest fd with `MinimalSyscallHandler::adopt()`. **`open`/`openat`
-are deliberately not implemented**, so a guest can read inherited descriptors but
-cannot open host files yet; the borrowed host stream is never `fclose`d by the
-handler.
+`read`/`close`/`lseek`/`openat`/`fstat` operate on a **guest descriptor table**
+owned by the handler, not on host file descriptors: the handler maps guest fd →
+host stream and refuses a guest fd that is not in the table with `-EBADF`, so a
+guest cannot name an arbitrary host descriptor. The table starts with fd 0/1/2 on
+the process's stdin/stdout/stderr, and an embedder can attach an already-open
+stream under another guest fd with `MinimalSyscallHandler::adopt()`. `openat`
+allocates the lowest free guest fd (as the kernel does) and the stream it opens
+is handler-owned, so `close` releases it; a stream attached with `adopt()` is
+borrowed and never `fclose`d by the handler.
+
+`openat` is limited to `AT_FDCWD` and a bounded guest pathname. Any other `dirfd`
+(a real `*at()`), or an `O_*` flag outside the honoured set, returns `-ENOSYS`
+and is counted as unimplemented — never resolved against the wrong base or given
+weaker semantics than the guest asked for. **This is not a sandbox**: `openat`
+forwards to the host kernel, so the guest can open whatever the host process may
+open (SECURITY.md).
+
+`fstat` reports the **guest** (x86-64) `struct stat` layout, built field-by-field
+from the host's rather than `memcpy`'d: the host layout differs on AArch64, so a
+copy would put values at the wrong offsets. This is the ABI-sensitive part and
+the pattern to reuse for `stat`/`lstat`/`newfstatat`/`statx`.
 
 `mmap` is **anonymous-only**: a request without `MAP_ANONYMOUS` is reported
 unimplemented (and counted as such), not mapped incorrectly. `mprotect`/`munmap`
@@ -235,13 +247,16 @@ rule.
 | `read`(0) over a guest descriptor table | ✅ | 6 | `syscall.read_copies_from_adopted_stream_*`, `syscall.read_short_read_*`, `syscall.read_*_ebadf`/`_efault` |
 | `close`(3) | ✅ | 6 | `syscall.close_drops_the_descriptor_but_not_the_stream`, `syscall.close_of_bad_fd_is_ebadf` |
 | `lseek`(8) | ✅ | 6 | `syscall.lseek_repositions_*`, `syscall.lseek_end_and_cur_whence_work`, `syscall.lseek_bad_whence_*` |
+| `openat`(257) (`AT_FDCWD`, bounded path, honoured flags) | ✅ (scoped) | 6 | `syscall.openat_opens_a_real_file_*`, `syscall.openat_missing_file_is_enoent`, `syscall.openat_bad_path_pointer_is_efault`, `syscall.openat_with_a_real_dirfd_is_unimplemented`, `syscall.openat_unhandled_flag_is_unimplemented`, `syscall.openat_writes_and_closes_release_the_guest_fd` |
+| `fstat`(5) in the guest `struct stat` layout | ✅ | 6 | `syscall.fstat_reports_size_in_the_guest_layout`, `syscall.fstat_bad_fd_is_ebadf_and_bad_buffer_is_efault` |
 | Unknown number → `-ENOSYS` | ✅ | 6 | `syscall.unknown_number_is_enosys_not_silent` |
 | `brk`(12) over the guest heap | ✅ | 6 | `syscall.brk_returns_the_new_break` |
 | `mmap`(9) anonymous, `mprotect`(10), `munmap`(11) | ✅ (anonymous only) | 6 | `syscall.mmap_*`, `syscall.mprotect_*`, `syscall.munmap_*`, `syscall.mmap_end_to_end_*` |
-| `open`, `openat`, `openat2` | ⬜ | 6 | — |
+| `open`(2, legacy), `openat2`(437) | ⬜ | 6 | — |
+| `stat`(4)/`lstat`(6)/`newfstatat`(262)/`statx`(332) (path-based; reuse the `fstat` layout) | ⬜ | 6 | — |
 | `mmap` file-backed, `MAP_SHARED` | ⬜ | 6 | — |
-| `stat`/`fstat`/`lstat`/`*statat` (struct layout differences) | ⬜ | 6 | — |
 | `arch_prctl` (FS/GS base, TLS) | ⬜ | 6 | — |
+| `getdents64`, `access`, `readlink`/`readlinkat`, `getrandom` | ⬜ | 6 | — |
 | `clone`, `futex`, threading | ⬜ | 6 | — |
 | Signals | ⬜ | 6 | — |
 | `epoll`, `poll`, `select` | ⬜ | 6 | — |

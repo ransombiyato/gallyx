@@ -8,11 +8,13 @@ the reference interpreter (Tier 0) and a translation cache that runs whole
 programs through generated AArch64 code (Tier 1).** Phase 4's exit criteria are
 met and recorded. Phase 5 has begun with a *measured baseline before any
 optimisation*: on AArch64 under `qemu-user`, Tier 1 is ~12.8× faster than Tier 0
-on a fixed loop workload (BENCHMARKS.md §4.2). Phase 6's syscall inventory is
-complete and validated (docs/syscalls/), and the **first syscall slice
-(`write`/`exit`/`exit_group`) is implemented in both tiers**, with unimplemented
-numbers returning `-ENOSYS` explicitly. The guest instruction subset remains
-small; see COMPATIBILITY.md.**
+on a fixed loop workload (BENCHMARKS.md §4.2), and **five optimizations are now
+accepted and measured** (parity fast path, dead-`rip` elimination, flag
+liveness, direct-mapped dispatch, ALU immediate folding — BENCHMARKS.md
+§4.2.1–4.2.5). Phase 6's syscall inventory is complete and validated
+(docs/syscalls/), and the **first syscall slice (`write`/`exit`/`exit_group`) is
+implemented in both tiers**, with unimplemented numbers returning `-ENOSYS`
+explicitly. The guest instruction subset remains small; see COMPATIBILITY.md.**
 
 This is the first file a returning agent should read. It records exactly what
 works, what was last verified, and what to do next.
@@ -52,10 +54,12 @@ each. Distribution: U4=39, U3=75, U2=32, U1=14, E1=8, E2=100, E3=107.
 | 2. Reproducible baseline recorded before optimising | **Done** — BENCHMARKS.md §4.2, `scripts/bench-tier-qemu.sh` |
 | 3. Optimization 1: parity (PF) fast path | **Done & measured** — BENCHMARKS.md §4.2.1; −28.8% generated code for the fixed workload |
 | 4. Optimization 2: dead `rip` store elimination | **Done & measured** — BENCHMARKS.md §4.2.2; −9.3% generated code |
-| 5. Register allocation | **Not started** |
-| 6. Block chaining | **Not started** |
-| 7. Lower-overhead dispatch | **Not started** |
-| 8. Multi-tier compilation | **Not started** |
+| 5. Optimization 3: flag liveness (skip dead flags) | **Done & measured** — BENCHMARKS.md §4.2.3; −39.7% generated code for the fixed workload |
+| 6. Optimization 4: direct-mapped dispatch | **Done & measured** — BENCHMARKS.md §4.2.4; 99.9985% dispatch hit rate |
+| 7. Optimization 5: ALU immediate folding | **Done & measured** — BENCHMARKS.md §4.2.5; −2 words on the size-guard program |
+| 8. Register allocation | **Not started** |
+| 9. Block chaining | **Not started** |
+| 10. Multi-tier compilation | **Not started** |
 
 **Baseline (must not be silently changed).** Fixed guest loop, 200,000
 iterations = 600,002 retired guest instructions, median of 7 samples under
@@ -82,6 +86,34 @@ code fell 644 → 584 bytes (−9.3%, fully accounted for: 5 body instructions �
 3 instructions each) and Tier 1 wall time fell ~4% in an interleaved A/B
 (BENCHMARKS.md §4.2.2). The differential suite compares the final `rip`, so a
 misplaced write fails hard.
+
+**Optimization 3 (flag liveness) — accepted.** Every ALU instruction emitted the
+full six-flag prologue regardless of whether anything read the flags.
+`translate_block` is now decode → backward flag liveness → emit, so an
+instruction computes only the flags that are read before being overwritten
+(`live_out` starts at all flags at the block exit, since flags persist across
+blocks and there is no cross-block analysis). INC/DEC also lost their explicit
+CF save/restore, because `flags_written()` excludes CF for them. Generated code
+for the fixed workload fell 584 → 352 bytes (−39.7%, deterministic) and the
+size-guard program fell 148 → 90 words; the `qemu-user` wall-clock change was
+~0% and is **not claimed** as a speedup (BENCHMARKS.md §4.2.3). New guard:
+`translator.dead_flags_are_not_computed`.
+
+**Optimization 4 (direct-mapped dispatch) — accepted.** The dispatcher resolved
+every next PC through `std::unordered_map`. A 4096-entry direct-mapped table
+(low 12 bits of the PC) now answers the lookup, falling back to the map only on
+a slot mismatch; the map stays authoritative, so a collision is a safe
+fall-through, never a wrong block. Measured hit rate on the fixed workload:
+**199,998 hits / 3 misses (99.9985%)** (BENCHMARKS.md §4.2.4). New test:
+`translation_cache.direct_map_collision_falls_back_to_map`.
+
+**Optimization 5 (ALU immediate folding) — accepted.** `add/sub/cmp reg, imm`
+with an immediate that fits the AArch64 12-bit ADD/SUB immediate form now folds
+into a single ADDS/SUBS-immediate, instead of materialising the constant into a
+register first. The fold is applied only when AF is dead (AF needs `b` in a
+register); a first unconditional attempt was caught by the differential test and
+narrowed. Size-guard program fell 90 → 88 words (BENCHMARKS.md §4.2.5). New
+test: `translator.alu_immediate_is_folded`.
 
 ---
 
@@ -350,7 +382,10 @@ aarch64-linux-gnu-g++ 14.2.0.
 | Translator blocks vs. interpreter (AArch64) | `translator.block_*` under qemu | PASS — block cuts at terminators/unsupported/buffer end |
 | Whole-program differentials (AArch64) | `translator.differential_program_*` under qemu | PASS — counted loop, nested loops, branch-inside-loop all match `run_program` |
 | Dispatcher limits (AArch64) | `translator.dispatcher_*` under qemu | PASS — stops at unsupported; step limit is a hard bound, does not hang |
-| Translation cache (AArch64) | `translation_cache.caches_*` under qemu | PASS — caches blocks, agrees with interpreter |
+| Translation cache (AArch64) | `translation_cache.caches_*` under qemu | PASS — caches blocks, agrees with interpreter, direct-map hit rate > miss rate |
+| Dispatch collision safety (AArch64) | `translation_cache.direct_map_collision_falls_back_to_map` | PASS — two PCs in one slot both run correctly, no re-translation |
+| Flag liveness (AArch64) | `translator.dead_flags_are_not_computed` | PASS — a dead-flag `add` costs ≤4 words, a live one ≥15 |
+| ALU immediate folding (AArch64) | `translator.alu_immediate_is_folded` | PASS — foldable immediate is strictly smaller than a materialised one |
 | CLI tier 1 executes generated code | `HYPERION_EMULATOR=qemu-aarch64 ... cli_smoke.sh` | PASS — **3 basic blocks translated**, `steps=17` |
 | ASan/UBSan (clang) | `ctest --test-dir build/san` | PASS — 9/9 |
 | Formatting | `clang-format --dry-run --Werror` | PASS — clean |
@@ -441,9 +476,10 @@ stable-vs-noisy discrimination case).
   - No measurement exists on the reference device (Snapdragon 855, Android 10).
     Everything recorded so far is from the x86-64 development host, except the
     AArch64 code paths, which run under `qemu-user`, not on real ARM hardware.
-  - No **performance** measurement of Tier 1 vs Tier 0 exists yet. Tier 1 is
-    expected to be slower than the interpreter at this stage (no register
-    allocation, no chaining); that is a Phase 5 question, not a Phase 4 failure.
+  - Tier 1 vs Tier 0 **is** now measured (BENCHMARKS.md §4.2–4.2.5), but only
+    under `qemu-user` and only on one fixed loop workload. It is a relative
+    sanity signal, not a hardware performance claim, and it does not generalise
+    to real applications.
 - See `docs/known-issues.md` for limitations.
 
 ---
@@ -451,18 +487,33 @@ stable-vs-noisy discrimination case).
 ## 4. Immediate next task
 
 **Phase 6's first syscall slice (`write`/`exit`/`exit_group`) is implemented and
-tested in both tiers. Phase 5 has two accepted, measured optimizations. The next
-concrete work is the guest address space, which every dynamic program needs, and
-then broader syscall coverage.**
+tested in both tiers. Phase 5 has five accepted, measured optimizations
+(BENCHMARKS.md §4.2.1–4.2.5), all deterministic-evidence based. The next
+structural Phase 5 work is register allocation; the next Phase 6 work is the
+guest address space.**
 
 The single best next action:
 
-- **Build the guest address space (Phase 6).** Implement `mmap`, `munmap`,
-  `mprotect` and `brk` over a guest-managed region, with explicit bounds and
-  permission checks, so the loader and dynamic programs can allocate memory.
-  These are U4/U3 syscalls in `docs/syscalls/`. Keep the handler boundary: the
-  guest never receives a raw host pointer, and every guest pointer is validated
-  against the guest region before use (as `write` already does).
+- **Guest register allocation (Phase 5, start small).** Today every guest
+  instruction is a load/compute/store against `GuestState` in memory, which
+  dominates the generated code. As a first, provably-safe step, keep the
+  *most-used* guest registers in AArch64 registers within a block: load them at
+  block entry, operate in registers, spill at block exit. Keep the block
+  signature and the authoritative-`rip` rule unchanged, keep the interpreter as
+  the oracle, and require the whole differential suite to pass before accepting
+  the change. Then re-run `scripts/bench-tier-qemu.sh` and record before/after in
+  BENCHMARKS.md with a verdict. Add a deterministic guard for whatever the change
+  is expected to move (e.g. a `GuestState` load/store count) so the improvement
+  is provable even when `qemu-user` timing is noisy.
+
+Then, independent and larger (Phase 6):
+
+- **Build the guest address space.** Implement `mmap`, `munmap`, `mprotect` and
+  `brk` over a guest-managed region, with explicit bounds and permission checks,
+  so the loader and dynamic programs can allocate memory. These are U4/U3
+  syscalls in `docs/syscalls/`. Keep the handler boundary: the guest never
+  receives a raw host pointer, and every guest pointer is validated against the
+  guest region before use (as `write` already does).
 - Then extend coverage in the U4 order (`docs/syscalls/U4.md`): `read`,
   `openat`/`open`, `close`, `fstat`/`newfstatat`, `getdents64`, `lseek`,
   `access`, `readlink`, `getrandom`, `set_tid_address`, `rseq`, `prlimit64`.
@@ -475,17 +526,13 @@ The single best next action:
 
 Also still open from Phase 5 (independent, larger):
 
-- **Register allocation (start small).** Today every guest instruction is a
-  load/compute/store against `GuestState` in memory. As a first, provably-safe
-  step, keep the *most-used* guest registers in AArch64 registers within a
-  block: load them at block entry, operate in registers, spill at block exit.
-  Keep the block signature and the authoritative-`rip` rule unchanged, keep the
-  interpreter as the oracle, and require the whole differential suite to pass
-  before accepting the change. Then re-run `scripts/bench-tier-qemu.sh` and
-  record the before/after in BENCHMARKS.md with a verdict.
-- Add a second deterministic guard for whatever a change is expected to move
-  (e.g. a guest-state access count), so the improvement is provable even when
-  `qemu-user` timing is noisy.
+- **Block chaining.** Today every block exit returns to the dispatcher. Link a
+  block's exit directly to its successor's generated code, guarded by the same
+  authoritative-`rip` rule, so a hot loop stays in generated code. Keep the
+  dispatcher as the fallback for any unlinked exit.
+- **Multi-tier compilation.** Add a cheaper first tier (or reuse Tier 0) and
+  promote only hot blocks to the optimising tier, with a fixed, reproducible
+  promotion policy.
 
 Rules for every Phase 5 experiment (from `ROADMAP.md` and BENCHMARKS.md §5):
 

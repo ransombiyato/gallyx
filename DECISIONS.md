@@ -409,3 +409,62 @@ that hit the limit, the differential asserts `tier1_steps <= interpreter_steps
 <= max_steps`. A future tier that can interrupt a block mid-way would remove the
 granularity difference; until then this is documented as LIM-013 in
 `docs/known-issues.md`.
+
+---
+
+## D-019 — The translation cache's hash map stays authoritative; the direct table is only a fast path
+
+**Date:** Phase 5.
+**Status:** Accepted.
+
+**Context.** The dispatcher resolved the next guest PC through an
+`std::unordered_map` after every block exit — a hash computation plus a pointer
+chase per block, on the hottest path in the system. A small direct-mapped table
+indexed by the low bits of the PC could answer almost every lookup in one array
+access, but any fast path that can return a *wrong* block is a correctness
+hazard, and a wrong block is exactly the kind of bug that runs silently.
+
+**Decision.** `TranslationCache` gained a 4096-entry direct-mapped table
+(`direct_[pc & 0xFFF]`). `lookup()` accepts a slot **only if `block->start ==
+pc`**; any mismatch (a collision, or a never-seen PC) falls through to the hash
+map, which remains the single source of truth. The fast path is therefore a pure
+cache with no authority, so a collision is a safe slow-path miss, never a wrong
+block. `install()` writes both structures so they cannot disagree.
+
+**Consequences.** The correctness argument for the fast path is trivial (a slot
+is used only when it holds exactly the requested block), which is why this
+optimization was accepted on the strength of a deterministic counter rather than
+a timing measurement. A test forces two PCs into the same slot and checks both
+run correctly with no extra translation. If the table is ever made larger or
+associative, the same `block->start == pc` guard must be retained.
+
+---
+
+## D-020 — An optimization that cannot be measured deterministically is judged on a deterministic proxy, and no speedup is claimed
+
+**Date:** Phase 5.
+**Status:** Accepted.
+
+**Context.** Hyperion's AArch64 code is executed under `qemu-user` on an x86-64
+development host. qemu has already translated the generated AArch64 to host code,
+so the wall-clock cost of a change inside the generated code is heavily damped
+and often below the run-to-run noise. Three of the five Phase 5 optimizations
+(flag liveness, dispatch cache, immediate folding) move generated-code size or
+dispatch counts, not measured time.
+
+**Decision.** Each optimization must be justified by a **deterministic** proxy
+that the change is expected to move: generated-code byte count, emitted
+instruction count, or a dispatch/access counter. Where wall-clock is genuinely
+measurable (the parity fast path), it is reported alongside; where it is not
+(flag liveness, dispatch cache, immediate folding), the honest statement is "the
+proxy moved, the wall-clock effect is not measurable here and is not claimed".
+The proxy is then pinned as a regression guard in CI so the win cannot silently
+regress.
+
+**Consequences.** BENCHMARKS.md reports deterministic evidence for every
+optimization and never presents a `qemu-user` timing delta as a hardware result.
+The proxy must be causally tied to the change (the guard test asserts the specific
+expected direction, e.g. a dead-flag `add` costs fewer words than a live one), so
+it cannot be satisfied by an unrelated change. When real ARM hardware becomes
+available, the timing claims can be revisited; the deterministic guards stay
+valid regardless.

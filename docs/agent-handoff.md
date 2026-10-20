@@ -19,8 +19,7 @@ no KVM. Development often happens on x86-64 Linux hosts.
 ## 2. Current state in one paragraph
 
 **Phases 0–4 are complete; Phase 5 (performance optimization) is under way, with
-its baseline recorded and the first optimization (parity fast path) accepted and
-measured.** The repository builds clean with `-Werror`, has a dependency-free
+its baseline recorded and five optimizations accepted and measured.** The repository builds clean with `-Werror`, has a dependency-free
 unit-test suite wired into CTest, and has a **verified cross-architecture
 validation pipeline** that cross-compiles the test suite to AArch64 and runs it
 under `qemu-user`. A host capability probe measures architecture/page size/cache
@@ -61,12 +60,13 @@ state and step count. `hyperion run <file> --tier=0|1` runs a raw x86-64 blob
 through either tier and the two must agree (`tests/cli/cli_smoke.sh`).
 
 **What is still missing.** No block chaining, no register allocation (guest
-registers stay in memory), no cache invalidation (self-modifying code would run
-stale translations — a documented boundary), and no syscall layer. The guest
-stack (`push`/`pop`/`ret`) and memory operands are still *refused explicitly*
-rather than miscompiled, because they need a guest address space (Phase 6). The
-interpreter remains the only *complete* execution path. Phase 5 (performance
-measurement and optimization) is next; `STATUS.md` §4 lists the steps.
+registers stay in memory), and no cache invalidation (self-modifying code would
+run stale translations — a documented boundary). The syscall layer exists but is
+a **first slice only**: `write`/`exit`/`exit_group` are implemented, everything
+else returns `-ENOSYS`. The guest stack (`push`/`pop`/`ret`) and memory operands
+are still *refused explicitly* rather than miscompiled, because they need a guest
+address space (Phase 6). The interpreter remains the only *complete* execution
+path. Phase 5 continues with register allocation; `STATUS.md` §4 lists the steps.
 
 **Two real defects were found and fixed in Phase 4**, both by testing: a block
 whose *first* instruction was unsupported was emitted empty and made the
@@ -149,10 +149,12 @@ build.
 
 ## 5. Your next task
 
-**Phases 0–4 are closed. Phase 5 is active (two optimizations accepted and
-measured). Phase 6's syscall inventory is complete and CI-validated, and the
-first syscall slice (`write`/`exit`/`exit_group`) is implemented and tested in
-both tiers. The next concrete step is the guest address space.** Guest state, the
+**Phases 0–4 are closed. Phase 5 is active (five optimizations accepted and
+measured: parity fast path, dead-`rip` elimination, flag liveness, direct-mapped
+dispatch, ALU immediate folding). Phase 6's syscall inventory is complete and
+CI-validated, and the first syscall slice (`write`/`exit`/`exit_group`) is
+implemented and tested in both tiers. The next concrete step is guest register
+allocation (Phase 5), then the guest address space (Phase 6).** Guest state, the
 decoder, the reference interpreter, the subset contract (`COMPATIBILITY.md` §2),
 the hardware differential, the AArch64 encoder, executable memory,
 single-instruction translation, whole-block translation, the translation-cache
@@ -175,6 +177,15 @@ dispatcher, and the syscall dispatch layer all exist and pass.
    §4.2.1; 904 → 644 bytes, Tier 1 wall time −17.5%.)
 5. ~~Optimization 2: dead `rip` stores~~ **Done & measured.** (BENCHMARKS.md
    §4.2.2; 644 → 584 bytes, Tier 1 wall time ≈ −4%.)
+5a. ~~Optimization 3: flag liveness~~ **Done & measured.** (BENCHMARKS.md
+   §4.2.3; 584 → 352 bytes, −39.7%; size-guard 148 → 90 words. Guard:
+   `translator.dead_flags_are_not_computed`.)
+5b. ~~Optimization 4: direct-mapped dispatch~~ **Done & measured.** (BENCHMARKS.md
+   §4.2.4; 99.9985% dispatch hit rate. Guard:
+   `translation_cache.direct_map_collision_falls_back_to_map`.)
+5c. ~~Optimization 5: ALU immediate folding~~ **Done & measured.** (BENCHMARKS.md
+   §4.2.5; size-guard 90 → 88 words. Guard:
+   `translator.alu_immediate_is_folded`.)
 6. ~~Establish the seven-file syscall inventory~~ **Done.** `docs/syscalls/`
    holds `U1.md`–`U4.md`, `E1.md`–`E3.md`, generated from `inventory.tsv` and
    validated against the pinned Linux v6.12 table by
@@ -188,21 +199,22 @@ dispatcher, and the syscall dispatch layer all exist and pass.
    are implemented; every other number returns `-ENOSYS`, counted in
    `RunResult::unimplemented_syscalls`. 11 new tests, including a Tier 1
    differential under `qemu-user`.
-8. **Next: build the guest address space (Phase 6).** Implement
+8. **Next (Phase 5): guest register allocation (start small).** Keep the
+   most-used guest registers in AArch64 registers *within* a block (load at
+   entry, spill at exit), leaving the block signature and the authoritative-`rip`
+   rule unchanged. Require the whole differential suite to pass, then re-run
+   `scripts/bench-tier-qemu.sh` and record before/after in BENCHMARKS.md with an
+   accept/reject verdict. Never change the baseline to make a candidate look
+   good. Add a deterministic guard for whatever the change should move (e.g. a
+   `GuestState` load/store count), since `qemu-user` timing is noisy (DECISIONS.md
+   D-020).
+9. **Then (Phase 6): build the guest address space.** Implement
    `mmap`/`munmap`/`mprotect`/`brk` over a guest-managed region with explicit
    bounds and permission checks, so the loader and dynamic programs can allocate
    memory. Keep the handler boundary: the guest never receives a raw host
    pointer, and every guest pointer is validated (as `write` already does). Then
    extend coverage in the U4 order (`docs/syscalls/U4.md`). Move the
    corresponding `status` values in `inventory.tsv` and regenerate.
-9. **Also open (Phase 5): register allocation (start small).** Keep the most-used
-   guest registers in AArch64 registers *within* a block (load at entry, spill at
-   exit), leaving the block signature and the authoritative-`rip` rule unchanged.
-   Require the whole differential suite to pass, then re-run
-   `scripts/bench-tier-qemu.sh` and record before/after in BENCHMARKS.md with an
-   accept/reject verdict. Never change the baseline to make a candidate look
-   good. Add a deterministic guard for whatever the change should move, since
-   `qemu-user` timing is noisy.
 10. **Keep the oracle.** Run each multi-instruction program through both the
     generated blocks and the interpreter's `run_program`, and require the final
     `GuestState` to match bit-for-bit. A mismatch must fail loudly; there is no

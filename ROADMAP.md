@@ -253,9 +253,19 @@ changes failing correctness tests or regressing performance.
 - ✅ **Dead-code elimination, part 2: per-instruction `rip` stores.** Blocks write
   `rip` once at exit instead of after every body instruction. Generated code
   644 → 584 bytes (−9.3%); Tier 1 ≈ −4%. `BENCHMARKS.md` §4.2.2.
+- ✅ **Dead-code elimination, part 3: flag liveness.** `translate_block` decodes
+  the block, runs backward flag liveness, then emits; each ALU instruction
+  computes only the flags read before being overwritten. Generated code
+  584 → 352 bytes (−39.7%, deterministic); size-guard program 148 → 90 words.
+  `BENCHMARKS.md` §4.2.3. Guard: `translator.dead_flags_are_not_computed`.
+- ✅ **Lower-overhead dispatch.** A 4096-entry direct-mapped table answers the
+  next-PC lookup before the hash map (which stays authoritative). Measured
+  99.9985% hit rate on the fixed workload. `BENCHMARKS.md` §4.2.4.
+- ✅ **Instruction selection: ALU immediate folding.** Foldable `add/sub/cmp`
+  immediates lower to one ADDS/SUBS-immediate when AF is dead. Size-guard program
+  90 → 88 words. `BENCHMARKS.md` §4.2.5.
 - ⬜ Register allocation.
 - ⬜ Block chaining.
-- ⬜ Lower-overhead dispatch.
 - ⬜ Multi-tier compilation.
 
 **Exit criteria.** Reproducible performance measurements and documented

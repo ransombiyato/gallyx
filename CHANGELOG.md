@@ -5,6 +5,42 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 5 (performance optimizations 3–5)
+
+### Added — flag liveness (BENCHMARKS.md §4.2.3)
+- `translate_block` is now three passes: decode the block, run backward flag
+  liveness over it, then emit. Each ALU instruction computes only the flags read
+  before being overwritten; `live_out` starts at all flags at the block exit
+  (flags persist across blocks, so there is no cross-block analysis).
+- INC/DEC no longer emit an explicit CF save/restore: `flags_written()` excludes
+  CF for them, so CF is preserved structurally.
+- Generated code for the fixed workload fell 584 → 352 bytes (−39.7%); the
+  size-guard program fell 148 → 90 words. No wall-clock claim under `qemu-user`.
+- New deterministic guard: `translator.dead_flags_are_not_computed`.
+
+### Added — direct-mapped dispatch (BENCHMARKS.md §4.2.4)
+- `TranslationCache` consults a 4096-entry direct-mapped table (low 12 bits of
+  the guest PC) before the hash map. The map stays authoritative, so a collision
+  is a safe fall-through, never a wrong block.
+- Measured dispatch hit rate on the fixed workload: 199,998 hits / 3 misses
+  (99.9985%); counters exposed in the benchmark JSON.
+- New test: `translation_cache.direct_map_collision_falls_back_to_map`.
+
+### Added — ALU immediate folding (BENCHMARKS.md §4.2.5)
+- `add/sub/cmp reg, imm` with an immediate that fits the AArch64 12-bit ADD/SUB
+  immediate form folds into one ADDS/SUBS-immediate, instead of materialising the
+  constant first. Applied only when AF is dead (AF needs `b` in a register).
+- Size-guard program fell 90 → 88 words.
+- New test: `translator.alu_immediate_is_folded`.
+
+### Notes
+- All three optimizations were accepted on **deterministic** evidence (generated
+  code size, dispatch counters), because `qemu-user` wall-clock is too noisy to
+  judge them; no speedup is claimed from the timing harness. The interpreter
+  remains the correctness oracle and the differential suite must pass unchanged.
+
+---
+
 ## [Unreleased] — Phase 6 (first syscall slice)
 
 ### Added — guest syscall layer (first slice)

@@ -284,6 +284,70 @@ is a hard failure. The single-instruction differential tests still cover the
 `write_rip=true` path. Cross suite green under `qemu-aarch64` (99 passed, 0
 failed).
 
+#### 4.2.3 Optimization 3 — flag liveness (Phase 5)
+
+**Hypothesis.** Every ALU instruction that writes flags emitted the full
+six-flag prologue (~29 AArch64 instructions: `cset`+`strb` per flag, the AF
+`eor` identity, and the parity fold), regardless of whether anything ever read
+those flags. Most flags in a real block are dead: a later instruction overwrites
+them before any `jcc` reads them. Computing a dead flag is pure overhead — it
+neither changes the result nor is observable.
+
+**Change.** `translate_block` became a three-pass function
+(`src/core/translator.cpp`):
+
+1. Decode the whole block into a list (unchanged block-cutting rules).
+2. Backward flag liveness over that list: `live_out` starts at *all* flags at
+   the block exit (flags persist in `GuestState` across blocks, so a successor
+   may read any of them — there is no cross-block analysis), and each
+   instruction's live set is `writes & live_out`; `live_out` then becomes
+   `reads | (live_out & ~writes)`.
+3. Emit, passing each instruction's live mask.
+
+`emit_flags_from_nzcv`/`emit_flags_logical` now store only the masked flags, and
+the AF `a^b`/`a^b^r` identity is materialised only when AF is live. INC/DEC
+gained a second, independent win: because `flags_written(INC/DEC)` excludes CF,
+CF is never stored for them, so the explicit load-CF/restore-CF pair (2
+instructions per INC/DEC) disappeared. That is a correctness improvement as much
+as a speed one — the previous save/restore was the only thing preserving CF, and
+it is now preserved structurally.
+
+**Evidence.**
+
+| Metric | Baseline (`250a148`) | After flag liveness | Change |
+| --- | --- | --- | --- |
+| Generated AArch64 bytes (fixed workload) | 584 | 352 | **−39.7%** |
+| AArch64 words, `translated_code_size_is_bounded` program | 148 | 90 | −39.2% |
+| Tier 1 ns / guest instruction (under `qemu-user`) | 29.7 | 29.7 | ≈ 0% |
+
+**The delta is fully accounted for, and the wall-clock result is honestly
+null.** The benchmark loop body is `add rdx,rax | dec rcx | jnz` (plus the entry
+`xor edx,edx`). The `xor` and `add` have all six flags dead (the `jnz` reads only
+ZF, and both are overwritten by the following `dec`), so each loses the entire
+flag prologue; the `dec` is left computing only ZF/SF/PF/OF (CF and AF dead).
+That accounts for the 584 → 352 byte drop. But under `qemu-user` the *timing* is
+unchanged: the loop is dominated by `GuestState` load/store and qemu's own
+translation, and removing ~40% of AArch64 instructions in a region qemu has
+already translated to host code does not move qemu's host execution time here.
+**The −39.7% code size is real and deterministic; the wall-clock gain is not
+demonstrated by this measurement and is not claimed.** A direct AArch64 host
+would be the right place to measure it; that hardware is unavailable (4.3).
+
+**Interpretation, and limits.**
+
+- Code size is the trustworthy number, and it is a proxy for the work a real
+  CPU would do (fewer instructions, fewer `strb`s to the `GuestState`). It is
+  not itself a speedup claim.
+- The optimization is conservative: `live_out = all` at block exit means a flag
+  written as the last instruction of a block is still always computed. That is
+  required for cross-block correctness and is the safe default.
+- Correctness is guarded by the differential suite, which compares the *final*
+  `GuestState` — including all six flags — against the interpreter, plus the new
+  `translator.dead_flags_are_not_computed` test (a live `add` costs ≥15 words, a
+  dead one ≤4).
+
+**Reproduce:** `scripts/bench-tier-qemu.sh --iterations 200000 --repeats 7`.
+
 ### 4.3 Reference target device (Snapdragon 855)
 
 **unavailable.** The reference device is not present in this environment.

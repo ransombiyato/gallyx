@@ -82,43 +82,145 @@ void emit_parity(a64::Encoder& e, a64::Reg dst, a64::Reg src) {
     e.eor(a64::Width::k32, dst, dst, kT3); // PF = 1 - parity_bit
 }
 
-// Store SF, ZF, CF and OF from the AArch64 condition flags, which must have
-// been set by a preceding ADDS (is_sub=false) or SUBS (is_sub=true). `t2` must
-// hold (a ^ b ^ result) for the AF identity; `result` is used for parity.
-void emit_flags_from_nzcv(a64::Encoder& e, bool is_sub, a64::Reg t2, a64::Reg result) {
-    e.cset(a64::Width::k32, kT1, a64::Cond::kEq); // ZF = Z
-    e.strb(kT1, kState, kZfOffset);
-    e.cset(a64::Width::k32, kT1, a64::Cond::kMi); // SF = N
-    e.strb(kT1, kState, kSfOffset);
-    // x86 CF is the carry-out: for add it is "carry set" (CS); for subtract it
-    // is "borrow" (CC, i.e. no borrow), the standard ADDS/SUBS mapping.
-    e.cset(a64::Width::k32, kT1, is_sub ? a64::Cond::kCc : a64::Cond::kCs);
-    e.strb(kT1, kState, kCfOffset);
-    e.cset(a64::Width::k32, kT1, a64::Cond::kVs); // OF = V
-    e.strb(kT1, kState, kOfOffset);
-    // AF: carry out of bit 3. For both ADD and SUB, AF == bit 4 of (a ^ b ^ r).
-    e.ubfx(a64::Width::k32, kT1, t2, 4, 1);
-    e.strb(kT1, kState, kAfOffset);
-    // Parity is computed last: it clobbers the condition flags, which are no
-    // longer needed once the csets above have run.
-    emit_parity(e, kT1, result);
-    e.strb(kT1, kState, kPfOffset);
+// --- Flag liveness ----------------------------------------------------------
+//
+// Which x86 flags an instruction reads and writes. Modelling this lets the
+// translator skip computing a flag whose value is overwritten before anything
+// reads it, which is most of the emitted code for an ALU instruction.
+//
+// The subtlety that a naive "every ALU op writes all six flags" model gets
+// wrong is INC/DEC: they are ADD/SUB of 1 *with CF held*, so they write
+// PF/AF/ZF/SF/OF but leave CF unchanged. flags_written() encodes that, and the
+// emission never stores CF for INC/DEC, so CF is preserved for free.
+enum FlagBit : std::uint8_t {
+    kFbCf = 1u << 0,
+    kFbPf = 1u << 1,
+    kFbAf = 1u << 2,
+    kFbZf = 1u << 3,
+    kFbSf = 1u << 4,
+    kFbOf = 1u << 5,
+};
+constexpr std::uint8_t kFbAll = 0x3F;
+
+// Flags an instruction writes. Everything outside the flag-setting subset
+// (MOV, NOP, JMP, HLT, ...) writes none.
+std::uint8_t flags_written(Opcode op) {
+    switch (op) {
+    case Opcode::kAdd:
+    case Opcode::kSub:
+    case Opcode::kCmp:
+    case Opcode::kAnd:
+    case Opcode::kOr:
+    case Opcode::kXor:
+        return kFbAll;
+    case Opcode::kInc:
+    case Opcode::kDec:
+        return static_cast<std::uint8_t>(kFbAll & ~kFbCf);
+    default:
+        return 0;
+    }
+}
+
+// Flags a condition reads. Must agree with alu::evaluate()/Condition, which the
+// differential tests check directly.
+std::uint8_t condition_flags(Condition c) {
+    switch (c) {
+    case Condition::kO:
+    case Condition::kNo:
+        return kFbOf;
+    case Condition::kB:
+    case Condition::kAe:
+        return kFbCf;
+    case Condition::kE:
+    case Condition::kNe:
+        return kFbZf;
+    case Condition::kS:
+    case Condition::kNs:
+        return kFbSf;
+    case Condition::kP:
+    case Condition::kNp:
+        return kFbPf;
+    case Condition::kBe:
+    case Condition::kA:
+        return static_cast<std::uint8_t>(kFbCf | kFbZf);
+    case Condition::kL:
+    case Condition::kGe:
+        return static_cast<std::uint8_t>(kFbSf | kFbOf);
+    case Condition::kLe:
+    case Condition::kG:
+        return static_cast<std::uint8_t>(kFbSf | kFbOf | kFbZf);
+    }
+    return 0;
+}
+
+// Store the masked flags from the AArch64 condition flags, which must have been
+// set by a preceding ADDS (is_sub=false) or SUBS (is_sub=true). `t2` must hold
+// (a ^ b ^ result) and is read only when AF is requested; `result` is used for
+// parity. Flags outside `mask` are not written, so their previous value stands.
+void emit_flags_from_nzcv(a64::Encoder& e, bool is_sub, std::uint8_t mask, a64::Reg t2,
+                          a64::Reg result) {
+    if (mask & kFbZf) {
+        e.cset(a64::Width::k32, kT1, a64::Cond::kEq); // ZF = Z
+        e.strb(kT1, kState, kZfOffset);
+    }
+    if (mask & kFbSf) {
+        e.cset(a64::Width::k32, kT1, a64::Cond::kMi); // SF = N
+        e.strb(kT1, kState, kSfOffset);
+    }
+    if (mask & kFbCf) {
+        // x86 CF is the carry-out: for add it is "carry set" (CS); for subtract
+        // it is "borrow" (CC, i.e. no borrow), the standard ADDS/SUBS mapping.
+        e.cset(a64::Width::k32, kT1, is_sub ? a64::Cond::kCc : a64::Cond::kCs);
+        e.strb(kT1, kState, kCfOffset);
+    }
+    if (mask & kFbOf) {
+        e.cset(a64::Width::k32, kT1, a64::Cond::kVs); // OF = V
+        e.strb(kT1, kState, kOfOffset);
+    }
+    if (mask & kFbAf) {
+        // AF: carry out of bit 3. For both ADD and SUB, AF == bit 4 of
+        // (a ^ b ^ r).
+        e.ubfx(a64::Width::k32, kT1, t2, 4, 1);
+        e.strb(kT1, kState, kAfOffset);
+    }
+    if (mask & kFbPf) {
+        // Parity is computed last: it clobbers the condition flags, which the
+        // csets above need.
+        emit_parity(e, kT1, result);
+        e.strb(kT1, kState, kPfOffset);
+    }
 }
 
 // Logical ops (AND/OR/XOR) clear CF, OF and AF, and set SF/ZF/PF from the
 // result. There is no NZCV involvement.
-void emit_flags_logical(a64::Encoder& e, a64::Width w, a64::Reg result) {
-    e.cmp_imm(w, result, 0); // sets N (sign) and Z from the result
-    e.cset(a64::Width::k32, kT1, a64::Cond::kEq);
-    e.strb(kT1, kState, kZfOffset);
-    e.cset(a64::Width::k32, kT1, a64::Cond::kMi);
-    e.strb(kT1, kState, kSfOffset);
-    e.movz(a64::Width::k32, kT1, 0);
-    e.strb(kT1, kState, kCfOffset);
-    e.strb(kT1, kState, kOfOffset);
-    e.strb(kT1, kState, kAfOffset);
-    emit_parity(e, kT1, result);
-    e.strb(kT1, kState, kPfOffset);
+void emit_flags_logical(a64::Encoder& e, a64::Width w, std::uint8_t mask, a64::Reg result) {
+    if (mask & (kFbZf | kFbSf)) {
+        e.cmp_imm(w, result, 0); // sets N (sign) and Z from the result
+    }
+    if (mask & kFbZf) {
+        e.cset(a64::Width::k32, kT1, a64::Cond::kEq);
+        e.strb(kT1, kState, kZfOffset);
+    }
+    if (mask & kFbSf) {
+        e.cset(a64::Width::k32, kT1, a64::Cond::kMi);
+        e.strb(kT1, kState, kSfOffset);
+    }
+    if (mask & (kFbCf | kFbOf | kFbAf)) {
+        e.movz(a64::Width::k32, kT1, 0);
+        if (mask & kFbCf) {
+            e.strb(kT1, kState, kCfOffset);
+        }
+        if (mask & kFbOf) {
+            e.strb(kT1, kState, kOfOffset);
+        }
+        if (mask & kFbAf) {
+            e.strb(kT1, kState, kAfOffset);
+        }
+    }
+    if (mask & kFbPf) {
+        emit_parity(e, kT1, result);
+        e.strb(kT1, kState, kPfOffset);
+    }
 }
 
 // Load a source operand into `dst`. Only registers and immediates are in scope
@@ -255,7 +357,8 @@ const char* to_string(BlockExit exit) {
 // here, so they are rejected as unsupported by this helper.
 namespace {
 
-TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip) {
+TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip,
+                        std::uint8_t live_flags) {
     const bool is32 = insn.dst.size == OperandSize::k32;
     const a64::Width w = is32 ? a64::Width::k32 : a64::Width::k64;
     const int bits = is32 ? 32 : 64;
@@ -308,6 +411,12 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
                                 insn.opcode == Opcode::kXor;
         const bool is_sub = insn.opcode == Opcode::kSub || insn.opcode == Opcode::kCmp;
 
+        // Only flags that are written *and* read before being overwritten are
+        // worth computing. An empty mask means no flag is live, so the whole
+        // flag prologue disappears.
+        const std::uint8_t mask =
+            static_cast<std::uint8_t>(flags_written(insn.opcode) & live_flags);
+
         if (is_logical) {
             switch (insn.opcode) {
             case Opcode::kAnd:
@@ -320,17 +429,25 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
                 e.eor(w, kR, kA, kB);
                 break;
             }
-            emit_flags_logical(e, w, kR);
+            if (mask != 0) {
+                emit_flags_logical(e, w, mask, kR);
+            }
         } else {
-            // t2 = a ^ b, completed to (a ^ b ^ r) after the op for AF.
-            e.eor(a64::Width::k64, kT2, kA, kB);
+            if (mask & kFbAf) {
+                // t2 = a ^ b, completed to (a ^ b ^ r) after the op for AF.
+                e.eor(a64::Width::k64, kT2, kA, kB);
+            }
             if (is_sub) {
                 e.subs(w, kR, kA, kB);
             } else {
                 e.adds(w, kR, kA, kB);
             }
-            e.eor(a64::Width::k64, kT2, kT2, kR);
-            emit_flags_from_nzcv(e, is_sub, kT2, kR);
+            if (mask != 0) {
+                if (mask & kFbAf) {
+                    e.eor(a64::Width::k64, kT2, kT2, kR);
+                }
+                emit_flags_from_nzcv(e, is_sub, mask, kT2, kR);
+            }
         }
 
         if (insn.opcode != Opcode::kCmp) {
@@ -344,21 +461,28 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
 
     case Opcode::kInc:
     case Opcode::kDec: {
-        // INC/DEC are ADD/SUB of 1, except that CF is preserved. Save CF,
-        // run the flag-producing op, then restore the saved CF.
-        e.ldrb(kT0, kState, kCfOffset); // kT0 = old CF (not clobbered below)
+        // INC/DEC are ADD/SUB of 1, except that CF is preserved. flags_written()
+        // excludes CF for these, so CF is never stored and its old value stands;
+        // no explicit save/restore is needed.
         load_gpr(e, insn.dst.reg, kA);
         e.movz(a64::Width::k32, kB, 1);
         const bool is_sub = insn.opcode == Opcode::kDec;
-        e.eor(a64::Width::k64, kT2, kA, kB);
+        const std::uint8_t mask =
+            static_cast<std::uint8_t>(flags_written(insn.opcode) & live_flags);
+        if (mask & kFbAf) {
+            e.eor(a64::Width::k64, kT2, kA, kB);
+        }
         if (is_sub) {
             e.subs(w, kR, kA, kB);
         } else {
             e.adds(w, kR, kA, kB);
         }
-        e.eor(a64::Width::k64, kT2, kT2, kR);
-        emit_flags_from_nzcv(e, is_sub, kT2, kR);
-        e.strb(kT0, kState, kCfOffset); // restore CF
+        if (mask != 0) {
+            if (mask & kFbAf) {
+                e.eor(a64::Width::k64, kT2, kT2, kR);
+            }
+            emit_flags_from_nzcv(e, is_sub, mask, kT2, kR);
+        }
         store_gpr(e, kR, insn.dst.reg);
         if (write_rip) {
             emit_advance_rip(e, insn);
@@ -453,7 +577,7 @@ Translation translate_instruction(const Instruction& insn) {
         }
     }
 
-    const TranslateError err = emit_one(e, insn, /*write_rip=*/true);
+    const TranslateError err = emit_one(e, insn, /*write_rip=*/true, kFbAll);
     if (err != TranslateError::kNone) {
         out.error = err;
         return out;
@@ -471,13 +595,23 @@ Translation translate_instruction(const Instruction& insn) {
 BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
                                  const Instruction& first) {
     BlockTranslation out;
-    a64::Encoder e;
-    e.mov_reg(a64::Width::k64, kState, 0); // x8 = GuestState*
+
+    // Pass 1: decode the block into a straight-line list of instructions. This
+    // has to happen before emission so flag liveness can be computed backward
+    // over the whole block (pass 2); the emitter (pass 3) then knows, for each
+    // instruction, which flags are actually read before being overwritten.
+    struct Step {
+        Instruction insn;
+        std::uint8_t live_flags = 0;
+    };
+    std::vector<Step> steps;
 
     // `code`/`size` start at `first.address`, so an instruction at guest address
     // A sits at byte offset A - first.address.
     Instruction insn = first;
     std::size_t next_offset = first.length;
+    BlockExit exit = BlockExit::kFallThrough;
+    std::uint64_t target = 0;
 
     while (true) {
         const Opcode op = insn.opcode;
@@ -485,50 +619,33 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
         if (op == Opcode::kHlt || op == Opcode::kRet) {
             // Both stop the program. RET is modelled by the interpreter as a
             // top-level return (there is no guest stack yet, Phase 6).
-            emit_return(e, BlockResult::kHalted);
-            out.exit = BlockExit::kHalted;
-            ++out.guest_instruction_count;
+            steps.push_back({insn});
+            exit = BlockExit::kHalted;
             break;
         }
         if (op == Opcode::kSyscall) {
             // End the block at the syscall so the dispatcher can run the
             // handler. rip is advanced past the instruction, so a resume (or the
             // next block lookup) continues correctly.
-            emit_set_rip(e, insn.address + insn.length);
-            emit_return(e, BlockResult::kSyscall);
-            out.exit = BlockExit::kSyscall;
-            out.target = insn.address + insn.length;
-            ++out.guest_instruction_count;
+            steps.push_back({insn});
+            exit = BlockExit::kSyscall;
+            target = insn.address + insn.length;
             break;
         }
         if (op == Opcode::kJmp) {
-            emit_set_rip(e, insn.dst.imm);
-            emit_return(e, BlockResult::kOk);
-            out.exit = BlockExit::kJmp;
-            out.target = insn.dst.imm;
-            ++out.guest_instruction_count;
+            steps.push_back({insn});
+            exit = BlockExit::kJmp;
+            target = insn.dst.imm;
             break;
         }
         if (op == Opcode::kJcc) {
-            // Evaluate the x86 condition and write the correct next rip on both
-            // paths, so the dispatcher only has to read rip back.
-            const std::uint64_t fallthrough = insn.address + insn.length;
-            const a64::Label taken = e.new_label();
-            const a64::Label done = e.new_label();
-            emit_cond_branch(e, insn.condition, taken);
-            emit_set_rip(e, fallthrough);
-            e.b(done);
-            e.bind(taken);
-            emit_set_rip(e, insn.dst.imm);
-            e.bind(done);
-            emit_return(e, BlockResult::kOk);
-            out.exit = BlockExit::kJcc;
-            out.target = fallthrough; // hint only; rip is authoritative
-            ++out.guest_instruction_count;
+            steps.push_back({insn});
+            exit = BlockExit::kJcc;
+            target = insn.address + insn.length; // hint only; rip is authoritative
             break;
         }
 
-        // Not a terminator. If we can translate it, emit it and continue.
+        // Not a terminator. If we can translate it, add it and continue.
         // Otherwise cut the block *before* it: the dispatcher then sees the
         // unsupported PC on the next lookup and stops, instead of running an
         // instruction we did not translate.
@@ -538,50 +655,109 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
         // back to, and an empty block would fall through to the same PC and loop
         // forever, so we report the error and let the caller stop.
         if (!is_block_body_opcode(op) || validate_body(insn) != TranslateError::kNone) {
-            if (out.guest_instruction_count == 0) {
+            if (steps.empty()) {
                 out.error = TranslateError::kUnsupportedOpcode;
                 return out;
             }
-            out.exit = BlockExit::kFallThrough;
-            out.target = insn.address;
+            exit = BlockExit::kFallThrough;
+            target = insn.address;
             break;
         }
-        // Body instructions do not write rip: nothing inside a block reads it,
-        // so the per-instruction store is dead. The block writes rip once, at
-        // its exit. See BENCHMARKS.md §4.2.2.
-        const TranslateError emit_err = emit_one(e, insn, /*write_rip=*/false);
-        if (emit_err != TranslateError::kNone) {
-            if (out.guest_instruction_count == 0) {
-                out.error = emit_err;
-                return out;
-            }
-            out.exit = BlockExit::kFallThrough;
-            out.target = insn.address;
-            break;
-        }
-        ++out.guest_instruction_count;
+        steps.push_back({insn});
 
         if (next_offset >= size) {
-            out.exit = BlockExit::kFallThrough;
-            out.target = first.address + next_offset;
+            exit = BlockExit::kFallThrough;
+            target = first.address + next_offset;
             break;
         }
         const DecodeResult next =
             decode(code + next_offset, size - next_offset, first.address + next_offset);
         if (!next.ok()) {
-            out.exit = BlockExit::kFallThrough;
-            out.target = first.address + next_offset;
+            exit = BlockExit::kFallThrough;
+            target = first.address + next_offset;
             break;
         }
         insn = next.instruction;
         next_offset += insn.length;
     }
 
-    if (out.exit == BlockExit::kFallThrough) {
-        emit_set_rip(e, out.target);
+    // Pass 2: backward flag liveness. Flags live in GuestState and persist
+    // across blocks, so at a block exit every flag is conservatively live: a
+    // successor block may read any of them, and there is no cross-block
+    // analysis. (This is sound because the invariant "all flags are correct at
+    // block entry" then holds by induction from program start, where both tiers
+    // begin with the same zeroed flags.)
+    //
+    // live_out = flags that must be correct just after this instruction.
+    // live_in  = reads | (live_out & ~writes) = flags that must be correct on
+    //            entry. A flag the instruction writes is *computed* only if it
+    //            is also live_out; a flag it does not write is merely preserved
+    //            (never stored), which is exactly how INC/DEC keep CF.
+    std::uint8_t live_out = kFbAll;
+    for (std::size_t i = steps.size(); i-- > 0;) {
+        const Instruction& in = steps[i].insn;
+        const std::uint8_t reads =
+            (in.opcode == Opcode::kJcc) ? condition_flags(in.condition) : std::uint8_t{0};
+        const std::uint8_t writes = flags_written(in.opcode);
+        steps[i].live_flags = static_cast<std::uint8_t>(writes & live_out);
+        live_out = static_cast<std::uint8_t>(reads | (live_out & ~writes));
+    }
+
+    // Pass 3: emit. Body instructions do not write rip: nothing inside a block
+    // reads it, so the per-instruction store is dead. The block writes rip once,
+    // at its exit. See BENCHMARKS.md §4.2.2.
+    a64::Encoder e;
+    e.mov_reg(a64::Width::k64, kState, 0); // x8 = GuestState*
+
+    for (const Step& step : steps) {
+        const Opcode op = step.insn.opcode;
+        if (op == Opcode::kHlt || op == Opcode::kRet) {
+            emit_return(e, BlockResult::kHalted);
+            break;
+        }
+        if (op == Opcode::kSyscall) {
+            emit_set_rip(e, step.insn.address + step.insn.length);
+            emit_return(e, BlockResult::kSyscall);
+            break;
+        }
+        if (op == Opcode::kJmp) {
+            emit_set_rip(e, step.insn.dst.imm);
+            emit_return(e, BlockResult::kOk);
+            break;
+        }
+        if (op == Opcode::kJcc) {
+            // Evaluate the x86 condition and write the correct next rip on both
+            // paths, so the dispatcher only has to read rip back.
+            const std::uint64_t fallthrough = step.insn.address + step.insn.length;
+            const a64::Label taken = e.new_label();
+            const a64::Label done = e.new_label();
+            emit_cond_branch(e, step.insn.condition, taken);
+            emit_set_rip(e, fallthrough);
+            e.b(done);
+            e.bind(taken);
+            emit_set_rip(e, step.insn.dst.imm);
+            e.bind(done);
+            emit_return(e, BlockResult::kOk);
+            break;
+        }
+        const TranslateError emit_err =
+            emit_one(e, step.insn, /*write_rip=*/false, step.live_flags);
+        if (emit_err != TranslateError::kNone) {
+            // validate_body() already rejected every operand shape emit_one()
+            // cannot handle, so reaching here is an internal inconsistency.
+            out.error = emit_err;
+            return out;
+        }
+    }
+
+    if (exit == BlockExit::kFallThrough) {
+        emit_set_rip(e, target);
         emit_return(e, BlockResult::kOk);
     }
 
+    out.exit = exit;
+    out.target = target;
+    out.guest_instruction_count = steps.size();
     out.code = e.bytes();
     out.instruction_count = e.count();
     return out;

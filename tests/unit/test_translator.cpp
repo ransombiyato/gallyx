@@ -497,13 +497,48 @@ HYPERION_TEST("translator", "translated_code_size_is_bounded") {
     // lies inside the entry block's byte range.
     HYPERION_CHECK_EQ(cache.block_count(), std::size_t{3});
     const std::size_t words = cache.total_code_bytes() / 4;
-    // Exact count at the time of writing is 148 words (592 bytes). The guard is
+    // Exact count at the time of writing is 90 words (360 bytes), after the
+    // flag-liveness pass (BENCHMARKS.md 4.2.3). The guard is
     // an upper bound so a *reduction* is allowed but any growth fails CI; a
     // code-size regression is otherwise easy to miss under qemu-user timing
     // noise. Update the bound deliberately when the count legitimately changes,
     // and record the exact figure in BENCHMARKS.md.
     HYPERION_CHECK_EQ(cache.total_code_bytes() % 4, std::size_t{0});
-    HYPERION_CHECK(words > 0 && words <= 148);
+    HYPERION_CHECK(words > 0 && words <= 90);
+}
+
+HYPERION_TEST("translator", "dead_flags_are_not_computed") {
+    // Flag liveness (BENCHMARKS.md 4.2.3): an ALU instruction whose flags are
+    // overwritten before any read must not compute them. Compare the emitted
+    // cost of an `add` whose flags are live (nothing later overwrites them)
+    // against one whose flags are dead (a second `add` follows before any read).
+    //
+    //   hlt               F4                       -> h
+    //   add rax, rbx     48 01 D8 ; hlt            -> one  (add flags live)
+    //   add rax, rbx     48 01 D8 ; add rax,rbx; hlt -> two (first add dead)
+    auto words_of = [](std::vector<std::uint8_t> program) {
+        FlatMemory mem(kBase, 4096);
+        std::memcpy(mem.data(), program.data(), program.size());
+        GuestState st;
+        st.rip = kBase;
+        hyperion::TranslationCache cache;
+        const hyperion::RunResult r = cache.run(mem, st);
+        HYPERION_CHECK(r.status == hyperion::RunStatus::kOk);
+        return cache.total_code_bytes() / 4;
+    };
+
+    const std::size_t h = words_of({0xF4});
+    const std::size_t one = words_of({0x48, 0x01, 0xD8, 0xF4});
+    const std::size_t two = words_of({0x48, 0x01, 0xD8, 0x48, 0x01, 0xD8, 0xF4});
+
+    const std::size_t live_add = one - h;   // `add` with all six flags computed
+    const std::size_t dead_add = two - one; // `add` whose flags a later add kills
+
+    // A live add computes the full flag prologue; a dead add is just the
+    // arithmetic plus the destination store. The gap is the whole point.
+    HYPERION_CHECK(live_add >= 15);
+    HYPERION_CHECK(dead_add <= 4);
+    HYPERION_CHECK(dead_add < live_add);
 }
 
 #else

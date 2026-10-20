@@ -117,6 +117,7 @@ scripts/dev.sh bootstrap
 scripts/dev.sh build
 scripts/dev.sh test         # expect: all tests passed
 scripts/dev.sh cross-test   # expect: all tests passed incl. cross.aarch64_tests
+scripts/dev.sh clang-build  # expect: clean; clang -Wsign-conversion is stricter than gcc
 ./build/dev/tests/hyperion_differential_tests   # expect: 8 passed, 0 skipped (x86-64)
 ./build/dev/hyperion version
 ./build/dev/hyperion probe

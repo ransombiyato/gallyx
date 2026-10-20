@@ -144,7 +144,21 @@ specific test, document why in the test.
 
 ---
 
-## 6. Formatting and static analysis
+## 6. Clang build (matches CI)
+
+```bash
+scripts/dev.sh clang-build
+```
+
+CI builds every target twice, once with gcc and once with clang, both with
+`HYPERION_WARNINGS_AS_ERRORS=ON`. Clang's `-Wsign-conversion` (enabled by
+`-Wconversion`) is stricter than gcc's, so a change that builds cleanly with gcc
+can still fail CI. Run this before pushing a change that touches integer
+conversions or container indexing.
+
+---
+
+## 7. Formatting and static analysis
 
 ```bash
 scripts/dev.sh format       # check (fails on drift)
@@ -159,7 +173,7 @@ avoid spurious drift.
 
 ---
 
-## 7. Differential testing (Phase 2+)
+## 8. Differential testing (Phase 2+)
 
 The core correctness strategy:
 
@@ -197,7 +211,7 @@ output; that makes the test tautological and worthless.
 
 ---
 
-## 8. Fuzzing (Phase 2+)
+## 9. Fuzzing (Phase 2+)
 
 - **Decoder fuzzing**: feed random byte streams to the decoder; it must never
   crash, never read out of bounds, and must reject invalid encodings. Suitable
@@ -211,16 +225,18 @@ time budget, with longer runs on demand.
 
 ---
 
-## 9. CI
+## 10. CI
 
 `.github/workflows/ci.yml` runs on every push and pull request:
 
 | Job | Purpose |
 | --- | --- |
-| `build-gcc` / `build-clang` | compile clean with `-Werror` |
-| `native-tests` | run `unit.native` and `bench.smoke` |
-| `cross-tests` | AArch64 cross-build + tests under `qemu-user` |
-| `format` | `clang-format --dry-run --Werror` |
-| `sanitizers` | ASan/UBSan test run |
+| `build & test (gcc)` / `build & test (clang)` | compile clean with `-Werror` and run the native suite; clang is stricter (`-Wsign-conversion`) |
+| `AArch64 cross tests (qemu-user)` | AArch64 cross-build + tests under `qemu-user` |
+| `clang-format` | `clang-format --dry-run --Werror` (pinned 19.1.7) |
+| `ASan/UBSan` | clang + Address/UndefinedBehavior sanitizer test run |
+| `syscall inventory & shellcheck` | inventory validator + shellcheck on scripts |
 
 A red CI job blocks merging. Never mark a milestone complete while CI is failing.
+Run `scripts/dev.sh clang-build` locally before pushing: a gcc-clean tree can
+still fail the clang job.

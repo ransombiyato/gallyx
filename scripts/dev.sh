@@ -20,6 +20,7 @@ commands:
   test        run the native test suite
   cross-test  build + run the AArch64 test suite under qemu-user
   sanitize    build and test with ASan/UBSan
+  clang-build build + test with clang++ and warnings-as-errors (mirrors CI)
   format      check formatting (clang-format --dry-run)
   format-fix  apply clang-format
   bench       run the host benchmark harness
@@ -75,6 +76,21 @@ sanitize() {
     ctest --test-dir "${dir}" --output-on-failure
 }
 
+# CI also builds with clang++ and warnings-as-errors; gcc's -Wconversion is
+# weaker than clang's -Wsign-conversion, so a build that is clean under gcc can
+# still fail CI. Run this before pushing.
+clang_build() {
+    need cmake
+    need clang++
+    local dir="${ROOT}/build/clangcheck"
+    cmake -S "${ROOT}" -B "${dir}" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_CXX_COMPILER=clang++ \
+        -DHYPERION_WARNINGS_AS_ERRORS=ON
+    cmake --build "${dir}"
+    ctest --test-dir "${dir}" --output-on-failure
+}
+
 format_check() {
     need clang-format
     local files
@@ -107,6 +123,7 @@ case "${1:-}" in
     test) test ;;
     cross-test) cross_test ;;
     sanitize) sanitize ;;
+    clang-build) clang_build ;;
     format) format_check ;;
     format-fix) format_fix ;;
     bench) shift; bench "$@" ;;

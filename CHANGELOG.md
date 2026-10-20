@@ -7,6 +7,15 @@ Meaningful changes by milestone. Format loosely follows
 
 ## [Unreleased] — Phase 6 (guest descriptor table + read/close/lseek)
 
+### Fixed — clang build (CI `build & test (clang)` and `ASan/UBSan`)
+- `src/core/syscall.cpp` indexed the descriptor table with a signed `int64_t`
+  (`files[fd]`), which clang's `-Wsign-conversion` rejects under
+  `HYPERION_WARNINGS_AS_ERRORS=ON`. gcc's `-Wconversion` did not flag it, so
+  the local build passed while CI failed. The bounds check and index conversion
+  now live in a single `lookup_stream(files, fd)` helper, so no signed value
+  reaches `vector::operator[]`. `scripts/dev.sh clang-build` added so this
+  class of failure is catchable locally before pushing.
+
 ### Added — guest descriptor table (third syscall slice)
 - `MinimalSyscallHandler` now owns a **guest descriptor table**
   (guest fd → host `FILE*`), so `read`/`close`/`lseek` operate on descriptors

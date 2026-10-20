@@ -81,6 +81,20 @@ long default_sink(int fd, const std::uint8_t* data, std::size_t count) {
     return static_cast<long>(wrote);
 }
 
+// Look up a guest descriptor in the table. Returns nullptr for a descriptor that
+// is negative, out of range, or a hole; callers map that to -EBADF. Keeping the
+// conversion in one place means no signed index ever reaches vector::operator[].
+std::FILE* lookup_stream(const std::vector<std::FILE*>& files, std::int64_t fd) {
+    if (fd < 0) {
+        return nullptr;
+    }
+    const auto idx = static_cast<std::size_t>(fd);
+    if (idx >= files.size()) {
+        return nullptr;
+    }
+    return files[idx];
+}
+
 // read(fd, buf, count): read `count` guest bytes from the adopted host stream
 // into guest memory. A guest pointer the memory model rejects yields -EFAULT; a
 // descriptor that is not in the table yields -EBADF. The host read is bounded
@@ -90,7 +104,8 @@ std::int64_t do_read(GuestState& s, Memory& memory, const std::vector<std::FILE*
     const std::uint64_t buf = arg(s, 1);
     const std::uint64_t count = arg(s, 2);
 
-    if (fd < 0 || static_cast<std::size_t>(fd) >= files.size() || files[fd] == nullptr) {
+    std::FILE* f = lookup_stream(files, fd);
+    if (f == nullptr) {
         return -kEbadf;
     }
     if (count == 0) {
@@ -109,7 +124,7 @@ std::int64_t do_read(GuestState& s, Memory& memory, const std::vector<std::FILE*
     while (done < count) {
         const std::size_t n =
             static_cast<std::size_t>((count - done) < kChunk ? (count - done) : kChunk);
-        const std::size_t got = std::fread(chunk.data(), 1, n, files[static_cast<std::size_t>(fd)]);
+        const std::size_t got = std::fread(chunk.data(), 1, n, f);
         if (got == 0) {
             break; // EOF or error: a short read is the result, as with read(2)
         }
@@ -129,7 +144,7 @@ std::int64_t do_read(GuestState& s, Memory& memory, const std::vector<std::FILE*
 // removed from the guest's view.
 std::int64_t do_close(GuestState& s, std::vector<std::FILE*>& files) {
     const std::int64_t fd = static_cast<std::int64_t>(arg(s, 0));
-    if (fd < 0 || static_cast<std::size_t>(fd) >= files.size() || files[fd] == nullptr) {
+    if (lookup_stream(files, fd) == nullptr) {
         return -kEbadf;
     }
     files[static_cast<std::size_t>(fd)] = nullptr;
@@ -144,7 +159,8 @@ std::int64_t do_lseek(GuestState& s, const std::vector<std::FILE*>& files) {
     const std::int64_t offset = static_cast<std::int64_t>(arg(s, 1));
     const std::uint64_t whence = arg(s, 2);
 
-    if (fd < 0 || static_cast<std::size_t>(fd) >= files.size() || files[fd] == nullptr) {
+    std::FILE* f = lookup_stream(files, fd);
+    if (f == nullptr) {
         return -kEbadf;
     }
     int host_whence = 0;
@@ -161,7 +177,6 @@ std::int64_t do_lseek(GuestState& s, const std::vector<std::FILE*>& files) {
     default:
         return -kEinval;
     }
-    std::FILE* f = files[static_cast<std::size_t>(fd)];
     if (std::fseek(f, static_cast<long>(offset), host_whence) != 0) {
         return -kEspipe; // not seekable (pipe/tty), or an invalid position
     }

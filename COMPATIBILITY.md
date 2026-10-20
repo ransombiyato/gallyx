@@ -4,9 +4,10 @@ Tracks implemented versus missing instruction and ABI features.
 
 > **Status:** a small, documented instruction subset is implemented and tested
 > (§2). Everything else is explicitly rejected. AArch64 code generation, a
-> block-at-a-time translation cache, and a first syscall slice (`write`/`exit`/
-> `exit_group`) exist; register allocation, block chaining and the guest address
-> space do not (§5).
+> block-at-a-time translation cache, a guest address space, and two syscall
+> slices (`write`/`exit`/`exit_group`; `mmap`/`mprotect`/`munmap`/`brk`) exist;
+> register allocation is implemented, while memory operands in the code
+> generator, block chaining and file I/O syscalls do not (§5).
 
 Legend: ✅ implemented + tested · 🟡 implemented, untested · 🧪 prototype · ❌ unsupported (explicit) · ⬜ planned
 
@@ -134,7 +135,7 @@ decoder accepts but the translator does not is refused with an explicit
 | `jcc rel8` (`0x70..0x7F`) | ✅ | block exits with `kJcc`; writes target or fall-through `rip` |
 | `push`, `pop`, `ret` | ⬜ | needs a guest stack / address space (Phase 6) |
 | `syscall` (`0F 05`) | ✅ | block exits with `kSyscall`; the dispatcher runs the handler. `rip` is advanced past the instruction |
-| memory operands | ⬜ | Phase 6 (needs a guest address space) |
+| memory operands | ⬜ | **Rejected by the code generator** (`translator.cpp validate_body`): Tier 1 stops the block at the first one rather than emitting wrong code. The interpreter executes them. Phase 6/7 |
 
 Verified by `tests/unit/test_translator.cpp`: scope tests on every host, a
 single-instruction differential against the interpreter under `qemu-user` on
@@ -187,21 +188,33 @@ intentional and tested.
 | FS/GS base, segment bases | ⬜ | Phase 6 (TLS) |
 | MXCSR | ⬜ | Phase 7 |
 
-`FlatMemory` is a single flat region used by the interpreter. It is **not** a
-guest address space: there is no paging, no mapping of the guest stack, and no
-`mmap`. That arrives in Phase 4/6.
+`FlatMemory` is a single flat region used by the interpreter's tests. It is
+**not** the guest address space. The real guest address space is
+`GuestAddressSpace` (`include/hyperion/address_space.hpp`): a set of regions with
+per-region permissions (`MemPerm`) and page-granular checks, plus a reserved heap
+window for `brk`. It is wired into the syscall layer, so `mmap`/`mprotect`/
+`munmap`/`brk` operate on it. There is still no paging, no demand-zero fault
+delivery to the guest, and no mapping of the guest stack; those arrive later in
+Phase 6/7.
 
 ---
 
 ## 5. Linux ABI / syscall coverage
 
-Phase 6, first slice. The `syscall` instruction is decoded and routed through
-`SyscallHandler` in both tiers. **Exactly three syscalls are implemented**;
-every other number returns `-ENOSYS` explicitly (never a silent success) and is
-counted in `RunResult::unimplemented_syscalls`. Guest pointers are validated
-against the mapped region (`-EFAULT`), so a guest can never read host memory.
+Phase 6, second slice. The `syscall` instruction is decoded and routed through
+`SyscallHandler` in both tiers. **Seven syscalls are implemented** (`write`,
+`mmap`, `mprotect`, `munmap`, `brk`, `exit`, `exit_group`); every other number
+returns `-ENOSYS` explicitly (never a silent success) and is counted in
+`RunResult::unimplemented_syscalls`. Guest pointers are validated against the
+mapped region (`-EFAULT`), so a guest can never read host memory.
 Per-syscall status lives in `docs/syscalls/inventory.tsv` (the canonical source);
 this table is the summary.
+
+`mmap` is **anonymous-only**: a request without `MAP_ANONYMOUS` is reported
+unimplemented (and counted as such), not mapped incorrectly. `mprotect`/`munmap`
+require a page-aligned, fully-mapped range. For `MAP_ANONYMOUS` the kernel
+ignores `fd`/`offset`; Hyperion matches that rather than inventing a stricter
+rule.
 
 | Area | Status | Phase | Covering test |
 | --- | --- | --- | --- |
@@ -209,8 +222,10 @@ this table is the summary.
 | `exit`(60), `exit_group`(231) | ✅ | 6 | `syscall.exit_reports_code_*`, `interpreter.syscall_write_then_exit_*` |
 | `write`(1) | ✅ | 6 | `syscall.write_*`, `translation_cache.tier1_syscall_*` |
 | Unknown number → `-ENOSYS` | ✅ | 6 | `syscall.unknown_number_is_enosys_not_silent` |
+| `brk`(12) over the guest heap | ✅ | 6 | `syscall.brk_returns_the_new_break` |
+| `mmap`(9) anonymous, `mprotect`(10), `munmap`(11) | ✅ (anonymous only) | 6 | `syscall.mmap_*`, `syscall.mprotect_*`, `syscall.munmap_*`, `syscall.mmap_end_to_end_*` |
 | `read`, `close`, `open`, `openat` | ⬜ | 6 | — |
-| `mmap`, `munmap`, `mprotect`, `brk` | ⬜ | 6 | — |
+| `mmap` file-backed, `MAP_SHARED` | ⬜ | 6 | — |
 | `stat`/`fstat`/`lstat`/`*statat` (struct layout differences) | ⬜ | 6 | — |
 | `arch_prctl` (FS/GS base, TLS) | ⬜ | 6 | — |
 | `clone`, `futex`, threading | ⬜ | 6 | — |

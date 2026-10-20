@@ -158,14 +158,17 @@ build.
 **Phases 0–4 are closed. Phase 5 is active (six optimizations accepted and
 measured: parity fast path, dead-`rip` elimination, flag liveness, direct-mapped
 dispatch, ALU immediate folding, guest-register allocation). Phase 6's syscall
-inventory is complete and CI-validated, and the first syscall slice
-(`write`/`exit`/`exit_group`) is implemented and tested in both tiers. The next
-concrete step is block chaining (Phase 5), then the guest address space
-(Phase 6).** Guest state, the
+inventory is complete and CI-validated, and **two** syscall slices are
+implemented and tested in both tiers: the first (`write`/`exit`/`exit_group`)
+and the second (the guest address space plus `mmap`/`mprotect`/`munmap`/`brk`).
+The next concrete step is file-descriptor syscalls (`read`/`openat`/`close`/
+`lseek`/`fstat`) over the existing address space, then memory operands in the
+code generator.** Guest state, the
 decoder, the reference interpreter, the subset contract (`COMPATIBILITY.md` §2),
 the hardware differential, the AArch64 encoder, executable memory,
 single-instruction translation, whole-block translation, the translation-cache
-dispatcher, and the syscall dispatch layer all exist and pass.
+dispatcher, the guest address space, and the syscall dispatch layer all exist
+and pass.
 
 1. ~~Build an AArch64 encoder~~ **Done** (`a64::Encoder`). ~~Add executable-code
    management~~ **Done** (`ExecMem`). ~~Marshall `GuestState` and translate one
@@ -216,28 +219,41 @@ dispatcher, and the syscall dispatch layer all exist and pass.
    are implemented; every other number returns `-ENOSYS`, counted in
    `RunResult::unimplemented_syscalls`. 11 new tests, including a Tier 1
    differential under `qemu-user`.
-8. **Next (Phase 5): block chaining.** Today every block exit returns to the
-   dispatcher for a lookup. Link a block's exit directly to its successor's
-   generated code so a hot loop stays in generated code, guarded by the same
-   authoritative-`rip` rule, with the dispatcher as the fallback for any
-   unlinked exit. Require the whole differential suite to pass, then re-run
-   `scripts/bench-tier-qemu.sh` (both workloads) and record before/after in
-   BENCHMARKS.md with an accept/reject verdict. Never change the baseline to make
-   a candidate look good. Add a deterministic guard for whatever the change
-   should move (e.g. dispatcher lookups per run), since `qemu-user` timing is
-   noisy (DECISIONS.md D-020).
-9. **Then (Phase 6): build the guest address space.** Implement
-   `mmap`/`munmap`/`mprotect`/`brk` over a guest-managed region with explicit
-   bounds and permission checks, so the loader and dynamic programs can allocate
-   memory. Keep the handler boundary: the guest never receives a raw host
-   pointer, and every guest pointer is validated (as `write` already does). Then
-   extend coverage in the U4 order (`docs/syscalls/U4.md`). Move the
-   corresponding `status` values in `inventory.tsv` and regenerate.
-10. **Keep the oracle.** Run each multi-instruction program through both the
+8. ~~Build the guest address space.~~ **Done.** `GuestAddressSpace`
+   (`include/hyperion/address_space.hpp`, `src/core/address_space.cpp`) models
+   guest virtual memory as permissioned regions with page-granular checks and a
+   reserved heap window; `mmap`(9) (anonymous only), `mprotect`(10), `munmap`(11)
+   and `brk`(12) are implemented over it and marked `implemented` in the
+   inventory. A file-backed `mmap` returns `-ENOSYS` **and** counts as
+   unimplemented. Tested end-to-end (DECISIONS.md D-023).
+9. **Next (Phase 6): file descriptors and file syscalls.** Add `read`, `openat`,
+   `close`, `lseek`, `fstat`/`newfstatat` over the existing address space, so a
+   guest can read a file, not only print. Introduce a small fd table owned by the
+   handler (mirroring how `write` maps fd 1/2 to the host sink), validate every
+   guest buffer against the address space (`-EFAULT`), and return `-EBADF` as the
+   kernel does. Move each number's `status` in `docs/syscalls/inventory.tsv` to
+   `implemented`, regenerate (`python3 tools/gen_syscall_inventory.py`), add a
+   focused test per call, and update STATUS.md §0e.
+10. **Then (Phase 6/7): memory operands in the code generator.** The AArch64
+    generator is register-only (`translator.cpp validate_body` rejects any
+    memory operand), so Tier 1 stops honestly at the first load/store. Every
+    real program loads and stores, so this is the gating item for running
+    anything nontrivial in Tier 1, and it pairs naturally with `read`/`openat`.
+11. **Also open (Phase 5): block chaining.** Today every block exit returns to
+    the dispatcher for a lookup. Link a block's exit directly to its successor's
+    generated code so a hot loop stays in generated code, guarded by the same
+    authoritative-`rip` rule, with the dispatcher as the fallback for any
+    unlinked exit. Require the whole differential suite to pass, then re-run
+    `scripts/bench-tier-qemu.sh` (both workloads) and record before/after in
+    BENCHMARKS.md with an accept/reject verdict. Never change the baseline to
+    make a candidate look good. Add a deterministic guard for whatever the
+    change should move (e.g. dispatcher lookups per run), since `qemu-user`
+    timing is noisy (DECISIONS.md D-020).
+12. **Keep the oracle.** Run each multi-instruction program through both the
     generated blocks and the interpreter's `run_program`, and require the final
     `GuestState` to match bit-for-bit. A mismatch must fail loudly; there is no
     tolerance for "close enough".
-11. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
+13. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
     pipeline builds the tests for AArch64, runs them under `qemu-user`, and runs
     the CLI smoke test with `HYPERION_EMULATOR`, so generated code is exercised in
     CI without the target device.

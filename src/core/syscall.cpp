@@ -82,10 +82,92 @@ long default_sink(int fd, const std::uint8_t* data, std::size_t count) {
     return static_cast<long>(wrote);
 }
 
+// Translate the guest PROT_* bits into the address space's MemPerm. Unknown bits
+// are ignored, as the kernel does; PROT_NONE (no bits) maps to kNone.
+MemPerm prot_to_perm(std::uint64_t prot) {
+    MemPerm perm = MemPerm::kNone;
+    if (prot & mmap_flags::kProtRead) {
+        perm = perm | MemPerm::kRead;
+    }
+    if (prot & mmap_flags::kProtWrite) {
+        perm = perm | MemPerm::kWrite;
+    }
+    if (prot & mmap_flags::kProtExec) {
+        perm = perm | MemPerm::kExec;
+    }
+    return perm;
+}
+
+// A memory-syscall outcome: the value to place in rax, plus whether the call
+// was actually implemented. Keeping these separate is what stops an
+// unimplemented request (e.g. a file-backed mmap) from being reported as a
+// handled call with a negative return: the dispatcher must count it as
+// unimplemented so it is never invisible.
+struct MemResult {
+    std::int64_t value = 0;
+    bool implemented = true;
+};
+
+// mmap(addr, length, prot, flags, fd, offset). This increment supports
+// anonymous private mappings only; a file-backed mapping (no MAP_ANONYMOUS) is
+// reported unimplemented rather than mapping something wrong. A zero-length
+// request is -EINVAL, as the kernel does. For MAP_ANONYMOUS the kernel ignores
+// fd and offset, so they are not inspected here.
+MemResult do_mmap(GuestState& s, GuestAddressSpace& as) {
+    const std::uint64_t addr = arg(s, 0);
+    const std::uint64_t length = arg(s, 1);
+    const std::uint64_t prot = arg(s, 2);
+    const std::uint64_t flags = arg(s, 3);
+
+    if (length == 0) {
+        return {-kEinval, true}; // the kernel rejects a zero-length mapping
+    }
+    if ((flags & mmap_flags::kMapAnonymous) == 0) {
+        return {-kEnosys, false}; // file-backed mappings are not implemented yet
+    }
+    const bool fixed = (flags & mmap_flags::kMapFixed) != 0;
+    const auto got =
+        as.map_anonymous(static_cast<std::size_t>(length), prot_to_perm(prot), fixed ? addr : 0);
+    if (!got) {
+        return {-kEnomem, true};
+    }
+    return {static_cast<std::int64_t>(*got), true};
+}
+
+MemResult do_mprotect(GuestState& s, GuestAddressSpace& as) {
+    const std::uint64_t addr = arg(s, 0);
+    const std::uint64_t len = arg(s, 1);
+    const std::uint64_t prot = arg(s, 2);
+    if (len == 0 || (addr & GuestAddressSpace::kPageMask) != 0) {
+        return {-kEinval, true};
+    }
+    if (!as.protect(addr, static_cast<std::size_t>(len), prot_to_perm(prot))) {
+        return {-kEnomem, true}; // an unmapped or misaligned range
+    }
+    return {0, true};
+}
+
+MemResult do_munmap(GuestState& s, GuestAddressSpace& as) {
+    const std::uint64_t addr = arg(s, 0);
+    const std::uint64_t len = arg(s, 1);
+    if (len == 0 || (addr & GuestAddressSpace::kPageMask) != 0) {
+        return {-kEinval, true};
+    }
+    if (!as.unmap(addr, static_cast<std::size_t>(len))) {
+        return {-kEinval, true}; // partial unmapping is not supported yet
+    }
+    return {0, true};
+}
+
+MemResult do_brk(GuestState& s, GuestAddressSpace& as) {
+    const std::uint64_t requested = arg(s, 0);
+    return {static_cast<std::int64_t>(as.set_brk(requested)), true};
+}
+
 } // namespace
 
-MinimalSyscallHandler::MinimalSyscallHandler(OutputSink sink)
-    : sink_(sink ? std::move(sink) : OutputSink(default_sink)) {}
+MinimalSyscallHandler::MinimalSyscallHandler(OutputSink sink, GuestAddressSpace* address_space)
+    : sink_(sink ? std::move(sink) : OutputSink(default_sink)), address_space_(address_space) {}
 
 SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
     SyscallResult result;
@@ -103,6 +185,41 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
         result.status = SyscallStatus::kExit;
         result.exit_code = static_cast<std::int64_t>(arg(state, 0)) & 0xFF;
         return result;
+    case sysno::kMmap:
+    case sysno::kMprotect:
+    case sysno::kMunmap:
+    case sysno::kBrk: {
+        // The address-space syscalls require an address space. Without one the
+        // handler reports the call unimplemented rather than pretending success,
+        // so a missing address space is never invisible.
+        if (address_space_ == nullptr) {
+            state.reg(Gpr::kRax) = static_cast<std::uint64_t>(-kEnosys);
+            result.status = SyscallStatus::kUnimplemented;
+            return result;
+        }
+        std::int64_t r = 0;
+        bool implemented = true;
+        switch (result.number) {
+        case sysno::kMmap: {
+            const MemResult mr = do_mmap(state, *address_space_);
+            r = mr.value;
+            implemented = mr.implemented;
+            break;
+        }
+        case sysno::kMprotect:
+            r = do_mprotect(state, *address_space_).value;
+            break;
+        case sysno::kMunmap:
+            r = do_munmap(state, *address_space_).value;
+            break;
+        default:
+            r = do_brk(state, *address_space_).value;
+            break;
+        }
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = implemented ? SyscallStatus::kHandled : SyscallStatus::kUnimplemented;
+        return result;
+    }
     default:
         // Explicit, never silent: the guest sees -ENOSYS and can decide what to
         // do. A stub is never reported as support.
@@ -113,7 +230,9 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
 }
 
 bool is_minimal_syscall(std::uint64_t number) {
-    return number == sysno::kWrite || number == sysno::kExit || number == sysno::kExitGroup;
+    return number == sysno::kWrite || number == sysno::kExit || number == sysno::kExitGroup ||
+           number == sysno::kMmap || number == sysno::kMprotect || number == sysno::kMunmap ||
+           number == sysno::kBrk;
 }
 
 } // namespace hyperion

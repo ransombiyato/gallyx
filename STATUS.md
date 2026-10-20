@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-10-19
 **Current phase:** Phase 5 (performance measurement and optimization) — active;
-Phase 6 (Linux ABI and syscall compatibility) — first slice implemented
+Phase 6 (Linux ABI and syscall compatibility) — second slice implemented
 **Repository state:** buildable, tested, documented. **Two execution tiers exist:
 the reference interpreter (Tier 0) and a translation cache that runs whole
 programs through generated AArch64 code (Tier 1).** Phase 4's exit criteria are
@@ -13,9 +13,11 @@ accepted and measured** (parity fast path, dead-`rip` elimination, flag
 liveness, direct-mapped dispatch, ALU immediate folding, guest-register
 allocation — BENCHMARKS.md §4.2.1–4.2.6). Phase 6's syscall inventory is
 complete and validated
-(docs/syscalls/), and the **first syscall slice (`write`/`exit`/`exit_group`) is
-implemented in both tiers**, with unimplemented numbers returning `-ENOSYS`
-explicitly. The guest instruction subset remains small; see COMPATIBILITY.md.**
+(docs/syscalls/), and **two syscall slices are implemented in both tiers**: the
+first (`write`/`exit`/`exit_group`) and the second, which added the guest
+address space and `mmap`/`mprotect`/`munmap`/`brk`. Unimplemented numbers still
+return `-ENOSYS` explicitly. The guest instruction subset remains small; see
+COMPATIBILITY.md.**
 
 This is the first file a returning agent should read. It records exactly what
 works, what was last verified, and what to do next.
@@ -32,12 +34,26 @@ works, what was last verified, and what to do next.
 | 4. Guest syscall dispatch + semantics (first slice) | **Done & tested** — `include/hyperion/syscall.hpp`, `src/core/syscall.cpp`; `syscall` decoded (`0F 05`); both tiers route to the handler |
 | 5. `write`/`exit`/`exit_group` semantics | **Implemented** — status `implemented` in the inventory; `-EBADF`/`-EFAULT` on bad fd/pointer |
 | 6. Explicit `-ENOSYS` for every other number | **Implemented** — never silently succeeds; counted in `RunResult::unimplemented_syscalls` |
-| 7. Broader syscall coverage (open/read/mmap/…) | **Not started** — next slice |
+| 7. Guest address space (`GuestAddressSpace`) | **Done & tested** — `include/hyperion/address_space.hpp`, `src/core/address_space.cpp`; per-region permissions, page-granular checks, heap reserved at construction |
+| 8. `mmap`/`mprotect`/`munmap`/`brk` over the address space (second slice) | **Implemented** — anonymous `mmap` only; file-backed requests return `-ENOSYS` and count as unimplemented |
+| 9. Broader syscall coverage (`read`/`openat`/`close`/…) | **Not started** — next slice |
 
-**Implemented-syscall status (verified).** Exactly three numbers are implemented
-today: `write`(1), `exit`(60), `exit_group`(231). Everything else returns
-`-ENOSYS`. The inventory marks these three `implemented` and all others
+**Implemented-syscall status (verified).** Seven numbers are implemented today:
+`write`(1), `mmap`(9), `mprotect`(10), `munmap`(11), `brk`(12), `exit`(60),
+`exit_group`(231). Everything else returns `-ENOSYS`. `mmap` is scoped: anonymous
+private mappings only. `mprotect`/`munmap` require a fully-mapped, page-aligned
+range. The inventory marks these seven `implemented` and all others
 `not-started`; the validator enforces the status vocabulary.
+
+**Address-space facts (verified).** `GuestAddressSpace` is the guest's virtual
+memory: a set of regions with `MemPerm` (read/write/exec) and page-granular
+checks. The heap lives in a reserved `[heap_base, heap_end)` window created at
+construction, so `brk` grows into pre-reserved space and never collides with
+`mmap`. `map_anonymous` allocates upward; `set_brk` maps the pages a grow
+touches. Every guest pointer is validated against a region before use; the guest
+never sees a raw host pointer. `mmap` reads only `addr, length, prot, flags`:
+for `MAP_ANONYMOUS` the kernel ignores `fd`/`offset`, and Hyperion matches that
+rather than inventing a stricter rule.
 
 **Inventory facts (verified).** The pinned table is Linux v6.12
 (`arch/x86/entry/syscalls/syscall_64.tbl`), reduced to the 375 `common`/`64`
@@ -414,6 +430,10 @@ aarch64-linux-gnu-g++ 14.2.0.
 | ALU immediate folding (AArch64) | `translator.alu_immediate_is_folded` | PASS — foldable immediate is strictly smaller than a materialised one |
 | Register allocation, many registers (AArch64) | `translator.differential_register_allocation_many_registers` | PASS — 11-register program matches the interpreter instruction-for-instruction, including `rip` |
 | Register allocation, immediates (AArch64) | `translator.differential_register_allocation_immediates` | PASS — allocated destination written by `mov` imm then read |
+| Guest address space (native) | `address_space.*` unit cases | PASS — map/read/write, permission denial, `brk` growth, page-granular checks |
+| Memory syscalls (native) | `syscall.mmap_*`, `syscall.mprotect_*`, `syscall.munmap_*`, `syscall.brk_*` | PASS — anonymous mapping usable, file-backed → `-ENOSYS`, no-address-space → `-ENOSYS`, `-EINVAL` cases |
+| mmap end-to-end (native, Tier 0) | `syscall.mmap_end_to_end_under_the_interpreter` | PASS — guest mmaps a page, stores a byte through the returned pointer, value readable |
+| mmap end-to-end (AArch64, Tier 1) | `syscall.mmap_end_to_end_under_generated_code_stops_at_memory_operand` | PASS — mmap handled; block stops at the memory-operand store (register-only generator), never mis-executes |
 | Register-allocation benchmark (AArch64) | `scripts/bench-tier-qemu.sh --wide --iterations 100000 --repeats 7` | PASS — 608 vs 620 bytes, 9.05 vs 10.70 ns/guest-ins (RA on vs off) |
 | Tool cache recovery | `scripts/toolcache.sh restore` after removing the sysroot | PASS — cross compiler and sysroot restored, cross tests still 100% |
 | CLI tier 1 executes generated code | `HYPERION_EMULATOR=qemu-aarch64 ... cli_smoke.sh` | PASS — **3 basic blocks translated**, `steps=17` |
@@ -425,12 +445,12 @@ aarch64-linux-gnu-g++ 14.2.0.
 | UML feasibility (smoke) | `experiments/uml/run.sh smoke` | PASS — kernel boots unprivileged; all 6 namespace types OK |
 | UML feasibility (systemd) | `experiments/uml/run.sh systemd` | PASS — systemd 257 as PID 1 → `multi-user.target` |
 
-The native suite is 9 CTest entries: `unit.native` (one entry running **101**
-unit test cases across 11 files), `differential.native_vs_interpreter` (**8**
+The native suite is 9 CTest entries: `unit.native` (one entry running **125**
+unit test cases across 12 files), `differential.native_vs_interpreter` (**8**
 cases compared against real x86-64 hardware), `syscall.inventory_valid`,
 `cli.smoke`, `bench.smoke`, `bench.methodology`, `bench.timing_not_eliminated`
 and `bench.rejects_single_sample`. The cross build has 10 entries (the same set
-plus `cross.aarch64_tests`, which runs **117** unit cases under `qemu-user`).
+plus `cross.aarch64_tests`, which runs **140** unit cases under `qemu-user`).
 
 ### Remote verification (GitHub Actions)
 
@@ -532,37 +552,52 @@ stable-vs-noisy discrimination case).
 
 ## 4. Immediate next task
 
-**Phase 6's first syscall slice (`write`/`exit`/`exit_group`) is implemented and
-tested in both tiers. Phase 5 has six accepted, measured optimizations
-(BENCHMARKS.md §4.2.1–4.2.6), all deterministic-evidence based. The next
-structural Phase 5 work is block chaining; the next Phase 6 work is the guest
-address space.**
+**Phase 6's second syscall slice (the guest address space plus
+`mmap`/`mprotect`/`munmap`/`brk`) is implemented and tested in both tiers.
+Phase 5 has six accepted, measured optimizations (BENCHMARKS.md §4.2.1–4.2.6),
+all deterministic-evidence based.**
 
-The single best next action:
+The single best next action (Phase 6, extend coverage in U4 order):
 
-- **Block chaining (Phase 5, start small).** Today every block exit returns to
-  the dispatcher, which does a direct-mapped lookup. Link a block's exit
-  directly to its successor's generated code so a hot loop stays in generated
-  code, guarded by the same authoritative-`rip` rule and keeping the dispatcher
-  as the fallback for any unlinked exit. The direct-mapped table (BENCHMARKS.md
-  §4.2.4) gives a natural place to record a link, and the block exit already
-  reports the target hint. Require the whole differential suite to pass before
-  accepting, and re-run `scripts/bench-tier-qemu.sh` (both workloads) and record
-  before/after in BENCHMARKS.md with a verdict. Add a deterministic guard for
-  whatever the change should move (e.g. dispatcher lookups per run) so the win
-  is provable even when `qemu-user` timing is noisy.
+- **Add `read`, `openat`, `close`, `lseek`, `fstat`/`newfstatat`** over the
+  existing `GuestAddressSpace`, so a guest can read a file, not only print.
+  These are the next most-frequent U4 numbers after the memory group
+  (`docs/syscalls/U4.md`). Introduce a small file-descriptor table (fd → host
+  `FILE*`/fd) owned by the handler, mirroring how `write` already maps guest
+  fd 1/2 to the host sink; validate every guest buffer pointer against the
+  address space before use; return `-EBADF`/`-EFAULT` exactly as the kernel
+  does. Move each number's `status` in `docs/syscalls/inventory.tsv` from
+  `not-started` to `implemented`, regenerate the docs
+  (`python3 tools/gen_syscall_inventory.py`), add a focused test per call, and
+  update the §0e table and implemented-count.
 
-Then, independent and larger (Phase 6):
+Then, independent and larger (Phase 5):
 
-- **Build the guest address space.** Implement `mmap`, `munmap`, `mprotect` and
-  `brk` over a guest-managed region, with explicit bounds and permission checks,
-  so the loader and dynamic programs can allocate memory. These are U4/U3
-  syscalls in `docs/syscalls/`. Keep the handler boundary: the guest never
-  receives a raw host pointer, and every guest pointer is validated against the
-  guest region before use (as `write` already does).
-- Then extend coverage in the U4 order (`docs/syscalls/U4.md`): `read`,
-  `openat`/`open`, `close`, `fstat`/`newfstatat`, `getdents64`, `lseek`,
-  `access`, `readlink`, `getrandom`, `set_tid_address`, `rseq`, `prlimit64`.
+- **Block chaining.** Today every block exit returns to the dispatcher, which
+  does a direct-mapped lookup. Link a block's exit directly to its successor's
+  generated code so a hot loop stays in generated code, guarded by the same
+  authoritative-`rip` rule and keeping the dispatcher as the fallback for any
+  unlinked exit. The direct-mapped table (BENCHMARKS.md §4.2.4) gives a natural
+  place to record a link, and the block exit already reports the target hint.
+  Require the whole differential suite to pass before accepting, re-run
+  `scripts/bench-tier-qemu.sh` (both workloads), and record before/after in
+  BENCHMARKS.md with a verdict. Add a deterministic guard for whatever the
+  change should move (e.g. dispatcher lookups per run) so the win is provable
+  even when `qemu-user` timing is noisy.
+
+Then, larger Phase 6/7 work (independent):
+
+- **Memory operands in the code generator.** The AArch64 generator is
+  register-only: it rejects any instruction with a memory operand
+  (`translator.cpp validate_body`). Every real program loads and stores, so this
+  is the gating item for running anything nontrivial in Tier 1. It is the
+  natural pairing with `read`/`openat`, because a syscall result buffer is
+  written to guest memory. Until it lands, Tier 1 stops honestly at the first
+  memory operand (see the `mmap_end_to_end_..._stops_at_memory_operand` test).
+- **Extend coverage in U4 order** (`docs/syscalls/U4.md`) beyond the above:
+  `getdents64`, `access`, `readlink`, `getrandom`, `set_tid_address`, `rseq`,
+  `prlimit64`, `arch_prctl` (TLS setup is required for most dynamically linked
+  programs).
 - Every implemented syscall must: follow the x86-64 argument/return convention
   (args in `rdi, rsi, rdx, r10, r8, r9`; result in `rax`; errors as `-errno`),
   validate guest pointers, be listed in `docs/syscalls/inventory.tsv` with
@@ -572,10 +607,6 @@ Then, independent and larger (Phase 6):
 
 Also still open from Phase 5 (independent, larger):
 
-- **Block chaining.** Today every block exit returns to the dispatcher. Link a
-  block's exit directly to its successor's generated code, guarded by the same
-  authoritative-`rip` rule, so a hot loop stays in generated code. Keep the
-  dispatcher as the fallback for any unlinked exit.
 - **Multi-tier compilation.** Add a cheaper first tier (or reuse Tier 0) and
   promote only hot blocks to the optimising tier, with a fixed, reproducible
   promotion policy.

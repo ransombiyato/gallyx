@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <functional>
 
+#include "hyperion/address_space.hpp"
 #include "hyperion/guest_state.hpp"
 #include "hyperion/interpreter.hpp" // Memory
 
@@ -34,12 +35,32 @@ namespace hyperion {
 // handler does not depend on the documentation.
 namespace sysno {
 inline constexpr std::uint64_t kWrite = 1;
+inline constexpr std::uint64_t kMmap = 9;
+inline constexpr std::uint64_t kMprotect = 10;
+inline constexpr std::uint64_t kMunmap = 11;
+inline constexpr std::uint64_t kBrk = 12;
 inline constexpr std::uint64_t kExit = 60;
 inline constexpr std::uint64_t kExitGroup = 231;
 } // namespace sysno
 
+// Guest PROT_* and MAP_* flags (the subset this increment honours). The values
+// match the x86-64 Linux ABI, so a guest passing them gets the kernel's
+// interpretation, not a reinterpretation.
+namespace mmap_flags {
+inline constexpr std::uint64_t kProtNone = 0x0;
+inline constexpr std::uint64_t kProtRead = 0x1;
+inline constexpr std::uint64_t kProtWrite = 0x2;
+inline constexpr std::uint64_t kProtExec = 0x4;
+inline constexpr std::uint64_t kMapShared = 0x01;
+inline constexpr std::uint64_t kMapPrivate = 0x02;
+inline constexpr std::uint64_t kMapAnonymous = 0x20;
+inline constexpr std::uint64_t kMapFixed = 0x10;
+} // namespace mmap_flags
+
 // Negative errno values as the guest observes them (returned in rax).
 inline constexpr std::int64_t kEbadf = 9;
+inline constexpr std::int64_t kEnomem = 12;
+inline constexpr std::int64_t kEacces = 13;
 inline constexpr std::int64_t kEfault = 14;
 inline constexpr std::int64_t kEinval = 22;
 inline constexpr std::int64_t kEnosys = 38;
@@ -69,24 +90,33 @@ public:
 };
 
 // A handler for the minimum needed to run a self-contained guest program that
-// prints and terminates. `write` goes to a host sink (stdout for fd 1, stderr
-// for fd 2); `exit`/`exit_group` stop the program; every other number returns
-// -ENOSYS.
+// prints, allocates memory and terminates. `write` goes to a host sink (stdout
+// for fd 1, stderr for fd 2); `mmap`/`mprotect`/`munmap`/`brk` operate on the
+// supplied GuestAddressSpace; `exit`/`exit_group` stop the program; every other
+// number returns -ENOSYS.
 //
 // The output sink is injectable so tests can capture guest output without
 // touching the test runner's own stdout. The signature mirrors write(2): it
 // returns the number of bytes written, or -1 on error.
+//
+// The address space is supplied by the caller (not owned), so the same
+// GuestAddressSpace can be shared with the interpreter or translation cache and
+// the handler has no hidden global state. When it is null, the memory syscalls
+// return -ENOSYS rather than pretending to succeed.
 class MinimalSyscallHandler final : public SyscallHandler {
 public:
     using OutputSink = std::function<long(int fd, const std::uint8_t* data, std::size_t count)>;
 
-    // With no sink, output is written to the process's stdout/stderr.
-    explicit MinimalSyscallHandler(OutputSink sink = {});
+    // With no sink, output is written to the process's stdout/stderr. With no
+    // address space, mmap/mprotect/munmap/brk are unimplemented.
+    explicit MinimalSyscallHandler(OutputSink sink = {},
+                                   GuestAddressSpace* address_space = nullptr);
 
     SyscallResult handle(GuestState& state, Memory& memory) override;
 
 private:
     OutputSink sink_;
+    GuestAddressSpace* address_space_;
 };
 
 // True if MinimalSyscallHandler implements this syscall number (as opposed to

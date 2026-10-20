@@ -21,7 +21,8 @@ add_executable(hyperion_unit_tests
     unit/test_translator.cpp
     unit/test_translation_cache.cpp
     unit/test_interpreter.cpp
-    unit/test_syscall.cpp)
+    unit/test_syscall.cpp
+    unit/test_address_space.cpp)
 target_link_libraries(hyperion_unit_tests PRIVATE hyperion_test_harness)
 
 add_test(NAME unit.native COMMAND hyperion_unit_tests)

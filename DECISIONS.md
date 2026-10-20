@@ -536,3 +536,44 @@ must never be committed; `.gitignore` enforces that, and the restore path is
 verified by deleting the sysroot and restoring it (STATUS.md §2). If a cached
 binary is ever stale or suspect, `HYPERION_QEMU` overrides it and `populate`
 refreshes it from the system package.
+
+---
+
+## D-023 — The guest address space is explicit, permissioned, and owned by the caller
+
+**Date:** Phase 6, second syscall slice.
+**Status:** Accepted.
+
+**Context.** The Phase 6 memory syscalls (`mmap`/`mprotect`/`munmap`/`brk`) need
+somewhere to allocate. The interpreter's `FlatMemory` is a single flat region
+with no permissions and no notion of mapped versus unmapped; using it as the
+guest address space would make `mprotect` meaningless and let a guest read any
+address. A real program also needs a heap that `brk` can grow without colliding
+with `mmap` allocations.
+
+**Decision.** Introduce `GuestAddressSpace`
+(`include/hyperion/address_space.hpp`): a set of regions, each with a base,
+length and `MemPerm` (read/write/exec), with page-granular checks on every
+access. `map_image` maps a file image with explicit permissions;
+`map_anonymous` allocates an anonymous region; `protect`/`unmap` change or
+remove regions; `set_brk` grows or shrinks the heap inside a **reserved**
+`[heap_base, heap_end)` window created at construction, so the heap and `mmap`
+allocations can never overlap. The handler receives the address space from the
+caller (a pointer, not a global and not owned), so the same instance is shared
+with the interpreter or translation cache.
+
+The `mmap` syscall wrapper maps guest `PROT_*`/`MAP_*` bits to `MemPerm` and
+implements **anonymous private mappings only**. A request without `MAP_ANONYMOUS`
+is reported unimplemented (`-ENOSYS`, counted in
+`RunResult::unimplemented_syscalls`), never mapped as something else. For
+`MAP_ANONYMOUS` the kernel ignores `fd`/`offset`, so the handler does not inspect
+them — matching the kernel rather than inventing a stricter rule.
+
+**Consequences.** Guest pointers are validated against a permissioned region
+before every access, so a bad pointer is a returned error, never a host read.
+A memory syscall's *return value* and its *implemented* status are tracked
+separately (`MemResult`): a file-backed `mmap` returns a negative value that is
+`-ENOSYS` **and** is counted as unimplemented, so a partial implementation can
+never be silently reported as support. The `FlatMemory` type remains for tests
+of the interpreter and decoder; it is not the guest address space.
+

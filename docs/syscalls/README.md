@@ -72,9 +72,14 @@ The strace sweep is reproducible; see `docs/syscalls/evidence/` and the
 be revised as new traces arrive, and the `status` column (not the tier) records
 implementation progress: `not-started`, `stubbed`, `implemented`, `validated`.
 
-**Current implementation status (Phase 6, first slice).** Exactly three syscalls
-are `implemented`: `write`(1), `exit`(60) and `exit_group`(231), in both
-execution tiers. Every other number returns `-ENOSYS` and is counted in
+**Current implementation status (Phase 6).** The first slice implemented
+`write`(1), `exit`(60) and `exit_group`(231) in both execution tiers. The second
+slice added the guest address space and `mmap`(9), `mprotect`(10), `munmap`(11)
+and `brk`(12), also in both tiers. These four are marked `implemented` with a
+stated scope: `mmap` supports **anonymous** mappings only (a file-backed request
+returns `-ENOSYS` and is counted as unimplemented), and `munmap`/`mprotect`
+require the range to be fully mapped (partial unmapping is not supported yet).
+Every other number returns `-ENOSYS` and is counted in
 `RunResult::unimplemented_syscalls`. The inventory is complete and validated, but
 a complete inventory is *not* implementation; the `status` column is the only
 claim of what works. See `docs/known-issues.md` LIM-002.

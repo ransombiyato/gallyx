@@ -5,6 +5,50 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 6 (guest address space + memory syscalls)
+
+### Added — guest address space (DECISIONS.md D-023)
+- `GuestAddressSpace` (`include/hyperion/address_space.hpp`,
+  `src/core/address_space.cpp`): guest virtual memory as a set of regions, each
+  with a base, length and `MemPerm` (read/write/exec), with page-granular
+  permission checks on every access. `map_image`, `map_anonymous`, `read`,
+  `write`, `protect`, `unmap`, `find_region`, `range_is_free`, and a reserved
+  `[heap_base, heap_end)` window so the heap and `mmap` allocations cannot
+  overlap. `set_brk` maps the pages a grow touches.
+- Unit tests in `tests/unit/test_address_space.cpp`: map/read/write, permission
+  denial on a read-only region, `brk` growth, and page-granular range checks.
+
+### Added — memory syscalls (inventory status → `implemented`)
+- `mmap`(9) (anonymous private mappings only), `mprotect`(10), `munmap`(11) and
+  `brk`(12) are implemented in `MinimalSyscallHandler` over a caller-supplied
+  `GuestAddressSpace`. `docs/syscalls/inventory.tsv` moves all four from
+  `not-started` to `implemented`; `docs/syscalls/` regenerated.
+- A memory syscall's return value and its *implemented* status are tracked
+  separately (`MemResult`): a file-backed `mmap` returns `-ENOSYS` **and** is
+  counted in `RunResult::unimplemented_syscalls`, so a partial implementation is
+  never reported as support. Without an address space the four return `-ENOSYS`
+  and count as unimplemented, rather than pretending success.
+- Tests: `syscall.mmap_anonymous_returns_a_mapping_that_is_usable`,
+  `syscall.mmap_zero_length_is_einval`,
+  `syscall.mmap_file_backed_is_enosys_not_a_wrong_mapping`,
+  `syscall.mprotect_and_munmap_round_trip`, `syscall.brk_returns_the_new_break`,
+  `syscall.memory_syscalls_without_an_address_space_are_enosys`,
+  `syscall.is_minimal_syscall_reports_the_new_set`.
+- End-to-end integration: `syscall.mmap_end_to_end_under_the_interpreter` runs a
+  real guest program (mmap → store through the returned pointer) under Tier 0;
+  `syscall.mmap_end_to_end_under_generated_code_stops_at_memory_operand` pins
+  the honest Tier 1 boundary — the mmap syscall is handled, then the block stops
+  at the memory-operand store because the code generator is register-only.
+
+### Fixed
+- `mmap`'s `fd`/`offset` are no longer inspected for `MAP_ANONYMOUS`: the kernel
+  ignores them, so the handler does too, instead of returning `-ENOSYS` for a
+  legal anonymous mapping that happened to pass a real fd.
+- `set_brk` now actually maps the heap memory it grows into (a design gap in the
+  first address-space draft).
+
+---
+
 ## [Unreleased] — Phase 5 (performance optimizations 3–6)
 
 ### Added — flag liveness (BENCHMARKS.md §4.2.3)

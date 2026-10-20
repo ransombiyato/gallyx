@@ -281,7 +281,7 @@ optimization decisions.
 
 ---
 
-## Phase 6 — Linux ABI and syscall compatibility 🟡 (first slice implemented)
+## Phase 6 — Linux ABI and syscall compatibility 🟡 (two slices implemented)
 
 **Objective.** Run real Linux guest programs.
 
@@ -307,8 +307,17 @@ file descriptors, signals, threading, futexes. Feature matrix + integration test
   every other number returns `-ENOSYS` and is counted in
   `RunResult::unimplemented_syscalls`. Guest pointers are validated against the
   mapped region (`-EFAULT`, never a host crash).
-- ⬜ Guest address space (mmap/brk/mprotect) — **next**.
-- ⬜ File descriptors and the file syscalls.
+- ✅ **Guest address space + memory syscalls.** `GuestAddressSpace`
+  (`include/hyperion/address_space.hpp`) models the guest's virtual memory as a
+  set of regions with per-region permissions and page-granular checks, plus a
+  heap window reserved at construction so `brk` never collides with `mmap`.
+  `mmap`(9) (anonymous only), `mprotect`(10), `munmap`(11) and `brk`(12) are
+  implemented over it and marked `implemented` in the inventory. A file-backed
+  `mmap` returns `-ENOSYS` and is counted as unimplemented rather than mapped
+  wrongly. Tested end-to-end: a guest program mmaps a page, stores through the
+  returned pointer and the value is readable (Tier 0), and under Tier 1 the
+  syscall is handled and the block stops honestly at the memory-operand store.
+- ⬜ File descriptors and the file syscalls (`read`/`openat`/`close`/…) — **next**.
 - ⬜ Signals, threads, futexes.
 
 **Exit criteria.** A clearly defined set of real Linux guest programs works

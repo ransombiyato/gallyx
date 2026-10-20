@@ -39,10 +39,10 @@
 6	lstat	U2	not-started	Stat a path without following the final symlink.	provisional
 7	poll	U2	not-started	Wait for events on a set of file descriptors.	provisional
 8	lseek	U3	not-started	Reposition the file offset of a descriptor.	trace:35
-9	mmap	U4	not-started	Map files or anonymous memory into the address space.	trace:426
-10	mprotect	U4	not-started	Change protection on a memory region.	trace:77
-11	munmap	U4	not-started	Unmap a memory region.	trace:9
-12	brk	U4	not-started	Set the end of the data segment (heap).	trace:84
+9	mmap	U4	implemented	Map files or anonymous memory into the address space.	trace:426
+10	mprotect	U4	implemented	Change protection on a memory region.	trace:77
+11	munmap	U4	implemented	Unmap a memory region.	trace:9
+12	brk	U4	implemented	Set the end of the data segment (heap).	trace:84
 13	rt_sigaction	U4	not-started	Install or query a signal handler.	trace:154
 14	rt_sigprocmask	U4	not-started	Change or query the signal mask.	trace:22
 15	rt_sigreturn	E1	not-started	Return from a signal handler (kernel-issued trampoline).	trace:2

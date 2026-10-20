@@ -31,7 +31,7 @@
 #
 # nr	name	tier	status	purpose	evidence
 0	read	U4	not-started	Read bytes from a file descriptor.	trace:1062
-1	write	U4	not-started	Write bytes to a file descriptor.	trace:134
+1	write	U4	implemented	Write bytes to a file descriptor.	trace:134
 2	open	U1	not-started	Open a file (legacy, no O_* flags in the syscall).	trace:1
 3	close	U4	not-started	Close a file descriptor.	trace:7757
 4	stat	U2	not-started	Stat a path (legacy struct stat layout).	provisional
@@ -90,7 +90,7 @@
 57	fork	U3	not-started	Duplicate the calling process.	provisional
 58	vfork	E3	not-started	Create a child sharing the address space (legacy).	provisional
 59	execve	U4	not-started	Replace the process image.	trace:17
-60	exit	U4	not-started	Terminate the calling thread.	provisional
+60	exit	U4	implemented	Terminate the calling thread.	provisional
 61	wait4	U3	not-started	Wait for a child process.	trace:4
 62	kill	U3	not-started	Send a signal to a process.	provisional
 63	uname	U4	not-started	Query the kernel name and version.	trace:4
@@ -261,7 +261,7 @@
 228	clock_gettime	U4	not-started	Query a clock (monotonic, realtime, ...).	provisional
 229	clock_getres	U2	not-started	Query a clock's resolution.	provisional
 230	clock_nanosleep	U3	not-started	Sleep on a specific clock.	provisional
-231	exit_group	U4	not-started	Terminate all threads in the process.	trace:16
+231	exit_group	U4	implemented	Terminate all threads in the process.	trace:16
 232	epoll_wait	U3	not-started	Wait for epoll events (legacy).	provisional
 233	epoll_ctl	U3	not-started	Add/modify/remove an epoll interest.	provisional
 234	tgkill	U3	not-started	Send a signal to a specific thread.	provisional

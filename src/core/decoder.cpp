@@ -261,6 +261,8 @@ const char* to_string(Opcode opcode) {
         return "push";
     case Opcode::kPop:
         return "pop";
+    case Opcode::kSyscall:
+        return "syscall";
     }
     return "???";
 }
@@ -354,7 +356,7 @@ std::string to_string(const Instruction& instruction) {
     }
 
     if (instruction.opcode == Opcode::kNop || instruction.opcode == Opcode::kRet ||
-        instruction.opcode == Opcode::kHlt) {
+        instruction.opcode == Opcode::kHlt || instruction.opcode == Opcode::kSyscall) {
         return out;
     }
 
@@ -668,6 +670,25 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
     // --- 0xF4 HLT ----------------------------------------------------------
     if (opcode == 0xF4) {
         finish(Opcode::kHlt);
+        return result;
+    }
+
+    // --- 0x0F 0x05 SYSCALL -------------------------------------------------
+    // The only two-byte opcode in the subset. No operands: the number is in
+    // rax and the arguments in rdi/rsi/rdx/r10/r8/r9 (see syscall.hpp).
+    if (opcode == 0x0F) {
+        const std::uint8_t second = r.u8();
+        if (r.truncated()) {
+            result.error = DecodeError::kTruncated;
+            return result;
+        }
+        if (second == 0x05) {
+            finish(Opcode::kSyscall);
+            return result;
+        }
+        // 0x0F 0x80..0x8F (Jcc rel32) is not in the subset; anything else under
+        // the 0x0F escape is likewise outside it.
+        result.error = DecodeError::kUnknownOpcode;
         return result;
     }
 

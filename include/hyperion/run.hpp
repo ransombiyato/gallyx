@@ -32,6 +32,10 @@ struct RunResult {
     RunStatus status = RunStatus::kOk;
     std::uint64_t steps = 0; // instructions retired
     std::string message;     // human-readable reason on non-kOk
+    // Number of guest syscalls whose handler returned -ENOSYS. Non-zero means
+    // the program asked for something Hyperion does not implement yet; it is
+    // recorded so an unimplemented call is never invisible.
+    std::uint64_t unimplemented_syscalls = 0;
     // The final architectural state, valid when status == kOk or kStepLimit.
     GuestState state;
 };

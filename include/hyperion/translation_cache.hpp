@@ -30,6 +30,7 @@
 #include "hyperion/exec_mem.hpp"
 #include "hyperion/interpreter.hpp" // Memory, RunResult
 #include "hyperion/run.hpp"
+#include "hyperion/syscall.hpp"
 #include "hyperion/translator.hpp"
 
 namespace hyperion {
@@ -57,7 +58,11 @@ public:
     //
     // `max_steps` counts guest instructions, matching interpreter::run_program,
     // so the two tiers can be compared directly.
-    RunResult run(Memory& memory, GuestState state, std::uint64_t max_steps = 1'000'000);
+    //
+    // `syscalls` handles guest `syscall` instructions. When it is null a syscall
+    // stops the run with RunStatus::kUnsupported rather than being skipped.
+    RunResult run(Memory& memory, GuestState state, std::uint64_t max_steps = 1'000'000,
+                  SyscallHandler* syscalls = nullptr);
 
     // Number of blocks currently cached (diagnostics/tests).
     std::size_t block_count() const { return blocks_.size(); }

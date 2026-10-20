@@ -2,14 +2,16 @@
 
 **Last updated:** 2026-10-19
 **Current phase:** Phase 5 (performance measurement and optimization) — active;
-Phase 6 (Linux ABI and syscall compatibility) — inventory subsystem started
+Phase 6 (Linux ABI and syscall compatibility) — first slice implemented
 **Repository state:** buildable, tested, documented. **Two execution tiers exist:
 the reference interpreter (Tier 0) and a translation cache that runs whole
 programs through generated AArch64 code (Tier 1).** Phase 4's exit criteria are
 met and recorded. Phase 5 has begun with a *measured baseline before any
 optimisation*: on AArch64 under `qemu-user`, Tier 1 is ~12.8× faster than Tier 0
 on a fixed loop workload (BENCHMARKS.md §4.2). Phase 6's syscall inventory is
-complete and validated (docs/syscalls/). The guest instruction subset remains
+complete and validated (docs/syscalls/), and the **first syscall slice
+(`write`/`exit`/`exit_group`) is implemented in both tiers**, with unimplemented
+numbers returning `-ENOSYS` explicitly. The guest instruction subset remains
 small; see COMPATIBILITY.md.**
 
 This is the first file a returning agent should read. It records exactly what
@@ -17,14 +19,22 @@ works, what was last verified, and what to do next.
 
 ---
 
-## 0e. Phase 6 progress (syscall inventory)
+## 0e. Phase 6 progress (syscall inventory + first slice)
 
 | Work item | State |
 | --- | --- |
 | 1. Seven-file syscall inventory (U1–U4, E1–E3) | **Done** — `docs/syscalls/`, generated from `inventory.tsv` |
 | 2. Evidence-based tiering | **Done** — `scripts/trace-syscalls.sh` strace sweep; unmeasured entries marked `provisional` |
 | 3. Automated completeness validation | **Done** — `tools/gen_syscall_inventory.py`; wired into ctest (`syscall.inventory_valid`) and CI |
-| 4. Guest syscall dispatch + semantics | **Not started** — next |
+| 4. Guest syscall dispatch + semantics (first slice) | **Done & tested** — `include/hyperion/syscall.hpp`, `src/core/syscall.cpp`; `syscall` decoded (`0F 05`); both tiers route to the handler |
+| 5. `write`/`exit`/`exit_group` semantics | **Implemented** — status `implemented` in the inventory; `-EBADF`/`-EFAULT` on bad fd/pointer |
+| 6. Explicit `-ENOSYS` for every other number | **Implemented** — never silently succeeds; counted in `RunResult::unimplemented_syscalls` |
+| 7. Broader syscall coverage (open/read/mmap/…) | **Not started** — next slice |
+
+**Implemented-syscall status (verified).** Exactly three numbers are implemented
+today: `write`(1), `exit`(60), `exit_group`(231). Everything else returns
+`-ENOSYS`. The inventory marks these three `implemented` and all others
+`not-started`; the validator enforces the status vocabulary.
 
 **Inventory facts (verified).** The pinned table is Linux v6.12
 (`arch/x86/entry/syscalls/syscall_64.tbl`), reduced to the 375 `common`/`64`
@@ -328,19 +338,21 @@ aarch64-linux-gnu-g++ 14.2.0.
 | Check | Command | Result |
 | --- | --- | --- |
 | Native build (`-Werror`) | `cmake --build build/dev` | PASS — no warnings |
-| Native tests | `ctest --test-dir build/dev` | PASS — **7/7** entries (98 unit cases + 8 differential) |
+| Native tests | `ctest --test-dir build/dev` | PASS — **9/9** entries (100 unit cases + 8 differential) |
 | Differential vs. hardware | `./build/dev/tests/hyperion_differential_tests` | PASS — 8/8 compared against real x86-64 |
 | CLI smoke (both tiers) | `ctest --test-dir build/dev -R cli.smoke` | PASS — tiers agree, `steps=17` |
+| Syscall layer (decode/handler/interpreter) | `hyperion_unit_tests --filter=syscall` | PASS — **11/11** new cases |
+| Syscall inventory validator | `python3 tools/gen_syscall_inventory.py --check` | PASS — inventory complete, consistent, valid |
 | Cross build | `cmake --build build/cross-aarch64` | PASS — AArch64 binaries produced |
-| Cross tests under qemu | `qemu-aarch64 .../hyperion_unit_tests` | PASS — **96 passed, 0 failed, 2 skipped** |
+| Cross tests under qemu | `ctest --test-dir build/cross-aarch64` | PASS — **10/10** (111 passed, 0 failed, 2 skipped unit cases) |
+| Tier 1 syscall path (AArch64) | `translation_cache.tier1_syscall_write_matches_interpreter` under qemu | PASS — generated code returns `kSyscall`, dispatcher handles it |
 | AArch64 differential | `qemu-aarch64 .../hyperion_differential_tests` | SKIP — 0 passed, **8 skipped** (no x86-64 oracle) |
 | Translator blocks vs. interpreter (AArch64) | `translator.block_*` under qemu | PASS — block cuts at terminators/unsupported/buffer end |
 | Whole-program differentials (AArch64) | `translator.differential_program_*` under qemu | PASS — counted loop, nested loops, branch-inside-loop all match `run_program` |
 | Dispatcher limits (AArch64) | `translator.dispatcher_*` under qemu | PASS — stops at unsupported; step limit is a hard bound, does not hang |
 | Translation cache (AArch64) | `translation_cache.caches_*` under qemu | PASS — caches blocks, agrees with interpreter |
 | CLI tier 1 executes generated code | `HYPERION_EMULATOR=qemu-aarch64 ... cli_smoke.sh` | PASS — **3 basic blocks translated**, `steps=17` |
-| ASan/UBSan (clang) | `ctest --test-dir build/san` | PASS — 7/7 |
-| Clang build + tests | `ctest --test-dir build/clang` | PASS — 7/7 |
+| ASan/UBSan (clang) | `ctest --test-dir build/san` | PASS — 9/9 |
 | Formatting | `clang-format --dry-run --Werror` | PASS — clean |
 | Shell scripts | `shellcheck install.sh scripts/*` | PASS — clean |
 | Installer (local) | `install.sh --src . --prefix DIR` | PASS — builds, tests, installs, uninstalls |
@@ -348,11 +360,12 @@ aarch64-linux-gnu-g++ 14.2.0.
 | UML feasibility (smoke) | `experiments/uml/run.sh smoke` | PASS — kernel boots unprivileged; all 6 namespace types OK |
 | UML feasibility (systemd) | `experiments/uml/run.sh systemd` | PASS — systemd 257 as PID 1 → `multi-user.target` |
 
-The native suite is 7 CTest entries: `unit.native` (one entry running **98**
-unit test cases across 10 files), `differential.native_vs_interpreter` (**8**
-cases compared against real x86-64 hardware), `cli.smoke`, `bench.smoke`,
-`bench.methodology`, `bench.timing_not_eliminated` and
-`bench.rejects_single_sample`.
+The native suite is 9 CTest entries: `unit.native` (one entry running **100**
+unit test cases across 11 files), `differential.native_vs_interpreter` (**8**
+cases compared against real x86-64 hardware), `syscall.inventory_valid`,
+`cli.smoke`, `bench.smoke`, `bench.methodology`, `bench.timing_not_eliminated`
+and `bench.rejects_single_sample`. The cross build has 10 entries (the same set
+plus `cross.aarch64_tests`).
 
 ### Remote verification (GitHub Actions)
 
@@ -437,28 +450,28 @@ stable-vs-noisy discrimination case).
 
 ## 4. Immediate next task
 
-**Phase 5 is active (two optimizations accepted and measured). Phase 6's syscall
-inventory subsystem is complete and CI-validated. The next concrete work is the
-first slice of the Phase 6 syscall layer.**
+**Phase 6's first syscall slice (`write`/`exit`/`exit_group`) is implemented and
+tested in both tiers. Phase 5 has two accepted, measured optimizations. The next
+concrete work is the guest address space, which every dynamic program needs, and
+then broader syscall coverage.**
 
 The single best next action:
 
-- **Implement the `syscall` instruction + a minimal dispatch table (Phase 6).**
-  Add `Opcode::kSyscall` (x86-64 `0F 05`) to the decoder, model it in the
-  interpreter and the translator, and route it through a `SyscallHandler`
-  interface. Implement only the *trivially correct, dependency-free* calls first
-  — `write` (1), `exit` (60), `exit_group` (231) — so a hand-written guest
-  program can print and terminate. Everything else returns `-ENOSYS` explicitly
-  (never a silent success). This is the smallest slice that produces an
-  observable, testable result and does not require the guest address space.
-- Then build the **guest address space** (mmap/brk/mprotect/munmap) since the
-  loader and every dynamic program depend on it; see `docs/syscalls/U4.md` for
-  the U4 order and `docs/syscalls/README.md` for the evidence policy.
+- **Build the guest address space (Phase 6).** Implement `mmap`, `munmap`,
+  `mprotect` and `brk` over a guest-managed region, with explicit bounds and
+  permission checks, so the loader and dynamic programs can allocate memory.
+  These are U4/U3 syscalls in `docs/syscalls/`. Keep the handler boundary: the
+  guest never receives a raw host pointer, and every guest pointer is validated
+  against the guest region before use (as `write` already does).
+- Then extend coverage in the U4 order (`docs/syscalls/U4.md`): `read`,
+  `openat`/`open`, `close`, `fstat`/`newfstatat`, `getdents64`, `lseek`,
+  `access`, `readlink`, `getrandom`, `set_tid_address`, `rseq`, `prlimit64`.
 - Every implemented syscall must: follow the x86-64 argument/return convention
   (args in `rdi, rsi, rdx, r10, r8, r9`; result in `rax`; errors as `-errno`),
   validate guest pointers, be listed in `docs/syscalls/inventory.tsv` with
   `status` moved from `not-started` to `implemented`/`validated`, and have a
-  focused test. Never present a stub as full support.
+  focused test. Never present a stub as full support. Update the table in §0e
+  and the implemented-count whenever the set changes.
 
 Also still open from Phase 5 (independent, larger):
 

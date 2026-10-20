@@ -2,9 +2,11 @@
 
 Tracks implemented versus missing instruction and ABI features.
 
-> **Phase 2 status:** a small, documented instruction subset is implemented and
-> tested (§2). Everything else is explicitly rejected. There is no AArch64 code
-> generation, no translation cache and no syscall layer yet.
+> **Status:** a small, documented instruction subset is implemented and tested
+> (§2). Everything else is explicitly rejected. AArch64 code generation, a
+> block-at-a-time translation cache, and a first syscall slice (`write`/`exit`/
+> `exit_group`) exist; register allocation, block chaining and the guest address
+> space do not (§5).
 
 Legend: ✅ implemented + tested · 🟡 implemented, untested · 🧪 prototype · ❌ unsupported (explicit) · ⬜ planned
 
@@ -103,7 +105,7 @@ These appeared in an earlier version of this table and remain unbuilt. They are
 | Multiply | `imul`, `mul` | ⬜ planned |
 | Address | `lea` | ⬜ planned |
 | Control flow | `call`, `ret` (real), `jcc rel32` (`0F 8x`) | ⬜ planned |
-| Syscall | `syscall` (`0F 05`) | ⬜ planned (Phase 6) |
+| Syscall | `syscall` (`0F 05`) | ✅ decoded + handled (§5) |
 | Division | `div`, `idiv` | ⬜ planned (stretch) |
 | 8-bit forms | `mov r8`, `add r8`, … | ⬜ planned |
 
@@ -131,6 +133,7 @@ decoder accepts but the translator does not is refused with an explicit
 | `jmp rel8` (`0xEB`) | ✅ | block exits with `kJmp`; writes target `rip` |
 | `jcc rel8` (`0x70..0x7F`) | ✅ | block exits with `kJcc`; writes target or fall-through `rip` |
 | `push`, `pop`, `ret` | ⬜ | needs a guest stack / address space (Phase 6) |
+| `syscall` (`0F 05`) | ✅ | block exits with `kSyscall`; the dispatcher runs the handler. `rip` is advanced past the instruction |
 | memory operands | ⬜ | Phase 6 (needs a guest address space) |
 
 Verified by `tests/unit/test_translator.cpp`: scope tests on every host, a
@@ -192,21 +195,28 @@ guest address space: there is no paging, no mapping of the guest stack, and no
 
 ## 5. Linux ABI / syscall coverage
 
-Phase 6. Nothing implemented. The feature matrix will be maintained here with
-per-syscall status and the integration test that covers it.
+Phase 6, first slice. The `syscall` instruction is decoded and routed through
+`SyscallHandler` in both tiers. **Exactly three syscalls are implemented**;
+every other number returns `-ENOSYS` explicitly (never a silent success) and is
+counted in `RunResult::unimplemented_syscalls`. Guest pointers are validated
+against the mapped region (`-EFAULT`), so a guest can never read host memory.
+Per-syscall status lives in `docs/syscalls/inventory.tsv` (the canonical source);
+this table is the summary.
 
-| Area | Status | Phase |
-| --- | --- | --- |
-| Syscall number + argument marshalling | ⬜ | 6 |
-| `exit`, `exit_group` | ⬜ | 6 |
-| `read`, `write`, `close`, `open`, `openat` | ⬜ | 6 |
-| `mmap`, `munmap`, `mprotect`, `brk` | ⬜ | 6 |
-| `stat`/`fstat`/`lstat`/`*statat` (struct layout differences) | ⬜ | 6 |
-| `arch_prctl` (FS/GS base, TLS) | ⬜ | 6 |
-| `clone`, `futex`, threading | ⬜ | 6 |
-| Signals | ⬜ | 6 |
-| `epoll`, `poll`, `select` | ⬜ | 6 |
-| `io_uring`, `rseq`, `vDSO` | ⬜ | 6/7 |
+| Area | Status | Phase | Covering test |
+| --- | --- | --- | --- |
+| Syscall number + argument marshalling (`rdi,rsi,rdx,r10,r8,r9` → `rax`) | ✅ | 6 | `syscall.*` |
+| `exit`(60), `exit_group`(231) | ✅ | 6 | `syscall.exit_reports_code_*`, `interpreter.syscall_write_then_exit_*` |
+| `write`(1) | ✅ | 6 | `syscall.write_*`, `translation_cache.tier1_syscall_*` |
+| Unknown number → `-ENOSYS` | ✅ | 6 | `syscall.unknown_number_is_enosys_not_silent` |
+| `read`, `close`, `open`, `openat` | ⬜ | 6 | — |
+| `mmap`, `munmap`, `mprotect`, `brk` | ⬜ | 6 | — |
+| `stat`/`fstat`/`lstat`/`*statat` (struct layout differences) | ⬜ | 6 | — |
+| `arch_prctl` (FS/GS base, TLS) | ⬜ | 6 | — |
+| `clone`, `futex`, threading | ⬜ | 6 | — |
+| Signals | ⬜ | 6 | — |
+| `epoll`, `poll`, `select` | ⬜ | 6 | — |
+| `io_uring`, `rseq`, `vDSO` | ⬜ | 6/7 | — |
 
 ---
 

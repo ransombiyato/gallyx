@@ -263,7 +263,7 @@ optimization decisions.
 
 ---
 
-## Phase 6 — Linux ABI and syscall compatibility 🟡 (inventory started)
+## Phase 6 — Linux ABI and syscall compatibility 🟡 (first slice implemented)
 
 **Objective.** Run real Linux guest programs.
 
@@ -281,8 +281,15 @@ file descriptors, signals, threading, futexes. Feature matrix + integration test
   (`tools/gen_syscall_inventory.py`) fails CI on any missing, duplicated,
   misnumbered or mis-tiered entry, so the inventory cannot drift from the pinned
   kernel table.
-- ⬜ Guest syscall layer + dispatch.
-- ⬜ Guest address space (mmap/brk/mprotect).
+- ✅ **Guest syscall dispatch + first semantics.** `0F 05` decodes to
+  `Opcode::kSyscall`; `SyscallHandler` (`include/hyperion/syscall.hpp`) receives
+  the guest state and writes `rax`. Both tiers route to it (the translator exits
+  the block with `BlockResult::kSyscall`; the dispatcher calls the handler).
+  `write`(1), `exit`(60) and `exit_group`(231) are implemented and tested;
+  every other number returns `-ENOSYS` and is counted in
+  `RunResult::unimplemented_syscalls`. Guest pointers are validated against the
+  mapped region (`-EFAULT`, never a host crash).
+- ⬜ Guest address space (mmap/brk/mprotect) — **next**.
 - ⬜ File descriptors and the file syscalls.
 - ⬜ Signals, threads, futexes.
 

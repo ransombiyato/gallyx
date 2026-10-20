@@ -243,6 +243,8 @@ const char* to_string(BlockExit exit) {
         return "jcc";
     case BlockExit::kHalted:
         return "halted";
+    case BlockExit::kSyscall:
+        return "syscall";
     }
     return "?";
 }
@@ -267,6 +269,15 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
 
     case Opcode::kHlt:
         emit_return(e, BlockResult::kHalted);
+        return TranslateError::kNone;
+
+    case Opcode::kSyscall:
+        // A syscall ends the block: the dispatcher must run the handler (which
+        // needs the Memory object, unavailable in generated code) and then
+        // resume. rip is advanced here so the handler, and any resume, sees the
+        // instruction after `syscall`, matching a real CPU.
+        emit_set_rip(e, insn.address + insn.length);
+        emit_return(e, BlockResult::kSyscall);
         return TranslateError::kNone;
 
     case Opcode::kMov: {
@@ -476,6 +487,17 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
             // top-level return (there is no guest stack yet, Phase 6).
             emit_return(e, BlockResult::kHalted);
             out.exit = BlockExit::kHalted;
+            ++out.guest_instruction_count;
+            break;
+        }
+        if (op == Opcode::kSyscall) {
+            // End the block at the syscall so the dispatcher can run the
+            // handler. rip is advanced past the instruction, so a resume (or the
+            // next block lookup) continues correctly.
+            emit_set_rip(e, insn.address + insn.length);
+            emit_return(e, BlockResult::kSyscall);
+            out.exit = BlockExit::kSyscall;
+            out.target = insn.address + insn.length;
             ++out.guest_instruction_count;
             break;
         }

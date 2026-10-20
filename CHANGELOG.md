@@ -5,6 +5,39 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 6 (first syscall slice)
+
+### Added — guest syscall layer (first slice)
+- `include/hyperion/syscall.hpp`, `src/core/syscall.cpp`: the `SyscallHandler`
+  interface (guest state in, result written to `rax`) and
+  `MinimalSyscallHandler`, which implements `write`(1), `exit`(60) and
+  `exit_group`(231) and returns `-ENOSYS` for every other number.
+- The x86-64 `syscall` instruction (`0F 05`) is decoded as `Opcode::kSyscall`.
+- Both execution tiers route syscalls through the handler: the interpreter
+  handles it inline; the translator ends the block with
+  `BlockResult::kSyscall` and the dispatcher runs the handler, so a syscall is
+  never skipped or executed with wrong guest state.
+- `RunResult::unimplemented_syscalls` records how many `-ENOSYS` calls the
+  program made, so an unimplemented call is visible, never silent.
+- Error convention matches Linux: failures return a negative errno in `rax`
+  (e.g. `-EBADF`, `-EFAULT`); a guest buffer outside the mapped region yields
+  `-EFAULT` rather than a host crash.
+- 11 new tests (`tests/unit/test_syscall.cpp`): decoding, handler semantics
+  (good/bad fd, out-of-range pointer, exit code, unknown number), interpreter
+  integration, and a Tier 1 differential that runs generated AArch64 under
+  `qemu-user`.
+
+### Changed — syscall inventory
+- `docs/syscalls/inventory.tsv`: `write`, `exit` and `exit_group` moved from
+  `not-started` to `implemented`; the seven generated files regenerated. Every
+  other entry remains `not-started`.
+
+### Notes
+- Exactly three syscalls are implemented. This is a first slice, not general
+  Linux compatibility; see `docs/known-issues.md` LIM-002.
+
+---
+
 ## [Unreleased] — Phase 6 (syscall inventory)
 
 ### Added — evidence-based syscall inventory

@@ -56,8 +56,10 @@ struct Translation {
 
 // Value returned in x0 by a translated block.
 enum class BlockResult : std::uint64_t {
-    kOk = 0,     // block completed; guest state (including rip) is updated
-    kHalted = 1, // HLT/RET: the program has stopped
+    kOk = 0,      // block completed; guest state (including rip) is updated
+    kHalted = 1,  // HLT/RET: the program has stopped
+    kSyscall = 2, // a `syscall` instruction was reached; the dispatcher must
+                  // handle it. rip already points past the instruction.
 };
 
 // How a translated block left. Purely informational for callers: the
@@ -68,6 +70,7 @@ enum class BlockExit : std::uint8_t {
     kJmp,         // unconditional JMP
     kJcc,         // conditional branch; the runtime decides taken/not-taken
     kHalted,      // HLT or RET: the program has stopped
+    kSyscall,     // a `syscall` instruction ended the block
 };
 
 const char* to_string(BlockExit exit);

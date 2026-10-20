@@ -83,22 +83,23 @@ struct Operand {
 // The supported instruction mnemonics. This list is the contract: COMPATIBILITY.md
 // lists exactly these, and the decoder accepts nothing else.
 enum class Opcode : std::uint8_t {
-    kMov,  // MOV  r/m, r  |  MOV r, r/m  |  MOV r, imm
-    kAdd,  // ADD  r/m, r
-    kSub,  // SUB  r/m, r
-    kCmp,  // CMP  r/m, r
-    kAnd,  // AND  r/m, r
-    kOr,   // OR   r/m, r
-    kXor,  // XOR  r/m, r
-    kInc,  // INC  r/m
-    kDec,  // DEC  r/m
-    kNop,  // NOP
-    kRet,  // RET
-    kHlt,  // HLT
-    kJmp,  // JMP rel32
-    kJcc,  // Jcc rel8 (condition in the low nibble of the opcode)
-    kPush, // PUSH r64
-    kPop,  // POP  r64
+    kMov,     // MOV  r/m, r  |  MOV r, r/m  |  MOV r, imm
+    kAdd,     // ADD  r/m, r
+    kSub,     // SUB  r/m, r
+    kCmp,     // CMP  r/m, r
+    kAnd,     // AND  r/m, r
+    kOr,      // OR   r/m, r
+    kXor,     // XOR  r/m, r
+    kInc,     // INC  r/m
+    kDec,     // DEC  r/m
+    kNop,     // NOP
+    kRet,     // RET
+    kHlt,     // HLT
+    kJmp,     // JMP rel32
+    kJcc,     // Jcc rel8 (condition in the low nibble of the opcode)
+    kPush,    // PUSH r64
+    kPop,     // POP  r64
+    kSyscall, // SYSCALL (0F 05): guest Linux system call
 };
 
 const char* to_string(Opcode opcode);

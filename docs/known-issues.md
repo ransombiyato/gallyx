@@ -21,7 +21,7 @@ noted in `CHANGELOG.md`.
 
 | ID | Limitation | Notes |
 | --- | --- | --- |
-| LIM-002 | No syscall or ABI layer. | Phase 6. Guest `syscall` is not decoded. The syscall *inventory* now exists and is validated (`docs/syscalls/`), but no syscall is implemented; every entry is `not-started`. |
+| LIM-002 | Syscall layer is a first slice only. | Phase 6. Only `write`(1), `exit`(60), `exit_group`(231) are implemented; every other number returns `-ENOSYS`. No guest address space yet (`mmap`/`brk`), so no dynamic program or loader runs. The inventory (`docs/syscalls/`) is complete and validated but does not imply implementation. |
 | LIM-003 | The translation cache **never invalidates**. | Self-modifying guest code runs stale translations. Deliberate boundary for the first version; precise invalidation is Phase 7. |
 | LIM-004 | `qemu-user` validates correctness, not performance. | Never quote qemu numbers as performance. |
 | LIM-005 | Benchmark harness measures host only. | `guest_execution.available = false` until a Tier 1/Tier 0 benchmark exists (D-009). No Tier-1 performance measurement exists yet. |

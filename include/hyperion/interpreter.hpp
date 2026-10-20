@@ -61,7 +61,7 @@ private:
 
 enum class StepStatus {
     kOk,          // one instruction executed; state updated
-    kHalted,      // HLT executed
+    kHalted,      // HLT executed, or a syscall asked the guest to exit
     kFault,       // memory fault or invalid state
     kUnsupported, // decode failed: the instruction is not in the subset
 };
@@ -71,14 +71,24 @@ struct StepResult {
     DecodeError decode_error = DecodeError::kNone;
     Instruction instruction{};
     std::string message;
+    // Number of guest syscalls in this step that the handler did not implement
+    // (0 or 1). Non-zero means rax was set to -ENOSYS; execution continued.
+    std::uint32_t unimplemented_syscalls = 0;
 
     bool ok() const { return status == StepStatus::kOk; }
 };
 
+class SyscallHandler;
+
 // Execute exactly one instruction at state.rip. On kOk the state is fully
 // updated, including rip. On kUnsupported the state is unchanged, so a caller
 // can stop cleanly at the first unknown instruction rather than run past it.
-StepResult step(GuestState& state, Memory& memory);
+//
+// `syscalls` handles the guest `syscall` instruction. If it is null, a guest
+// syscall stops the program with kUnsupported rather than being ignored: an
+// unimplemented syscall must never look like success. On a syscall that asks
+// the guest to exit, the result is kHalted.
+StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls = nullptr);
 
 // ALU helpers, exposed for the interpreter's tests and for the Phase 3 code
 // generator's differential checks. `width` is 32 or 64 bits.
@@ -121,7 +131,11 @@ void set_szp(std::uint64_t result, int width, Flags& flags);
 // never halts must be reported as such, not hang the test suite. Callers that
 // genuinely want an unbounded run can pass a very large value, but the default
 // protects the tests.
-RunResult run_program(Memory& memory, GuestState state, std::uint64_t max_steps = 1'000'000);
+//
+// `syscalls` is threaded through to step(); when it is null a guest syscall
+// stops the program with RunStatus::kUnsupported.
+RunResult run_program(Memory& memory, GuestState state, std::uint64_t max_steps = 1'000'000,
+                      SyscallHandler* syscalls = nullptr);
 
 } // namespace hyperion
 

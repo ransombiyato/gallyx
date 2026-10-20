@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Project HYPERION contributors
 #include "hyperion/interpreter.hpp"
 
+#include "hyperion/syscall.hpp"
+
 #include <cstring>
 
 namespace hyperion {
@@ -279,7 +281,7 @@ bool write_operand(const Operand& op, GuestState& state, Memory& memory, std::ui
 
 } // namespace
 
-StepResult step(GuestState& state, Memory& memory) {
+StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
     StepResult result;
 
     // Fetch. The subset has no instruction longer than 15 bytes, so a 15-byte
@@ -337,6 +339,33 @@ StepResult step(GuestState& state, Memory& memory) {
         // HLT does not advance rip; a real CPU would #GP, but for a user-mode
         // test program "stop here" is the useful, explicit behaviour.
         return result;
+
+    case Opcode::kSyscall: {
+        // The `syscall` instruction transfers control to the kernel. Hyperion
+        // emulates that in userspace through a handler. rip must already point
+        // past the instruction when the handler runs, matching a real CPU that
+        // returns to the next instruction; the handler writes the result to rax.
+        if (syscalls == nullptr) {
+            result.status = StepStatus::kUnsupported;
+            result.message = "syscall encountered with no handler";
+            return result;
+        }
+        state.rip = next_rip;
+        const SyscallResult sr = syscalls->handle(state, memory);
+        if (sr.status == SyscallStatus::kExit) {
+            result.status = StepStatus::kHalted;
+            result.message = "guest exited via syscall";
+            return result;
+        }
+        // kHandled and kUnimplemented both continue: for an unimplemented call
+        // the handler wrote -ENOSYS to rax, exactly as Linux would, so the guest
+        // observes correct behaviour and can react. The call is recorded (see
+        // RunResult::unimplemented_syscalls) so it is visible, never silent.
+        if (sr.status == SyscallStatus::kUnimplemented) {
+            ++result.unimplemented_syscalls;
+        }
+        break;
+    }
 
     case Opcode::kMov: {
         std::uint64_t value = 0;
@@ -471,11 +500,13 @@ StepResult step(GuestState& state, Memory& memory) {
     return result;
 }
 
-RunResult run_program(Memory& memory, GuestState state, std::uint64_t max_steps) {
+RunResult run_program(Memory& memory, GuestState state, std::uint64_t max_steps,
+                      SyscallHandler* syscalls) {
     RunResult out;
     out.state = state;
     for (std::uint64_t i = 0; i < max_steps; ++i) {
-        const StepResult r = step(out.state, memory);
+        const StepResult r = step(out.state, memory, syscalls);
+        out.unimplemented_syscalls += r.unimplemented_syscalls;
         switch (r.status) {
         case StepStatus::kOk:
             ++out.steps;

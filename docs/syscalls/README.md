@@ -72,6 +72,13 @@ The strace sweep is reproducible; see `docs/syscalls/evidence/` and the
 be revised as new traces arrive, and the `status` column (not the tier) records
 implementation progress: `not-started`, `stubbed`, `implemented`, `validated`.
 
+**Current implementation status (Phase 6, first slice).** Exactly three syscalls
+are `implemented`: `write`(1), `exit`(60) and `exit_group`(231), in both
+execution tiers. Every other number returns `-ENOSYS` and is counted in
+`RunResult::unimplemented_syscalls`. The inventory is complete and validated, but
+a complete inventory is *not* implementation; the `status` column is the only
+claim of what works. See `docs/known-issues.md` LIM-002.
+
 Frequency and implementation priority are related but not identical. A rare
 syscall (e.g. `arch_prctl` for TLS setup) can be mandatory for *any* program to
 start, which is why it sits in E1 rather than a low usage tier.

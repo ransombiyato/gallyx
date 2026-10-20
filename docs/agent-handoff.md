@@ -150,12 +150,13 @@ build.
 ## 5. Your next task
 
 **Phases 0–4 are closed. Phase 5 is active (two optimizations accepted and
-measured). Phase 6's syscall inventory is complete and CI-validated. The next
-concrete step is the first slice of the Phase 6 syscall layer.** Guest state, the
+measured). Phase 6's syscall inventory is complete and CI-validated, and the
+first syscall slice (`write`/`exit`/`exit_group`) is implemented and tested in
+both tiers. The next concrete step is the guest address space.** Guest state, the
 decoder, the reference interpreter, the subset contract (`COMPATIBILITY.md` §2),
 the hardware differential, the AArch64 encoder, executable memory,
-single-instruction translation, whole-block translation and the
-translation-cache dispatcher all exist and pass.
+single-instruction translation, whole-block translation, the translation-cache
+dispatcher, and the syscall dispatch layer all exist and pass.
 
 1. ~~Build an AArch64 encoder~~ **Done** (`a64::Encoder`). ~~Add executable-code
    management~~ **Done** (`ExecMem`). ~~Marshall `GuestState` and translate one
@@ -179,17 +180,22 @@ translation-cache dispatcher all exist and pass.
    validated against the pinned Linux v6.12 table by
    `tools/gen_syscall_inventory.py` (ctest `syscall.inventory_valid`, CI job
    `inventory`). Tiers are evidence-backed via `scripts/trace-syscalls.sh`.
-7. **Next: implement the `syscall` instruction and a minimal dispatch layer
-   (Phase 6).** Add `Opcode::kSyscall` (`0F 05`) to the decoder, handle it in the
-   interpreter and translator, and route it through a `SyscallHandler` interface.
-   Implement only `write` (1), `exit` (60) and `exit_group` (231) first — enough
-   for a hand-written guest program to print and terminate — and return `-ENOSYS`
-   explicitly for everything else. Follow the x86-64 convention: args in
-   `rdi, rsi, rdx, r10, r8, r9`; result in `rax`; errors as negative errno. Move
-   the corresponding `status` values in `inventory.tsv` and regenerate. Then
-   build the guest address space (mmap/brk/mprotect/munmap), which the loader and
-   every dynamic program need.
-8. **Also open (Phase 5): register allocation (start small).** Keep the most-used
+7. ~~Implement the `syscall` instruction and a minimal dispatch layer~~ **Done &
+   tested.** `Opcode::kSyscall` (`0F 05`) is decoded; `SyscallHandler`
+   (`include/hyperion/syscall.hpp`) receives the guest state and writes `rax`.
+   Both tiers route to it (the translator exits with `BlockResult::kSyscall` and
+   the dispatcher calls the handler). `write`(1), `exit`(60), `exit_group`(231)
+   are implemented; every other number returns `-ENOSYS`, counted in
+   `RunResult::unimplemented_syscalls`. 11 new tests, including a Tier 1
+   differential under `qemu-user`.
+8. **Next: build the guest address space (Phase 6).** Implement
+   `mmap`/`munmap`/`mprotect`/`brk` over a guest-managed region with explicit
+   bounds and permission checks, so the loader and dynamic programs can allocate
+   memory. Keep the handler boundary: the guest never receives a raw host
+   pointer, and every guest pointer is validated (as `write` already does). Then
+   extend coverage in the U4 order (`docs/syscalls/U4.md`). Move the
+   corresponding `status` values in `inventory.tsv` and regenerate.
+9. **Also open (Phase 5): register allocation (start small).** Keep the most-used
    guest registers in AArch64 registers *within* a block (load at entry, spill at
    exit), leaving the block signature and the authoritative-`rip` rule unchanged.
    Require the whole differential suite to pass, then re-run
@@ -197,11 +203,11 @@ translation-cache dispatcher all exist and pass.
    accept/reject verdict. Never change the baseline to make a candidate look
    good. Add a deterministic guard for whatever the change should move, since
    `qemu-user` timing is noisy.
-9. **Keep the oracle.** Run each multi-instruction program through both the
-   generated blocks and the interpreter's `run_program`, and require the final
-   `GuestState` to match bit-for-bit. A mismatch must fail loudly; there is no
-   tolerance for "close enough".
-10. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
+10. **Keep the oracle.** Run each multi-instruction program through both the
+    generated blocks and the interpreter's `run_program`, and require the final
+    `GuestState` to match bit-for-bit. A mismatch must fail loudly; there is no
+    tolerance for "close enough".
+11. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
     pipeline builds the tests for AArch64, runs them under `qemu-user`, and runs
     the CLI smoke test with `HYPERION_EMULATOR`, so generated code is exercised in
     CI without the target device.

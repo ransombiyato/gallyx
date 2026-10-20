@@ -85,7 +85,8 @@ std::size_t TranslationCache::total_code_bytes() const {
     return total;
 }
 
-RunResult TranslationCache::run(Memory& memory, GuestState state, std::uint64_t max_steps) {
+RunResult TranslationCache::run(Memory& memory, GuestState state, std::uint64_t max_steps,
+                                SyscallHandler* syscalls) {
     RunResult out;
     out.state = state;
 
@@ -126,6 +127,28 @@ RunResult TranslationCache::run(Memory& memory, GuestState state, std::uint64_t 
             out.status = RunStatus::kOk;
             out.steps = steps;
             return out;
+        }
+        if (result == BlockResult::kSyscall) {
+            // The block advanced rip past the instruction and stopped. Run the
+            // handler here, in the dispatcher, where the Memory object and the
+            // handler are available; generated code cannot call back into C++.
+            if (syscalls == nullptr) {
+                out.status = RunStatus::kUnsupported;
+                out.message = "syscall encountered with no handler";
+                out.steps = steps;
+                return out;
+            }
+            const SyscallResult sr = syscalls->handle(out.state, memory);
+            if (sr.status == SyscallStatus::kExit) {
+                out.status = RunStatus::kOk;
+                out.message = "guest exited via syscall";
+                out.steps = steps;
+                return out;
+            }
+            if (sr.status == SyscallStatus::kUnimplemented) {
+                ++out.unimplemented_syscalls;
+            }
+            continue; // resume at the (already advanced) rip
         }
         // Otherwise the block wrote the next PC into out.state.rip; loop.
     }

@@ -352,11 +352,196 @@ HYPERION_TEST("syscall", "memory_syscalls_without_an_address_space_are_enosys") 
 }
 
 HYPERION_TEST("syscall", "is_minimal_syscall_reports_the_new_set") {
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kRead));
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kWrite));
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kClose));
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kLseek));
     HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kMmap));
     HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kMprotect));
     HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kMunmap));
     HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kBrk));
+    HYPERION_CHECK(!hyperion::is_minimal_syscall(2));  // open, still unimplemented
     HYPERION_CHECK(!hyperion::is_minimal_syscall(39)); // getpid, still unimplemented
+}
+
+// --- File-descriptor syscalls (read/close/lseek) ---------------------------
+//
+// These use adopt() to attach an already-open host stream under a guest fd, so
+// the test needs no real file on disk and no open(2). The handler must never
+// fclose an adopted stream: the test owns it.
+
+// A temporary in-memory-ish stream: fmemopen is a POSIX stream over a buffer,
+// which is seekable and has a definite end, so read/close/lseek can be tested
+// without touching the host filesystem.
+struct MemStream {
+    std::FILE* f = nullptr;
+    explicit MemStream(const char* data, std::size_t size) {
+        f = ::fmemopen(const_cast<char*>(data), size, "r");
+    }
+    ~MemStream() {
+        if (f != nullptr) {
+            std::fclose(f);
+        }
+    }
+    MemStream(const MemStream&) = delete;
+    MemStream& operator=(const MemStream&) = delete;
+};
+
+HYPERION_TEST("syscall", "read_copies_from_adopted_stream_into_guest_memory") {
+    static const char kData[] = "hyperion";
+    MemStream ms(kData, sizeof(kData) - 1);
+    HYPERION_CHECK(ms.f != nullptr);
+
+    MinimalSyscallHandler handler;
+    HYPERION_CHECK(handler.adopt(3, ms.f)); // guest fd 3 -> the stream
+
+    FlatMemory memory = program({});
+    GuestState s = syscall_state(hyperion::sysno::kRead, {3, kBase + 0x200, 8});
+    const auto r = handler.handle(s, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), std::uint64_t{8}); // all 8 bytes read
+
+    std::uint8_t got[8] = {};
+    HYPERION_CHECK(memory.read(kBase + 0x200, got, 8));
+    HYPERION_CHECK(std::memcmp(got, "hyperion", 8) == 0);
+}
+
+HYPERION_TEST("syscall", "read_of_bad_fd_is_ebadf") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    GuestState s = syscall_state(hyperion::sysno::kRead, {7, kBase + 0x200, 4});
+    const auto r = handler.handle(s, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEbadf));
+}
+
+HYPERION_TEST("syscall", "read_out_of_range_buffer_is_efault") {
+    static const char kData[] = "hyperion";
+    MemStream ms(kData, sizeof(kData) - 1);
+    MinimalSyscallHandler handler;
+    HYPERION_CHECK(handler.adopt(3, ms.f));
+
+    FlatMemory memory = program({});
+    GuestState s = syscall_state(hyperion::sysno::kRead, {3, kBase + kMemSize + 4096, 4});
+    const auto r = handler.handle(s, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEfault));
+}
+
+HYPERION_TEST("syscall", "read_short_read_at_end_of_stream") {
+    static const char kData[] = "abc";
+    MemStream ms(kData, sizeof(kData) - 1);
+    MinimalSyscallHandler handler;
+    HYPERION_CHECK(handler.adopt(3, ms.f));
+
+    FlatMemory memory = program({});
+    // Ask for more than the stream holds: read(2) returns a short count, not an
+    // error.
+    GuestState s = syscall_state(hyperion::sysno::kRead, {3, kBase + 0x200, 100});
+    const auto r = handler.handle(s, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), std::uint64_t{3});
+}
+
+HYPERION_TEST("syscall", "close_drops_the_descriptor_but_not_the_stream") {
+    static const char kData[] = "hyperion";
+    MemStream ms(kData, sizeof(kData) - 1);
+    MinimalSyscallHandler handler;
+    HYPERION_CHECK(handler.adopt(3, ms.f));
+
+    FlatMemory memory = program({});
+    GuestState c = syscall_state(hyperion::sysno::kClose, {3});
+    HYPERION_CHECK(handler.handle(c, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(c.reg(Gpr::kRax), std::uint64_t{0});
+
+    // The descriptor is gone: a second close, or a read, is -EBADF.
+    GuestState c2 = syscall_state(hyperion::sysno::kClose, {3});
+    handler.handle(c2, memory);
+    HYPERION_CHECK_EQ(c2.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEbadf));
+
+    // The caller still owns the stream and can use it.
+    char buf[4] = {};
+    HYPERION_CHECK(std::fread(buf, 1, 3, ms.f) == 3);
+    HYPERION_CHECK(std::memcmp(buf, "hyp", 3) == 0);
+}
+
+HYPERION_TEST("syscall", "close_of_bad_fd_is_ebadf") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    GuestState s = syscall_state(hyperion::sysno::kClose, {42});
+    handler.handle(s, memory);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEbadf));
+}
+
+HYPERION_TEST("syscall", "lseek_repositions_an_adopted_stream") {
+    static const char kData[] = "hyperion";
+    MemStream ms(kData, sizeof(kData) - 1);
+    MinimalSyscallHandler handler;
+    HYPERION_CHECK(handler.adopt(3, ms.f));
+
+    FlatMemory memory = program({});
+    // Seek to offset 2 from the start: the next read sees "perion".
+    GuestState s = syscall_state(hyperion::sysno::kLseek, {3, 2, hyperion::seek::kSet});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), std::uint64_t{2});
+
+    GuestState rd = syscall_state(hyperion::sysno::kRead, {3, kBase + 0x300, 6});
+    handler.handle(rd, memory);
+    HYPERION_CHECK_EQ(rd.reg(Gpr::kRax), std::uint64_t{6});
+    std::uint8_t got[6] = {};
+    HYPERION_CHECK(memory.read(kBase + 0x300, got, 6));
+    HYPERION_CHECK(std::memcmp(got, "perion", 6) == 0);
+}
+
+HYPERION_TEST("syscall", "lseek_end_and_cur_whence_work") {
+    static const char kData[] = "hyperion";
+    MemStream ms(kData, sizeof(kData) - 1);
+    MinimalSyscallHandler handler;
+    HYPERION_CHECK(handler.adopt(3, ms.f));
+
+    FlatMemory memory = program({});
+    GuestState e = syscall_state(hyperion::sysno::kLseek, {3, 0, hyperion::seek::kEnd});
+    handler.handle(e, memory);
+    HYPERION_CHECK_EQ(e.reg(Gpr::kRax), std::uint64_t{8}); // size of the stream
+
+    GuestState c = syscall_state(hyperion::sysno::kLseek,
+                                 {3, static_cast<std::uint64_t>(-2), hyperion::seek::kCur});
+    handler.handle(c, memory);
+    HYPERION_CHECK_EQ(c.reg(Gpr::kRax), std::uint64_t{6});
+}
+
+HYPERION_TEST("syscall", "lseek_bad_whence_is_einval_and_bad_fd_is_ebadf") {
+    static const char kData[] = "hyperion";
+    MemStream ms(kData, sizeof(kData) - 1);
+    MinimalSyscallHandler handler;
+    HYPERION_CHECK(handler.adopt(3, ms.f));
+
+    FlatMemory memory = program({});
+    GuestState w = syscall_state(hyperion::sysno::kLseek, {3, 0, 99});
+    handler.handle(w, memory);
+    HYPERION_CHECK_EQ(w.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEinval));
+
+    GuestState b = syscall_state(hyperion::sysno::kLseek, {9, 0, hyperion::seek::kSet});
+    handler.handle(b, memory);
+    HYPERION_CHECK_EQ(b.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEbadf));
+}
+
+HYPERION_TEST("syscall", "adopt_refuses_an_occupied_descriptor") {
+    MinimalSyscallHandler handler; // fd 0/1/2 are the standard streams
+    HYPERION_CHECK(!handler.adopt(0, stdin));
+    HYPERION_CHECK(!handler.adopt(-1, stdin));
+    HYPERION_CHECK(!handler.adopt(3, nullptr));
+}
+
+HYPERION_TEST("syscall", "open_is_still_unimplemented") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    // open(2) is deliberately not implemented: the guest may read inherited
+    // descriptors but cannot open host files yet.
+    GuestState o = syscall_state(2, {kBase + 0x200, 0, 0});
+    const auto r = handler.handle(o, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kUnimplemented);
+    HYPERION_CHECK_EQ(o.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnosys));
 }
 
 // A guest program that mmaps a page and stores a byte through the returned

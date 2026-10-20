@@ -64,12 +64,14 @@ through either tier and the two must agree (`tests/cli/cli_smoke.sh`).
 Guest-register allocation now exists **within a block** (the hottest registers are
 held in callee-saved host registers, with a profitability guard that declines
 allocation on tiny blocks), but there is no cross-block allocation or spilling.
-The syscall layer exists but is a **first slice only**: `write`/`exit`/`exit_group`
-are implemented, everything else returns `-ENOSYS`. The guest stack
-(`push`/`pop`/`ret`) and memory operands are still *refused explicitly* rather than
-miscompiled, because they need a guest address space (Phase 6). The interpreter
-remains the only *complete* execution path. Phase 5 continues with block chaining;
-`STATUS.md` §4 lists the steps.
+The syscall layer exists and is a **partial slice**: `read`/`write`/`close`/
+`lseek`/`exit`/`exit_group` and `mmap`/`mprotect`/`munmap`/`brk` are implemented,
+everything else returns `-ENOSYS`. `open`/`openat` are deliberately not
+implemented, so a guest can read only descriptors the host adopted. The guest
+stack (`push`/`pop`/`ret`) and memory operands are still *refused explicitly*
+rather than miscompiled; memory operands need the code generator to emit
+loads/stores (Phase 6/7). The interpreter remains the only *complete* execution
+path. Phase 5 continues with block chaining; `STATUS.md` §4 lists the steps.
 
 **Two real defects were found and fixed in Phase 4**, both by testing: a block
 whose *first* instruction was unsupported was emitted empty and made the
@@ -158,12 +160,13 @@ build.
 **Phases 0–4 are closed. Phase 5 is active (six optimizations accepted and
 measured: parity fast path, dead-`rip` elimination, flag liveness, direct-mapped
 dispatch, ALU immediate folding, guest-register allocation). Phase 6's syscall
-inventory is complete and CI-validated, and **two** syscall slices are
-implemented and tested in both tiers: the first (`write`/`exit`/`exit_group`)
-and the second (the guest address space plus `mmap`/`mprotect`/`munmap`/`brk`).
-The next concrete step is file-descriptor syscalls (`read`/`openat`/`close`/
-`lseek`/`fstat`) over the existing address space, then memory operands in the
-code generator.** Guest state, the
+inventory is complete and CI-validated, and **three** syscall slices are
+implemented and tested in both tiers: the first (`write`/`exit`/`exit_group`),
+the second (the guest address space plus `mmap`/`mprotect`/`munmap`/`brk`), and
+the third (a guest descriptor table plus `read`/`close`/`lseek`).
+The next concrete step is `open`/`openat` and the file-inspection syscalls
+(`fstat`/`newfstatat`, `getdents64`) over the existing descriptor table, then
+memory operands in the code generator.** Guest state, the
 decoder, the reference interpreter, the subset contract (`COMPATIBILITY.md` §2),
 the hardware differential, the AArch64 encoder, executable memory,
 single-instruction translation, whole-block translation, the translation-cache
@@ -226,20 +229,30 @@ and pass.
    and `brk`(12) are implemented over it and marked `implemented` in the
    inventory. A file-backed `mmap` returns `-ENOSYS` **and** counts as
    unimplemented. Tested end-to-end (DECISIONS.md D-023).
-9. **Next (Phase 6): file descriptors and file syscalls.** Add `read`, `openat`,
-   `close`, `lseek`, `fstat`/`newfstatat` over the existing address space, so a
-   guest can read a file, not only print. Introduce a small fd table owned by the
-   handler (mirroring how `write` maps fd 1/2 to the host sink), validate every
-   guest buffer against the address space (`-EFAULT`), and return `-EBADF` as the
-   kernel does. Move each number's `status` in `docs/syscalls/inventory.tsv` to
+9. ~~Build a guest descriptor table and `read`/`close`/`lseek`.~~ **Done &
+   tested.** `MinimalSyscallHandler` owns a guest descriptor table (guest fd →
+   host `FILE*`) seeded with fd 0/1/2; `adopt()` attaches an already-open host
+   stream under another guest fd; a guest fd not in the table is `-EBADF`.
+   `read`(0), `close`(3) and `lseek`(8) are implemented and marked `implemented`
+   in the inventory. `open`/`openat` are deliberately deferred (DECISIONS.md
+   D-024). 11 new tests.
+10. **Next (Phase 6): `open`/`openat` and file inspection.** Add `openat` (and
+   the `fstat`/`newfstatat` guest `struct stat` layout, which differs from the
+   host's — the ABI-sensitive part), then `getdents64`/`access`/`readlink`, so a
+   guest can open and inspect a file, not only read an inherited descriptor.
+   Extend the existing descriptor table so `openat` allocates the lowest free
+   guest fd, and decide the path policy explicitly (sandbox root / allow-list)
+   rather than forwarding guest paths straight to the host. Validate every guest
+   buffer against the address space (`-EFAULT`), return `-EBADF`/`-ENOENT` as the
+   kernel does, move each number's `status` in `docs/syscalls/inventory.tsv` to
    `implemented`, regenerate (`python3 tools/gen_syscall_inventory.py`), add a
    focused test per call, and update STATUS.md §0e.
-10. **Then (Phase 6/7): memory operands in the code generator.** The AArch64
+11. **Then (Phase 6/7): memory operands in the code generator.** The AArch64
     generator is register-only (`translator.cpp validate_body` rejects any
     memory operand), so Tier 1 stops honestly at the first load/store. Every
     real program loads and stores, so this is the gating item for running
     anything nontrivial in Tier 1, and it pairs naturally with `read`/`openat`.
-11. **Also open (Phase 5): block chaining.** Today every block exit returns to
+12. **Also open (Phase 5): block chaining.** Today every block exit returns to
     the dispatcher for a lookup. Link a block's exit directly to its successor's
     generated code so a hot loop stays in generated code, guarded by the same
     authoritative-`rip` rule, with the dispatcher as the fallback for any
@@ -249,11 +262,11 @@ and pass.
     make a candidate look good. Add a deterministic guard for whatever the
     change should move (e.g. dispatcher lookups per run), since `qemu-user`
     timing is noisy (DECISIONS.md D-020).
-12. **Keep the oracle.** Run each multi-instruction program through both the
+13. **Keep the oracle.** Run each multi-instruction program through both the
     generated blocks and the interpreter's `run_program`, and require the final
     `GuestState` to match bit-for-bit. A mismatch must fail loudly; there is no
     tolerance for "close enough".
-13. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
+14. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
     pipeline builds the tests for AArch64, runs them under `qemu-user`, and runs
     the CLI smoke test with `HYPERION_EMULATOR`, so generated code is exercised in
     CI without the target device.

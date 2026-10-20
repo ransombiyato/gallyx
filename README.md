@@ -12,16 +12,18 @@ on other Linux hosts, so target-device compatibility is *measured, not
 assumed* — see [`docs/target-environment.md`](docs/target-environment.md).
 
 > **Status: Phase 5 (performance measurement and optimization) active; Phase 6
-> (Linux ABI and syscall compatibility) first slice implemented.** The repository
+> (Linux ABI and syscall compatibility) three slices implemented.** The repository
 > builds, its tests pass, and a documented subset of x86-64 instructions executes
 > through generated AArch64 code, verified against the reference interpreter
 > under `qemu-user`. There are **two execution tiers**: the reference interpreter
 > (Tier 0) and a translation cache that runs whole programs through generated
-> AArch64 code (Tier 1). A **first syscall slice** (`write`/`exit`/`exit_group`)
-> is implemented in both tiers; every other syscall returns `-ENOSYS`. There is
-> **no guest address space, no register allocation, no block chaining and no
-> cache invalidation yet**, so only hand-written raw blobs run — no real Linux
-> program does. See [`STATUS.md`](STATUS.md) for the exact current state and
+> AArch64 code (Tier 1). **Three syscall slices** are implemented in both tiers:
+> `write`/`exit`/`exit_group`; the guest address space with
+> `mmap`/`mprotect`/`munmap`/`brk`; and a guest descriptor table with
+> `read`/`close`/`lseek`. Every other syscall returns `-ENOSYS`. There is
+> **no `open`/`openat`, no block chaining and no cache invalidation yet**, so
+> only hand-written raw blobs run — no real Linux program does. See
+> [`STATUS.md`](STATUS.md) for the exact current state and
 > [`ROADMAP.md`](ROADMAP.md) for the staged plan.
 >
 > **Scope note (2026-10-19).** Kernel/system-mode emulation is no longer ruled
@@ -48,8 +50,11 @@ assumed* — see [`docs/target-environment.md`](docs/target-environment.md).
 | W^X executable memory | Implemented |
 | x86-64 → AArch64 instruction translation | **Partial** — register/immediate ALU ops only |
 | Multi-instruction program translation + code cache | Implemented (Phase 4) — block-at-a-time dispatcher |
-| Linux syscall layer | **Partial** (Phase 6) — `write`/`exit`/`exit_group`; `-ENOSYS` otherwise |
-| Guest address space (mmap/brk), register allocation, block chaining | **Not started** (Phase 5/6) |
+| Linux syscall layer | **Partial** (Phase 6) — `read`/`write`/`close`/`lseek`/`mmap`/`mprotect`/`munmap`/`brk`/`exit`/`exit_group`; `-ENOSYS` otherwise (no `open`/`openat`) |
+| Guest address space (mmap/brk) | **Implemented** (Phase 6) — permissioned regions, page-granular, reserved heap window |
+| Guest descriptor table (read/close/lseek) | **Implemented** (Phase 6) — handler-owned; `adopt()` attaches a host stream; no `open` yet |
+| Register allocation | **Implemented within a block** (Phase 5) — no cross-block allocation or spilling |
+| Block chaining, cache invalidation | **Not started** (Phase 5/7) |
 
 The translation row is deliberately narrow: the translator lowers a specific,
 listed set of instructions (`mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`,

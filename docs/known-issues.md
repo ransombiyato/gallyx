@@ -21,7 +21,7 @@ noted in `CHANGELOG.md`.
 
 | ID | Limitation | Notes |
 | --- | --- | --- |
-| LIM-002 | Syscall layer is a first slice only. | Phase 6. Only `write`(1), `exit`(60), `exit_group`(231) are implemented; every other number returns `-ENOSYS`. No guest address space yet (`mmap`/`brk`), so no dynamic program or loader runs. The inventory (`docs/syscalls/`) is complete and validated but does not imply implementation. |
+| LIM-002 | Syscall layer is a partial slice only. | Phase 6. Ten numbers are implemented: `read`(0), `write`(1), `close`(3), `lseek`(8), `mmap`(9), `mprotect`(10), `munmap`(11), `brk`(12), `exit`(60), `exit_group`(231); every other number returns `-ENOSYS`. `mmap` is anonymous-only; `read`/`close`/`lseek` act on a handler-owned guest descriptor table and **`open`/`openat` are not implemented**, so a guest can read only inherited/adopted descriptors. The inventory (`docs/syscalls/`) is complete and validated but does not imply implementation. |
 | LIM-003 | The translation cache **never invalidates**. | Self-modifying guest code runs stale translations. Deliberate boundary for the first version; precise invalidation is Phase 7. |
 | LIM-004 | `qemu-user` validates correctness, not performance. | Never quote qemu numbers as performance. |
 | LIM-005 | Benchmark harness measures host only. | `guest_execution.available = false` until a Tier 1/Tier 0 benchmark exists (D-009). No Tier-1 performance measurement exists yet. |
@@ -34,6 +34,7 @@ noted in `CHANGELOG.md`.
 | LIM-012 | **No block chaining.** | Every block exit returns to the dispatcher for a hash lookup. Correct but slow; Phase 5. |
 | LIM-013 | **Step-limit granularity differs between tiers.** | The interpreter steps one instruction at a time; the dispatcher runs whole blocks. On a step-limited run, tier 1 may stop a few instructions short of the limit (it never exceeds it). Only relevant to non-halting programs. |
 | LIM-014 | `qemu-user` runs generated code, but it is **not the reference device**. | No measurement exists on the Snapdragon 855 / Android 10 target. |
+| LIM-015 | **`open`/`openat` are not implemented.** | Phase 6. A guest cannot open a host file; it can only read descriptors the embedder adopted with `MinimalSyscallHandler::adopt()` (plus fd 0/1/2). The descriptor table maps to `FILE*`, so `O_NONBLOCK`, `O_APPEND`, `pread`/`pwrite`, `fcntl` and `dup` are not expressible yet (D-024). |
 
 ---
 

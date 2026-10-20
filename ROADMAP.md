@@ -3,19 +3,20 @@
 Staged plan for Project HYPERION. Each phase has **exit criteria that must be
 demonstrated by evidence**, not merely by the existence of code.
 
-Status legend: ✅ complete · 🔄 in progress · ⬜ not started
+Status legend: ✅ complete · 🟡 in progress · ⬜ not started
 
-**Overall: Phase 0 complete, Phase 1 next.**
+**Overall: Phase 0 complete; Phases 2–5 in progress; Phase 6 in progress
+(third syscall slice landed).**
 
 | Phase | Title | Status |
 | --- | --- | --- |
 | 0 | Project foundation | ✅ complete |
-| 1 | Establish the baseline | ⬜ not started |
-| 2 | Minimal instruction execution | ⬜ not started |
-| 3 | First native code generation | ⬜ not started |
-| 4 | Basic dynamic binary translator | ⬜ not started |
-| 5 | Performance measurement and optimization | ⬜ not started |
-| 6 | Linux ABI and syscall compatibility | ⬜ not started |
+| 1 | Establish the baseline | ✅ complete (UML item blocked, see note) |
+| 2 | Minimal instruction execution | 🟡 in progress |
+| 3 | First native code generation | 🟡 in progress |
+| 4 | Basic dynamic binary translator | 🟡 core done, closing out |
+| 5 | Performance measurement and optimization | 🟡 in progress |
+| 6 | Linux ABI and syscall compatibility | 🟡 in progress |
 | 7 | Advanced CPU compatibility | ⬜ not started |
 | 8 | AI optimization laboratory | ⬜ not started |
 | 9 | Real application compatibility | ⬜ not started |
@@ -281,7 +282,7 @@ optimization decisions.
 
 ---
 
-## Phase 6 — Linux ABI and syscall compatibility 🟡 (two slices implemented)
+## Phase 6 — Linux ABI and syscall compatibility 🟡 (three slices implemented)
 
 **Objective.** Run real Linux guest programs.
 
@@ -317,7 +318,19 @@ file descriptors, signals, threading, futexes. Feature matrix + integration test
   wrongly. Tested end-to-end: a guest program mmaps a page, stores through the
   returned pointer and the value is readable (Tier 0), and under Tier 1 the
   syscall is handled and the block stops honestly at the memory-operand store.
-- ⬜ File descriptors and the file syscalls (`read`/`openat`/`close`/…) — **next**.
+- ✅ **Guest descriptor table + `read`/`close`/`lseek`.** `MinimalSyscallHandler`
+  owns a guest descriptor table (guest fd → host `FILE*`); `read`(0), `close`(3)
+  and `lseek`(8) operate on it and are marked `implemented` in the inventory. A
+  guest fd that is not in the table is `-EBADF`, so a guest integer can never
+  name an arbitrary host descriptor. The table starts with fd 0/1/2 on the
+  process's stdin/stdout/stderr, and `adopt()` attaches an already-open host
+  stream under another guest fd (the handler never `fclose`s a borrowed stream).
+  `read` returns a short count at end-of-stream, `-EFAULT` on a bad guest buffer;
+  `lseek` returns `-ESPIPE` for a non-seekable stream and `-EINVAL` for a bad
+  `whence`. **`open`/`openat` are deliberately not implemented** (D-024), so a
+  guest can read inherited descriptors but cannot open host files yet.
+- ⬜ `open`/`openat` and the remaining file syscalls (`fstat`/`newfstatat`,
+  `getdents64`, …) — **next**.
 - ⬜ Signals, threads, futexes.
 
 **Exit criteria.** A clearly defined set of real Linux guest programs works

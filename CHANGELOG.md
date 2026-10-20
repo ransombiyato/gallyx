@@ -5,6 +5,43 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 6 (guest descriptor table + read/close/lseek)
+
+### Added — guest descriptor table (third syscall slice)
+- `MinimalSyscallHandler` now owns a **guest descriptor table**
+  (guest fd → host `FILE*`), so `read`/`close`/`lseek` operate on descriptors
+  the handler controls rather than on raw host fds. The table starts with
+  fd 0/1/2 on the process's stdin/stdout/stderr; `adopt(guest_fd, stream)`
+  attaches an already-open host stream under another guest fd. A guest fd that
+  is not in the table is `-EBADF`, so a guest can never name an arbitrary host
+  descriptor. The handler never `fclose`s a borrowed stream.
+- `read`(0): copies from an adopted stream into guest memory in 4 KiB chunks,
+  returning a short count at end-of-stream (as `read(2)` does), `-EBADF` for a
+  bad descriptor and `-EFAULT` for an out-of-range guest buffer.
+- `close`(3): drops the guest descriptor (does not close the borrowed stream).
+- `lseek`(8): `SEEK_SET`/`SEEK_CUR`/`SEEK_END` over an adopted stream;
+  `-ESPIPE` for a non-seekable stream, `-EINVAL` for a bad `whence`.
+- `docs/syscalls/inventory.tsv` moves `read`(0), `close`(3) and `lseek`(8) from
+  `not-started` to `implemented`; `docs/syscalls/` regenerated.
+- New errno constants `kEperm`, `kEnoent`, `kEio`, `kEspipe`.
+- Tests: `syscall.read_copies_from_adopted_stream_into_guest_memory`,
+  `syscall.read_of_bad_fd_is_ebadf`, `syscall.read_out_of_range_buffer_is_efault`,
+  `syscall.read_short_read_at_end_of_stream`,
+  `syscall.close_drops_the_descriptor_but_not_the_stream`,
+  `syscall.close_of_bad_fd_is_ebadf`, `syscall.lseek_repositions_an_adopted_stream`,
+  `syscall.lseek_end_and_cur_whence_work`,
+  `syscall.lseek_bad_whence_is_einval_and_bad_fd_is_ebadf`,
+  `syscall.adopt_refuses_an_occupied_descriptor`,
+  `syscall.open_is_still_unimplemented`.
+
+### Not added (stated, not implied)
+- `open`/`openat` remain **unimplemented**: a guest can read inherited
+  descriptors but cannot open host files. The descriptor table maps to `FILE*`,
+  so `O_NONBLOCK`, `O_APPEND`, `pread`/`pwrite`, `fcntl` and `dup` are also not
+  expressible yet.
+
+---
+
 ## [Unreleased] — Phase 6 (guest address space + memory syscalls)
 
 ### Added — guest address space (DECISIONS.md D-023)

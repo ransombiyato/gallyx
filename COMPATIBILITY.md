@@ -4,10 +4,11 @@ Tracks implemented versus missing instruction and ABI features.
 
 > **Status:** a small, documented instruction subset is implemented and tested
 > (§2). Everything else is explicitly rejected. AArch64 code generation, a
-> block-at-a-time translation cache, a guest address space, and two syscall
-> slices (`write`/`exit`/`exit_group`; `mmap`/`mprotect`/`munmap`/`brk`) exist;
-> register allocation is implemented, while memory operands in the code
-> generator, block chaining and file I/O syscalls do not (§5).
+> block-at-a-time translation cache, a guest address space, and three syscall
+> slices (`write`/`exit`/`exit_group`; `mmap`/`mprotect`/`munmap`/`brk`;
+> `read`/`close`/`lseek` over a guest descriptor table) exist; register
+> allocation is implemented, while memory operands in the code generator, block
+> chaining and `open`/`openat` do not (§5).
 
 Legend: ✅ implemented + tested · 🟡 implemented, untested · 🧪 prototype · ❌ unsupported (explicit) · ⬜ planned
 
@@ -201,14 +202,24 @@ Phase 6/7.
 
 ## 5. Linux ABI / syscall coverage
 
-Phase 6, second slice. The `syscall` instruction is decoded and routed through
-`SyscallHandler` in both tiers. **Seven syscalls are implemented** (`write`,
-`mmap`, `mprotect`, `munmap`, `brk`, `exit`, `exit_group`); every other number
-returns `-ENOSYS` explicitly (never a silent success) and is counted in
-`RunResult::unimplemented_syscalls`. Guest pointers are validated against the
-mapped region (`-EFAULT`), so a guest can never read host memory.
-Per-syscall status lives in `docs/syscalls/inventory.tsv` (the canonical source);
-this table is the summary.
+Phase 6, third slice. The `syscall` instruction is decoded and routed through
+`SyscallHandler` in both tiers. **Ten syscalls are implemented** (`read`,
+`write`, `close`, `lseek`, `mmap`, `mprotect`, `munmap`, `brk`, `exit`,
+`exit_group`); every other number returns `-ENOSYS` explicitly (never a silent
+success) and is counted in `RunResult::unimplemented_syscalls`. Guest pointers
+are validated against the mapped region (`-EFAULT`), so a guest can never read
+host memory. Per-syscall status lives in `docs/syscalls/inventory.tsv` (the
+canonical source); this table is the summary.
+
+`read`/`close`/`lseek` operate on a **guest descriptor table** owned by the
+handler, not on host file descriptors: the handler maps guest fd → host stream
+and refuses a guest fd that is not in the table with `-EBADF`, so a guest cannot
+name an arbitrary host descriptor. The table starts with fd 0/1/2 on the
+process's stdin/stdout/stderr, and an embedder can attach an already-open stream
+under another guest fd with `MinimalSyscallHandler::adopt()`. **`open`/`openat`
+are deliberately not implemented**, so a guest can read inherited descriptors but
+cannot open host files yet; the borrowed host stream is never `fclose`d by the
+handler.
 
 `mmap` is **anonymous-only**: a request without `MAP_ANONYMOUS` is reported
 unimplemented (and counted as such), not mapped incorrectly. `mprotect`/`munmap`
@@ -221,10 +232,13 @@ rule.
 | Syscall number + argument marshalling (`rdi,rsi,rdx,r10,r8,r9` → `rax`) | ✅ | 6 | `syscall.*` |
 | `exit`(60), `exit_group`(231) | ✅ | 6 | `syscall.exit_reports_code_*`, `interpreter.syscall_write_then_exit_*` |
 | `write`(1) | ✅ | 6 | `syscall.write_*`, `translation_cache.tier1_syscall_*` |
+| `read`(0) over a guest descriptor table | ✅ | 6 | `syscall.read_copies_from_adopted_stream_*`, `syscall.read_short_read_*`, `syscall.read_*_ebadf`/`_efault` |
+| `close`(3) | ✅ | 6 | `syscall.close_drops_the_descriptor_but_not_the_stream`, `syscall.close_of_bad_fd_is_ebadf` |
+| `lseek`(8) | ✅ | 6 | `syscall.lseek_repositions_*`, `syscall.lseek_end_and_cur_whence_work`, `syscall.lseek_bad_whence_*` |
 | Unknown number → `-ENOSYS` | ✅ | 6 | `syscall.unknown_number_is_enosys_not_silent` |
 | `brk`(12) over the guest heap | ✅ | 6 | `syscall.brk_returns_the_new_break` |
 | `mmap`(9) anonymous, `mprotect`(10), `munmap`(11) | ✅ (anonymous only) | 6 | `syscall.mmap_*`, `syscall.mprotect_*`, `syscall.munmap_*`, `syscall.mmap_end_to_end_*` |
-| `read`, `close`, `open`, `openat` | ⬜ | 6 | — |
+| `open`, `openat`, `openat2` | ⬜ | 6 | — |
 | `mmap` file-backed, `MAP_SHARED` | ⬜ | 6 | — |
 | `stat`/`fstat`/`lstat`/`*statat` (struct layout differences) | ⬜ | 6 | — |
 | `arch_prctl` (FS/GS base, TLS) | ⬜ | 6 | — |

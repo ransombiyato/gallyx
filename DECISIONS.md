@@ -577,3 +577,36 @@ separately (`MemResult`): a file-backed `mmap` returns a negative value that is
 never be silently reported as support. The `FlatMemory` type remains for tests
 of the interpreter and decoder; it is not the guest address space.
 
+
+---
+
+## D-024 — Guest file descriptors are a handler-owned table of borrowed host streams, and `open` is deferred
+
+**Context.** The second syscall slice gave the guest memory (`mmap`/`brk`) but
+no way to read or write a file beyond `write` to fd 1/2. Real programs read
+their input, so the next U4 numbers are `read`(0), `close`(3) and `lseek`(8).
+The question is what a "guest file descriptor" is when the guest runs
+in-process with no kernel: the handler could forward the guest's integer
+straight to the host kernel (fast, but the guest can then name any host
+descriptor the process happens to hold — a real capability leak), or it could
+own an explicit mapping.
+
+**Decision.** The handler owns an explicit **guest descriptor table**
+(`guest fd -> host FILE*`). `read`/`close`/`lseek` look the guest fd up in the
+table; a fd that is not present is `-EBADF`. The table starts with fd 0/1/2 on
+the process's stdin/stdout/stderr, and the embedder can attach an already-open
+host stream under another guest fd with `MinimalSyscallHandler::adopt()`. The
+handler does **not** own the streams: `close` removes the guest's view of a
+descriptor but never `fclose`s the borrowed stream.
+
+`open`/`openat` are deliberately **deferred**: adding them means the guest
+chooses the host path, which is a policy decision (sandbox root, allow-list,
+`AT_FDCWD` handling) that deserves its own increment rather than being smuggled
+in with `read`. Until then a guest can read only descriptors the host adopted.
+
+**Consequences.** A guest integer can never name an arbitrary host descriptor:
+the table is the boundary. The trade-off is expressiveness — a `FILE*` table
+cannot represent `O_NONBLOCK`, `O_APPEND`, `pread`/`pwrite`, `fcntl` or `dup`,
+which is acceptable while `open` is absent and will be revisited when it lands.
+`read` validates the guest destination through the same `Memory` interface as
+`write`, so a bad pointer is `-EFAULT`, not a host read.

@@ -79,6 +79,13 @@ and `brk`(12), also in both tiers. These four are marked `implemented` with a
 stated scope: `mmap` supports **anonymous** mappings only (a file-backed request
 returns `-ENOSYS` and is counted as unimplemented), and `munmap`/`mprotect`
 require the range to be fully mapped (partial unmapping is not supported yet).
+The third slice added a guest descriptor table and `read`(0), `close`(3) and
+`lseek`(8). The descriptor table starts with fd 0/1/2 on the process's
+stdin/stdout/stderr; an embedder can attach an already-open stream under another
+guest fd with `MinimalSyscallHandler::adopt()`. `open`/`openat` are deliberately
+**not** implemented, so a guest can read inherited descriptors but cannot open
+host files yet. `close` drops the guest descriptor without closing the borrowed
+host stream.
 Every other number returns `-ENOSYS` and is counted in
 `RunResult::unimplemented_syscalls`. The inventory is complete and validated, but
 a complete inventory is *not* implementation; the `status` column is the only

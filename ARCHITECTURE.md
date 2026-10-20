@@ -207,14 +207,24 @@ Guest `syscall` instructions are intercepted and translated. The layer owns:
 - signals, threads (`clone`), futexes, and `rseq`.
 
 **Implemented so far.** `SyscallHandler` (`include/hyperion/syscall.hpp`) is the
-interface both tiers call. `MinimalSyscallHandler` implements `write`,
-`exit`/`exit_group`, and `mmap`/`mprotect`/`munmap`/`brk`; every other number
-returns `-ENOSYS`. The memory syscalls act on a `GuestAddressSpace`
+interface both tiers call. `MinimalSyscallHandler` implements `read`,
+`write`, `close`, `lseek`, `exit`/`exit_group`, and
+`mmap`/`mprotect`/`munmap`/`brk`; every other number returns `-ENOSYS`. The
+memory syscalls act on a `GuestAddressSpace`
 (`include/hyperion/address_space.hpp`) supplied by the caller, not a hidden
 global, so the same address space is shared with the interpreter or translation
 cache. The handler reads `rax` for the number, reads the argument registers,
 validates guest pointers against the address space, and writes `rax`. The guest
 never receives a raw host pointer.
+
+The file-descriptor syscalls act on a **guest descriptor table** the handler
+owns (guest fd → host `FILE*`), not on host file descriptors. A guest fd that is
+not in the table is `-EBADF`, so a guest integer can never name an arbitrary host
+descriptor. The table starts with fd 0/1/2 on the process's stdin/stdout/stderr;
+`MinimalSyscallHandler::adopt()` attaches an already-open host stream under
+another guest fd. The handler does not own the streams and never `fclose`s them.
+`open`/`openat` are deliberately not implemented yet (see `DECISIONS.md` D-024),
+so a guest can read only descriptors the host adopted.
 
 Compatibility is claimed only via the feature matrix in
 [`COMPATIBILITY.md`](COMPATIBILITY.md) backed by integration tests. A handful

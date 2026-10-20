@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Project HYPERION contributors
 //
-// Minimal guest syscall handler (Phase 6, increment 1). See syscall.hpp for the
-// scope and the error convention.
+// Minimal guest syscall handler (Phase 6). See syscall.hpp for the scope and
+// the error convention.
 #include "hyperion/syscall.hpp"
 
-#include <unistd.h>
-
 #include <array>
-#include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <utility>
+#include <vector>
 
 namespace hyperion {
 
@@ -80,6 +79,97 @@ long default_sink(int fd, const std::uint8_t* data, std::size_t count) {
     const std::size_t wrote = std::fwrite(data, 1, count, out);
     std::fflush(out);
     return static_cast<long>(wrote);
+}
+
+// read(fd, buf, count): read `count` guest bytes from the adopted host stream
+// into guest memory. A guest pointer the memory model rejects yields -EFAULT; a
+// descriptor that is not in the table yields -EBADF. The host read is bounded
+// by the chunk size so a huge `count` cannot ask for one unbounded allocation.
+std::int64_t do_read(GuestState& s, Memory& memory, const std::vector<std::FILE*>& files) {
+    const std::int64_t fd = static_cast<std::int64_t>(arg(s, 0));
+    const std::uint64_t buf = arg(s, 1);
+    const std::uint64_t count = arg(s, 2);
+
+    if (fd < 0 || static_cast<std::size_t>(fd) >= files.size() || files[fd] == nullptr) {
+        return -kEbadf;
+    }
+    if (count == 0) {
+        return 0;
+    }
+
+    // Read in bounded chunks and copy each chunk into the guest address space.
+    // The Memory interface cannot validate a range without touching it, so a
+    // fault on the *destination* is discovered when the first chunk is stored;
+    // at that point any bytes already read from the stream are consumed (a real
+    // kernel would fault before reading, but this is a documented limitation of
+    // the chunked approach, not a silent wrong answer: the guest gets -EFAULT).
+    constexpr std::size_t kChunk = 4096;
+    std::array<std::uint8_t, kChunk> chunk{};
+    std::uint64_t done = 0;
+    while (done < count) {
+        const std::size_t n =
+            static_cast<std::size_t>((count - done) < kChunk ? (count - done) : kChunk);
+        const std::size_t got = std::fread(chunk.data(), 1, n, files[static_cast<std::size_t>(fd)]);
+        if (got == 0) {
+            break; // EOF or error: a short read is the result, as with read(2)
+        }
+        if (!memory.write(buf + done, chunk.data(), got)) {
+            return -kEfault;
+        }
+        done += got;
+        if (got < n) {
+            break; // short read: the stream is exhausted
+        }
+    }
+    return static_cast<std::int64_t>(done);
+}
+
+// close(fd): drop the guest descriptor. The handler does not own the underlying
+// host stream, so it is not fclose'd (the embedder does that); it is only
+// removed from the guest's view.
+std::int64_t do_close(GuestState& s, std::vector<std::FILE*>& files) {
+    const std::int64_t fd = static_cast<std::int64_t>(arg(s, 0));
+    if (fd < 0 || static_cast<std::size_t>(fd) >= files.size() || files[fd] == nullptr) {
+        return -kEbadf;
+    }
+    files[static_cast<std::size_t>(fd)] = nullptr;
+    return 0;
+}
+
+// lseek(fd, offset, whence): reposition an adopted stream. Only seekable
+// streams are supported; a pipe/terminal (stdin from a tty) is ESPIPE, exactly
+// as the kernel reports. A negative resulting offset is EINVAL.
+std::int64_t do_lseek(GuestState& s, const std::vector<std::FILE*>& files) {
+    const std::int64_t fd = static_cast<std::int64_t>(arg(s, 0));
+    const std::int64_t offset = static_cast<std::int64_t>(arg(s, 1));
+    const std::uint64_t whence = arg(s, 2);
+
+    if (fd < 0 || static_cast<std::size_t>(fd) >= files.size() || files[fd] == nullptr) {
+        return -kEbadf;
+    }
+    int host_whence = 0;
+    switch (whence) {
+    case seek::kSet:
+        host_whence = SEEK_SET;
+        break;
+    case seek::kCur:
+        host_whence = SEEK_CUR;
+        break;
+    case seek::kEnd:
+        host_whence = SEEK_END;
+        break;
+    default:
+        return -kEinval;
+    }
+    std::FILE* f = files[static_cast<std::size_t>(fd)];
+    if (std::fseek(f, static_cast<long>(offset), host_whence) != 0) {
+        return -kEspipe; // not seekable (pipe/tty), or an invalid position
+    }
+    const long pos = std::ftell(f);
+    if (pos < 0) {
+        return -kEinval;
+    }
+    return static_cast<std::int64_t>(pos);
 }
 
 // Translate the guest PROT_* bits into the address space's MemPerm. Unknown bits
@@ -167,7 +257,28 @@ MemResult do_brk(GuestState& s, GuestAddressSpace& as) {
 } // namespace
 
 MinimalSyscallHandler::MinimalSyscallHandler(OutputSink sink, GuestAddressSpace* address_space)
-    : sink_(sink ? std::move(sink) : OutputSink(default_sink)), address_space_(address_space) {}
+    : sink_(sink ? std::move(sink) : OutputSink(default_sink)), address_space_(address_space) {
+    // The standard descriptors exist from the start, as they do for a real
+    // process: 0 = stdin, 1 = stdout, 2 = stderr. `write` still routes 1/2 to the
+    // sink; `read`/`lseek` use the stream table, so a guest that reads fd 0 gets
+    // the process's stdin (which a test can replace with adopt()).
+    files_ = {stdin, stdout, stderr};
+}
+
+bool MinimalSyscallHandler::adopt(int guest_fd, std::FILE* stream) {
+    if (guest_fd < 0 || stream == nullptr) {
+        return false;
+    }
+    const auto idx = static_cast<std::size_t>(guest_fd);
+    if (idx < files_.size() && files_[idx] != nullptr) {
+        return false; // already occupied
+    }
+    if (idx >= files_.size()) {
+        files_.resize(idx + 1, nullptr);
+    }
+    files_[idx] = stream;
+    return true;
+}
 
 SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
     SyscallResult result;
@@ -176,6 +287,24 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
     switch (result.number) {
     case sysno::kWrite: {
         const std::int64_t r = do_write(state, memory, sink_);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kRead: {
+        const std::int64_t r = do_read(state, memory, files_);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kClose: {
+        const std::int64_t r = do_close(state, files_);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kLseek: {
+        const std::int64_t r = do_lseek(state, files_);
         state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
         result.status = SyscallStatus::kHandled;
         return result;
@@ -230,7 +359,8 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
 }
 
 bool is_minimal_syscall(std::uint64_t number) {
-    return number == sysno::kWrite || number == sysno::kExit || number == sysno::kExitGroup ||
+    return number == sysno::kRead || number == sysno::kWrite || number == sysno::kClose ||
+           number == sysno::kLseek || number == sysno::kExit || number == sysno::kExitGroup ||
            number == sysno::kMmap || number == sysno::kMprotect || number == sysno::kMunmap ||
            number == sysno::kBrk;
 }

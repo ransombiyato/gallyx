@@ -36,13 +36,18 @@ works, what was last verified, and what to do next.
 | 6. Explicit `-ENOSYS` for every other number | **Implemented** — never silently succeeds; counted in `RunResult::unimplemented_syscalls` |
 | 7. Guest address space (`GuestAddressSpace`) | **Done & tested** — `include/hyperion/address_space.hpp`, `src/core/address_space.cpp`; per-region permissions, page-granular checks, heap reserved at construction |
 | 8. `mmap`/`mprotect`/`munmap`/`brk` over the address space (second slice) | **Implemented** — anonymous `mmap` only; file-backed requests return `-ENOSYS` and count as unimplemented |
-| 9. Broader syscall coverage (`read`/`openat`/`close`/…) | **Not started** — next slice |
+| 9. Guest descriptor table + `read`(0)/`close`(3)/`lseek`(8) (third slice) | **Implemented & tested** — `MinimalSyscallHandler::adopt()` attaches an already-open host stream under a guest fd; `open`/`openat` deliberately not implemented |
+| 10. Broader syscall coverage (`openat`/`stat`/`arch_prctl`/…) | **Not started** — next slice |
 
-**Implemented-syscall status (verified).** Seven numbers are implemented today:
-`write`(1), `mmap`(9), `mprotect`(10), `munmap`(11), `brk`(12), `exit`(60),
-`exit_group`(231). Everything else returns `-ENOSYS`. `mmap` is scoped: anonymous
-private mappings only. `mprotect`/`munmap` require a fully-mapped, page-aligned
-range. The inventory marks these seven `implemented` and all others
+**Implemented-syscall status (verified).** Ten numbers are implemented today:
+`read`(0), `write`(1), `close`(3), `lseek`(8), `mmap`(9), `mprotect`(10),
+`munmap`(11), `brk`(12), `exit`(60), `exit_group`(231). Everything else returns
+`-ENOSYS`. `mmap` is scoped: anonymous private mappings only.
+`mprotect`/`munmap` require a fully-mapped, page-aligned range. `read`/`close`/
+`lseek` operate on a handler-owned guest descriptor table (guest fd → host
+stream); the handler never `fclose`s a borrowed stream, and `open`/`openat` are
+not implemented, so a guest can read inherited descriptors but cannot open host
+files yet. The inventory marks these ten `implemented` and all others
 `not-started`; the validator enforces the status vocabulary.
 
 **Address-space facts (verified).** `GuestAddressSpace` is the guest's virtual
@@ -355,9 +360,22 @@ guest programs block by block, keyed by guest PC. The `hyperion run --tier=0|1`
 command runs a raw x86-64 blob through either tier, and the two tiers are
 required to agree. Whole-program differentials (a counted loop, taken and
 not-taken conditional branches) pass under `qemu-user`. There is still **no
-block chaining, no register allocation, no cache invalidation and no syscall
-layer**. The guest stack and memory operands are refused explicitly rather than
-miscompiled, and the interpreter remains the only *complete* execution path.
+block chaining and no cache invalidation**; guest-register allocation exists
+**within a block** (Phase 5). The guest stack and memory operands are refused
+explicitly rather than miscompiled, and the interpreter remains the only
+*complete* execution path.
+
+Phase 5 has six accepted, measured optimizations (parity fast path, dead-`rip`
+elimination, flag liveness, direct-mapped dispatch, ALU immediate folding,
+guest-register allocation), each judged on deterministic evidence as well as
+timing (BENCHMARKS.md §4.2).
+
+Phase 6 has three syscall slices implemented in both tiers over a
+`GuestAddressSpace`: `write`/`exit`/`exit_group`; `mmap`/`mprotect`/`munmap`/`brk`
+(anonymous `mmap` only); and a handler-owned guest descriptor table with
+`read`/`close`/`lseek`. `open`/`openat` are deliberately **not** implemented, so a
+guest can read only descriptors the host adopted; every other number returns
+`-ENOSYS` and is counted, never silently ignored.
 
 The project also installs with a single command:
 
@@ -392,9 +410,12 @@ main path, and Phases 2-5 still build it.
 
 Re-verified from a clean tree on 2026-10-19, host: x86-64, Debian 13 (trixie),
 GCC 14.2.0, Clang 19.1.7, CMake 3.31.6, Ninja 1.12.1, qemu-aarch64 10.0.13,
-aarch64-linux-gnu-g++ 14.2.0. Re-verified again after the Phase 6 increment 2
-commit `454c546` (guest address space + memory syscalls): native 125/0,
-cross 140/0 under `qemu-user`, ASan/UBSan 9/9, CI run `39410940495` green.
+aarch64-linux-gnu-g++ 14.2.0. Re-verified again after the Phase 6 increment 3
+commit (guest descriptor table + `read`/`close`/`lseek`): native 136/0,
+cross 153/0 under `qemu-user`, ASan/UBSan 9/9, syscall filter 30/30.
+Previously, after increment 2 (guest address space + memory syscalls,
+commit `454c546`): native 125/0, cross 140/0, ASan/UBSan 9/9, CI run
+`39410940495` green.
 
 > **Environment note (important for the next agent).** This environment does
 > **not** persist `/usr` between sessions. A new container starts with *no*
@@ -414,14 +435,14 @@ cross 140/0 under `qemu-user`, ASan/UBSan 9/9, CI run `39410940495` green.
 | Check | Command | Result |
 | --- | --- | --- |
 | Native build (`-Werror`) | `cmake --build build/dev` | PASS — no warnings |
-| Native tests | `ctest --test-dir build/dev` | PASS — **9/9** entries (125 unit cases + 8 differential) |
+| Native tests | `ctest --test-dir build/dev` | PASS — **9/9** entries (136 unit cases + 8 differential) |
 | Differential vs. hardware | `./build/dev/tests/hyperion_differential_tests` | PASS — 8/8 compared against real x86-64 |
 | CLI smoke (both tiers) | `ctest --test-dir build/dev -R cli.smoke` | PASS — tiers agree, `steps=17` |
-| Syscall layer (decode/handler/interpreter) | `hyperion_unit_tests --filter=syscall` | PASS — includes the memory-syscall cases and the mmap end-to-end test |
+| Syscall layer (decode/handler/interpreter) | `hyperion_unit_tests --filter=syscall` | PASS — **30/30** cases (write/exit, memory syscalls, fd syscalls, mmap end-to-end) |
 | Guest address space | `hyperion_unit_tests --filter=address_space` | PASS — map/read/write, permission denial, brk growth, page-granular checks |
 | Syscall inventory validator | `python3 tools/gen_syscall_inventory.py --check` | PASS — inventory complete, consistent, valid |
-| Cross build | `cmake --build build/cross-aarch64` | PASS — AArch64 binaries produced |
-| Cross tests under qemu | `ctest --test-dir build/cross-aarch64` | PASS — **10/10** (140 passed, 0 failed, 2 skipped unit cases) |
+| Cross build | `cmake --build build/cross-test` | PASS — AArch64 binaries produced |
+| Cross tests under qemu | `ctest --test-dir build/cross-test` | PASS — **5/5** (153 passed, 0 failed, 2 skipped unit cases) |
 | Tier 1 syscall path (AArch64) | `translation_cache.tier1_syscall_write_matches_interpreter` under qemu | PASS — generated code returns `kSyscall`, dispatcher handles it |
 | AArch64 differential | `qemu-aarch64 .../hyperion_differential_tests` | SKIP — 0 passed, **8 skipped** (no x86-64 oracle) |
 | Translator blocks vs. interpreter (AArch64) | `translator.block_*` under qemu | PASS — block cuts at terminators/unsupported/buffer end |
@@ -448,12 +469,14 @@ cross 140/0 under `qemu-user`, ASan/UBSan 9/9, CI run `39410940495` green.
 | UML feasibility (smoke) | `experiments/uml/run.sh smoke` | PASS — kernel boots unprivileged; all 6 namespace types OK |
 | UML feasibility (systemd) | `experiments/uml/run.sh systemd` | PASS — systemd 257 as PID 1 → `multi-user.target` |
 
-The native suite is 9 CTest entries: `unit.native` (one entry running **125**
+The native suite is 9 CTest entries: `unit.native` (one entry running **136**
 unit test cases across 12 files), `differential.native_vs_interpreter` (**8**
 cases compared against real x86-64 hardware), `syscall.inventory_valid`,
-`cli.smoke`, `bench.smoke`, `bench.methodology`, `bench.timing_not_eliminated`
-and `bench.rejects_single_sample`. The cross build has 10 entries (the same set
-plus `cross.aarch64_tests`, which runs **140** unit cases under `qemu-user`).
+`cli.smoke`, `tier_bench.smoke`, `bench.smoke`, `bench.methodology`,
+`bench.timing_not_eliminated` and `bench.rejects_single_sample`. The cross build
+(`build/cross-test`) has 5 entries: `unit.native`, `cli.smoke`,
+`differential.native_vs_interpreter`, `cross.aarch64_tests` (which runs **153**
+unit cases under `qemu-user`) and `syscall.inventory_valid`.
 
 ### Remote verification (GitHub Actions)
 
@@ -554,6 +577,21 @@ stable-vs-noisy discrimination case).
     `mmap`, which is unbounded up to the allocator cursor.
   - There is no demand-zero fault delivery to the guest: the address space is
     fully backed in host memory when mapped, not lazily.
+- **Known limitations of the guest descriptor table (`read`/`close`/`lseek`):**
+  - **`open`/`openat` are not implemented.** The guest can read only descriptors
+    the embedder adopted with `adopt()` (plus fd 0/1/2). It cannot open a host
+    file itself. This is the deliberate boundary that keeps guest file access
+    under host control; the next slice adds `openat`.
+  - The table maps guest fd → `FILE*` (a `stdio` stream), not a raw host fd, so
+    the handler cannot express `O_NONBLOCK`, `O_APPEND`, `pread`/`pwrite`,
+    `fcntl`, or `dup`. Those arrive with `openat`.
+  - `close` drops the guest descriptor but does **not** `fclose` the borrowed
+    host stream: the handler does not own it, the embedder does. A guest that
+    closes fd 3 cannot thereby close a host resource.
+  - `read` copies in 4 KiB chunks and, if the guest destination faults mid-way,
+    returns `-EFAULT` after the bytes already read are consumed from the stream
+    (documented in `do_read`); a real kernel faults before reading.
+  - A guest fd that is not in the table is `-EBADF`, never a host descriptor.
 - **Known limitation of Tier 1 (the code generator):** it is **register-only**.
   Any instruction with a memory operand is rejected (`translator.cpp
   validate_body`) and the block stops with `kUnsupported` rather than emitting
@@ -581,20 +619,22 @@ stable-vs-noisy discrimination case).
 
 ## 4. Immediate next task
 
-**Phase 6's second syscall slice (the guest address space plus
-`mmap`/`mprotect`/`munmap`/`brk`) is implemented and tested in both tiers.
-Phase 5 has six accepted, measured optimizations (BENCHMARKS.md §4.2.1–4.2.6),
-all deterministic-evidence based.**
+**Phase 6's third syscall slice (a guest descriptor table plus
+`read`/`close`/`lseek`) is implemented and tested in both tiers. Phase 5 has six
+accepted, measured optimizations (BENCHMARKS.md §4.2.1–4.2.6), all
+deterministic-evidence based.**
 
 The single best next action (Phase 6, extend coverage in U4 order):
 
-- **Add `read`, `openat`, `close`, `lseek`, `fstat`/`newfstatat`** over the
-  existing `GuestAddressSpace`, so a guest can read a file, not only print.
-  These are the next most-frequent U4 numbers after the memory group
-  (`docs/syscalls/U4.md`). Introduce a small file-descriptor table (fd → host
-  `FILE*`/fd) owned by the handler, mirroring how `write` already maps guest
-  fd 1/2 to the host sink; validate every guest buffer pointer against the
-  address space before use; return `-EBADF`/`-EFAULT` exactly as the kernel
+- **Add `openat` (or `open`), then `fstat`/`newfstatat`, then the remaining U4
+  readers** (`getdents64`, `access`, `readlink`, `getrandom`, `set_tid_address`,
+  `rseq`, `prlimit64`), so a guest can open and inspect a file, not only read an
+  inherited descriptor. `read`/`close`/`lseek` now exist and are wired to a
+  handler-owned descriptor table; extend the same table so `openat` allocates a
+  new guest fd (lowest free slot, as the kernel does) and `fstat` reports the
+  guest `struct stat` layout (which differs from the host's — that is the
+  ABI-sensitive part). Validate every guest buffer pointer against the address
+  space before use; return `-EBADF`/`-EFAULT`/`-ENOENT` exactly as the kernel
   does. Move each number's `status` in `docs/syscalls/inventory.tsv` from
   `not-started` to `implemented`, regenerate the docs
   (`python3 tools/gen_syscall_inventory.py`), add a focused test per call, and

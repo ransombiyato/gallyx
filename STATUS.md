@@ -392,7 +392,9 @@ main path, and Phases 2-5 still build it.
 
 Re-verified from a clean tree on 2026-10-19, host: x86-64, Debian 13 (trixie),
 GCC 14.2.0, Clang 19.1.7, CMake 3.31.6, Ninja 1.12.1, qemu-aarch64 10.0.13,
-aarch64-linux-gnu-g++ 14.2.0.
+aarch64-linux-gnu-g++ 14.2.0. Re-verified again after the Phase 6 increment 2
+commit `454c546` (guest address space + memory syscalls): native 125/0,
+cross 140/0 under `qemu-user`, ASan/UBSan 9/9, CI run `39410940495` green.
 
 > **Environment note (important for the next agent).** This environment does
 > **not** persist `/usr` between sessions. A new container starts with *no*
@@ -412,13 +414,14 @@ aarch64-linux-gnu-g++ 14.2.0.
 | Check | Command | Result |
 | --- | --- | --- |
 | Native build (`-Werror`) | `cmake --build build/dev` | PASS — no warnings |
-| Native tests | `ctest --test-dir build/dev` | PASS — **9/9** entries (101 unit cases + 8 differential) |
+| Native tests | `ctest --test-dir build/dev` | PASS — **9/9** entries (125 unit cases + 8 differential) |
 | Differential vs. hardware | `./build/dev/tests/hyperion_differential_tests` | PASS — 8/8 compared against real x86-64 |
 | CLI smoke (both tiers) | `ctest --test-dir build/dev -R cli.smoke` | PASS — tiers agree, `steps=17` |
-| Syscall layer (decode/handler/interpreter) | `hyperion_unit_tests --filter=syscall` | PASS — **11/11** new cases |
+| Syscall layer (decode/handler/interpreter) | `hyperion_unit_tests --filter=syscall` | PASS — includes the memory-syscall cases and the mmap end-to-end test |
+| Guest address space | `hyperion_unit_tests --filter=address_space` | PASS — map/read/write, permission denial, brk growth, page-granular checks |
 | Syscall inventory validator | `python3 tools/gen_syscall_inventory.py --check` | PASS — inventory complete, consistent, valid |
 | Cross build | `cmake --build build/cross-aarch64` | PASS — AArch64 binaries produced |
-| Cross tests under qemu | `ctest --test-dir build/cross-aarch64` | PASS — **10/10** (117 passed, 0 failed, 2 skipped unit cases) |
+| Cross tests under qemu | `ctest --test-dir build/cross-aarch64` | PASS — **10/10** (140 passed, 0 failed, 2 skipped unit cases) |
 | Tier 1 syscall path (AArch64) | `translation_cache.tier1_syscall_write_matches_interpreter` under qemu | PASS — generated code returns `kSyscall`, dispatcher handles it |
 | AArch64 differential | `qemu-aarch64 .../hyperion_differential_tests` | SKIP — 0 passed, **8 skipped** (no x86-64 oracle) |
 | Translator blocks vs. interpreter (AArch64) | `translator.block_*` under qemu | PASS — block cuts at terminators/unsupported/buffer end |
@@ -453,6 +456,13 @@ and `bench.rejects_single_sample`. The cross build has 10 entries (the same set
 plus `cross.aarch64_tests`, which runs **140** unit cases under `qemu-user`).
 
 ### Remote verification (GitHub Actions)
+
+CI run `39410940495` on `main` (commit `454c546`, Phase 6 increment 2:
+guest address space + memory syscalls): **conclusion `success`** — all six jobs
+passed: `clang-format`, `build & test (clang)`, `syscall inventory & shellcheck`,
+`ASan/UBSan`, `AArch64 cross tests (qemu-user)`, and `build & test (gcc)`. The
+AArch64 job builds the address-space and memory-syscall tests for AArch64 and
+runs them under `qemu-user`.
 
 CI run `39403321275` on `main` (commit `04c200d`, Phase 5 optimization 6 +
 tool cache): **conclusion `success`** — all six jobs passed: `clang-format` (7s),
@@ -532,6 +542,25 @@ stable-vs-noisy discrimination case).
     does a hash lookup. This is correct but slow; chaining is Phase 5.
   - Guest code is fetched through a 4 KiB window and the block is cut at the
     window edge. Longer blocks are correct (they just split), not miscompiled.
+- **Known limitations of the guest address space / memory syscalls:**
+  - `mmap` is **anonymous private only**. A file-backed or `MAP_SHARED` request
+    returns `-ENOSYS` and is counted in `unimplemented_syscalls`; it is never
+    mapped as something else.
+  - `mprotect`/`munmap` require a page-aligned, **fully mapped** range and reject
+    a range that would split an existing region. The kernel unmaps/splits partial
+    ranges; this increment does not, and says so rather than pretending to.
+  - The heap is a fixed reserved window (`heap_capacity`, 1 MiB by default), so a
+    program that wants a much larger `brk` will fail. Real programs mostly
+    `mmap`, which is unbounded up to the allocator cursor.
+  - There is no demand-zero fault delivery to the guest: the address space is
+    fully backed in host memory when mapped, not lazily.
+- **Known limitation of Tier 1 (the code generator):** it is **register-only**.
+  Any instruction with a memory operand is rejected (`translator.cpp
+  validate_body`) and the block stops with `kUnsupported` rather than emitting
+  wrong code. So Tier 1 cannot yet execute a program that loads or stores, even
+  though Tier 0 (the interpreter) can and the syscall layer now supports
+  `mmap`/`brk`. This is the single biggest gap between the tiers and the gating
+  item for real programs; it is the "next" item in §4.
 - **Open questions:**
   - The AArch64 UML port has **not** been built or run. Its build is blocked by
     a host toolchain problem that also blocks stock x86-64 UML. Not measured on

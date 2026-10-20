@@ -105,19 +105,36 @@ usually broken, and this project requires evidence, not plausible numbers.
 > `tools/cache/` (git-ignored): recover with `scripts/toolcache.sh restore`
 > (offline) and only then `scripts/bootstrap.sh` if a tool is still missing. Do
 > not treat a stale `build/` directory as evidence that tests pass — rerun them.
+>
+> **You are probably not on the machine the last agent used, and you may not be
+> an OpenHands agent at all.** Two recovery paths exist, and neither needs the
+> other's history:
+>
+> 1. `scripts/toolcache.sh restore` — the AArch64 cross toolchain and
+>    `qemu-aarch64-static`, from the git-ignored `tools/cache/`. Only present if
+>    the workspace directory carried over. Needed only for `cross-test`.
+> 2. `scripts/toolcache.sh install-host` — `cmake`, `ninja` and `shellcheck`,
+>    from the `.deb` files **committed** under `tools/vendor/host-debs/`. This
+>    works from a fresh clone and needs no network for those three packages.
+>
+> If both are unavailable, `scripts/bootstrap.sh` installs everything from a
+> package mirror (needs sudo and network). The gcc toolchain plus
+> `scripts/dev.sh build && scripts/dev.sh test` is enough to make progress; the
+> cross and clang paths are additional coverage, not prerequisites.
 
 ---
 
 ## 3. Verify the current state (do this first)
 
 ```bash
-scripts/toolcache.sh restore # after a container reset: reinstate cached tools (offline)
+scripts/toolcache.sh install-host # fresh clone: cmake/ninja/shellcheck from committed debs
+scripts/toolcache.sh restore # after a container reset: cached cross toolchain + qemu (offline)
 scripts/bootstrap.sh        # full toolchain (sudo); skip if already installed
 scripts/dev.sh bootstrap
 scripts/dev.sh build
 scripts/dev.sh test         # expect: all tests passed
 scripts/dev.sh cross-test   # expect: all tests passed incl. cross.aarch64_tests
-scripts/dev.sh clang-build  # expect: clean; clang -Wsign-conversion is stricter than gcc
+scripts/dev.sh clang-build  # expect: clean (needs clang; optional)
 ./build/dev/tests/hyperion_differential_tests   # expect: 8 passed, 0 skipped (x86-64)
 ./build/dev/hyperion version
 ./build/dev/hyperion probe
@@ -323,6 +340,24 @@ first CI performance-trend baseline.
   `build/` directory survives. The repository directory *does* persist, so recover
   with `scripts/toolcache.sh restore` first, then `scripts/bootstrap.sh` only if a
   tool is still missing.
+- **`cmake`, `ninja` and `shellcheck` are committed** under
+  `tools/vendor/host-debs/` (19 MB of `.deb` files) and installed with
+  `scripts/toolcache.sh install-host`. This is the recovery path that works from
+  a **fresh clone** with no network. `clang` is *not* vendored — it needs a
+  124 MB `libLLVM.so`, over GitHub's per-file limit — but it is not required to
+  build or test; see `tools/vendor/host-debs/README.md`.
+- **Pushing:** the credential embedded in the `origin` URL can be stale and
+  return HTTP 403 even though the token looks present. `git remote -v` shows a
+  URL with an embedded token; if `git push` 403s, push with the
+  `GITHUB_PERSONAL_ACCESS_TOKEN` environment variable instead, e.g.
+  `git push "https://${GITHUB_PERSONAL_ACCESS_TOKEN}@github.com/<owner>/<repo>.git" main`,
+  or `git remote set-url origin` to that form. Do not commit the token.
+- **Verify a push actually landed.** A push can appear to succeed while the
+  remote is unchanged. After pushing, confirm with
+  `git ls-remote origin main` (or `git status -sb`) that `origin/main` is at the
+  commit you just made, and check the CI run for *that* SHA rather than assuming
+  it is green. A previous session recorded a green CI run whose commit had never
+  been pushed — do not repeat that.
 - **`qemu-user` is a correctness oracle only**, never a performance model.
 - **Passwordless `sudo`** is available for package installation.
 - The reference Snapdragon 855 device is **not** present; target-device claims

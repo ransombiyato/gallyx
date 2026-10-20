@@ -114,6 +114,31 @@ restore() {
     echo "==> restored; verify with: aarch64-linux-gnu-g++ --version"
 }
 
+# Host build tools (cmake/ninja/shellcheck) are not in the base image, so a
+# container reset removes them. Small .deb files are committed under
+# tools/vendor/host-debs so the build can be restored without a package mirror.
+# apt resolves any missing dependency from the network when it can, and reports
+# clearly when it cannot.
+vendor_dir="${root}/tools/vendor/host-debs"
+
+install_host() {
+    if [ ! -d "${vendor_dir}" ]; then
+        die "no vendored host tools at ${vendor_dir}"
+    fi
+    local debs=("${vendor_dir}"/*.deb)
+    if [ ! -e "${debs[0]}" ]; then
+        die "no .deb files in ${vendor_dir}"
+    fi
+    echo "==> installing ${#debs[@]} vendored host package(s) (needs root)"
+    # --no-download prefers the local files; apt fetches only unmet dependencies.
+    if ! ${SUDO} apt-get install -y --no-download "${debs[@]}"; then
+        echo "toolcache: offline install failed; retrying with the network for" >&2
+        echo "           any missing dependencies ..." >&2
+        ${SUDO} apt-get install -y "${debs[@]}"
+    fi
+    echo "==> done; verify with: cmake --version && ninja --version && shellcheck --version"
+}
+
 status() {
     echo "cache directory: ${cache}"
     if [ -x "${qemu_cached}" ]; then
@@ -127,6 +152,15 @@ status() {
     else
         echo "  toolchain : not cached"
     fi
+    if [ -d "${vendor_dir}" ]; then
+        echo "  host debs : ${vendor_dir} ($(du -sh "${vendor_dir}" 2>/dev/null | cut -f1), committed)"
+    else
+        echo "  host debs : not vendored"
+    fi
+    local t
+    for t in cmake ninja shellcheck clang-format; do
+        printf '  %-10s: %s\n' "${t}" "$(command -v "${t}" 2>/dev/null || echo 'not installed')"
+    done
 }
 
 print_env() {
@@ -142,7 +176,8 @@ shift || true
 case "${command}" in
 populate) populate "$@" ;;
 restore) restore ;;
+install-host) install_host ;;
 status) status ;;
 env) print_env ;;
-*) die "unknown command: ${command} (expected populate|restore|status|env)" ;;
+*) die "unknown command: ${command} (expected populate|restore|install-host|status|env)" ;;
 esac

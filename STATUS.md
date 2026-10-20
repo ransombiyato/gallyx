@@ -1,26 +1,34 @@
 # STATUS
 
-**Last updated:** 2026-10-19
+**Last updated:** 2026-10-20
 **Current phase:** Phase 5 (performance measurement and optimization) — active;
-Phase 6 (Linux ABI and syscall compatibility) — second slice implemented
-**Repository state:** buildable, tested, documented. **Two execution tiers exist:
-the reference interpreter (Tier 0) and a translation cache that runs whole
-programs through generated AArch64 code (Tier 1).** Phase 4's exit criteria are
-met and recorded. Phase 5 has begun with a *measured baseline before any
+Phase 6 (Linux ABI and syscall compatibility) — third slice implemented
+**Repository state:** buildable, tested, documented, CI green. **Two execution
+tiers exist: the reference interpreter (Tier 0) and a translation cache that runs
+whole programs through generated AArch64 code (Tier 1).** Phase 4's exit criteria
+are met and recorded. Phase 5 has begun with a *measured baseline before any
 optimisation*: on AArch64 under `qemu-user`, Tier 1 is ~12.8× faster than Tier 0
 on a fixed loop workload (BENCHMARKS.md §4.2), and **six optimizations are now
 accepted and measured** (parity fast path, dead-`rip` elimination, flag
 liveness, direct-mapped dispatch, ALU immediate folding, guest-register
 allocation — BENCHMARKS.md §4.2.1–4.2.6). Phase 6's syscall inventory is
 complete and validated
-(docs/syscalls/), and **two syscall slices are implemented in both tiers**: the
-first (`write`/`exit`/`exit_group`) and the second, which added the guest
-address space and `mmap`/`mprotect`/`munmap`/`brk`. Unimplemented numbers still
+(docs/syscalls/), and **three syscall slices are implemented in both tiers**: the
+first (`write`/`exit`/`exit_group`), the second, which added the guest
+address space and `mmap`/`mprotect`/`munmap`/`brk`, and the third, which added a
+guest descriptor table with `read`/`close`/`lseek`. Unimplemented numbers still
 return `-ENOSYS` explicitly. The guest instruction subset remains small; see
 COMPATIBILITY.md.**
 
 This is the first file a returning agent should read. It records exactly what
 works, what was last verified, and what to do next.
+
+> **Environment recovery (read this first after a container reset).** `/usr`
+> does not persist. Run `scripts/toolcache.sh install-host` (cmake/ninja/
+> shellcheck from committed debs, works offline from a fresh clone), then
+> `scripts/toolcache.sh restore` (cross toolchain + qemu from `tools/cache/`),
+> then rebuild and rerun the tests. Do **not** trust a surviving `build/`
+> directory. Full details in `docs/agent-handoff.md` §2 and §7.
 
 ---
 
@@ -408,14 +416,41 @@ main path, and Phases 2-5 still build it.
 
 ## 2. Last successful verification
 
-Re-verified from a clean tree on 2026-10-19, host: x86-64, Debian 13 (trixie),
-GCC 14.2.0, Clang 19.1.7, CMake 3.31.6, Ninja 1.12.1, qemu-aarch64 10.0.13,
-aarch64-linux-gnu-g++ 14.2.0. Re-verified again after the Phase 6 increment 3
+Re-verified from a clean tree on **2026-10-20**, host: x86-64, Debian 13
+(trixie), GCC 14.2.0, Clang 19.1.7, CMake 3.31.6, Ninja 1.12.1, qemu-aarch64
+10.0.13, aarch64-linux-gnu-g++ 14.2.0. This run followed the clang-build fix
+below and a container reset that removed `/usr`; the toolchain was restored from
+`tools/vendor/host-debs/` and `tools/cache/` before rebuilding:
+
+| Suite | Command | Result |
+| --- | --- | --- |
+| Native | `scripts/dev.sh test` | 9/9 ctest passed |
+| Cross (qemu-user) | `scripts/dev.sh cross-test` | 5/5 ctest passed (153 unit cases, 0 failed, 2 skipped) |
+| Clang | `scripts/dev.sh clang-build` | 9/9 passed |
+| ASan/UBSan | `scripts/dev.sh sanitize` | 9/9 passed |
+| Formatting | `scripts/dev.sh format` | clean (clang-format 19.1.7) |
+| Lint | `shellcheck scripts/*.sh` | clean |
+| Syscall inventory | `python3 tools/gen_syscall_inventory.py --check` | OK |
+
+Re-verified again after the Phase 6 increment 3
 commit (guest descriptor table + `read`/`close`/`lseek`): native 136/0,
 cross 153/0 under `qemu-user`, ASan/UBSan 9/9, syscall filter 30/30.
 Previously, after increment 2 (guest address space + memory syscalls,
 commit `454c546`): native 125/0, cross 140/0, ASan/UBSan 9/9, CI run
 `39410940495` green.
+
+> **CI history, and a mistake worth not repeating.** CI run `39413203456` on
+> commit `f41768b` **failed** in `build & test (clang)` and `ASan/UBSan`:
+> clang's `-Wsign-conversion` rejected `files[fd]` (a signed index reaching
+> `vector::operator[]`). The local gcc build was clean because gcc does not
+> enable `-Wsign-conversion` under `-Wconversion`, so the failure was invisible
+> here. Fixed in commit `6da32ac`, which also added `-Wsign-conversion` to the
+> project warning set — so **gcc now catches this class of bug too**, and a
+> second latent instance in `src/core/translator.cpp` was found and fixed by
+> that flag. `scripts/dev.sh clang-build` was added to reproduce the clang path
+> locally. An earlier session also recorded a green CI run for a commit that had
+> never actually been pushed; verify with `git ls-remote origin main` after
+> pushing rather than trusting the local log.
 
 > **Environment note (important for the next agent).** This environment does
 > **not** persist `/usr` between sessions. A new container starts with *no*
@@ -729,6 +764,17 @@ experiments/uml/run.sh clean    # remove generated images/logs
   `tools/cache/` (git-ignored). Recover with `scripts/toolcache.sh restore`
   before concluding that something is broken; `scripts/bootstrap.sh` reinstalls
   and re-populates the cache.
+- **Host build tools are committed**, not just cached: `cmake`, `ninja` and
+  `shellcheck` ship as `.deb` files under `tools/vendor/host-debs/` (19 MB) and
+  install with `scripts/toolcache.sh install-host`. This is the only recovery
+  path that works from a fresh clone with no network. `clang`/`libLLVM` is
+  deliberately excluded (124 MB, over GitHub's per-file limit) and is not
+  required — `-Wsign-conversion` is now on for gcc as well, so the gcc build
+  catches the bug class that previously needed clang. See
+  `tools/vendor/host-debs/README.md`.
+- **Verify a push landed** with `git ls-remote origin main`; the embedded
+  `origin` credential can be stale (HTTP 403) and a push can look successful
+  while the remote is unchanged. Use `GITHUB_PERSONAL_ACCESS_TOKEN` if it 403s.
 - The reference **target** device (Snapdragon 855, Android 10) is not present in
   this environment. Target-device claims must be measured on real hardware
   before being asserted; see `docs/target-environment.md`.

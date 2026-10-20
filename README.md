@@ -193,6 +193,19 @@ scripts/toolcache.sh restore
 scripts/toolcache.sh status
 ```
 
+The base image also does not ship `cmake`, `ninja` or `shellcheck`, so those
+are committed as small `.deb` files under `tools/vendor/host-debs/` (19 MB) and
+restored with:
+
+```bash
+scripts/toolcache.sh install-host
+```
+
+`clang` is intentionally not vendored: it pulls in a 124 MB `libLLVM.so`, over
+GitHub's per-file limit. It is not required to build or test — `-Wsign-conversion`
+is enabled for gcc too, so the gcc build catches the same bugs. See
+`tools/vendor/host-debs/README.md` for the reasoning and `TESTING.md` §7.
+
 See [`TESTING.md`](TESTING.md) for the full guide.
 
 ---

@@ -926,7 +926,7 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
         bool w[kGprCount] = {};
         regs_read_write(step.insn, r, w);
         for (unsigned i = 0; i < kGprCount; ++i) {
-            refs[i] += (r[i] ? 1 : 0) + (w[i] ? 1 : 0);
+            refs[i] += static_cast<std::size_t>((r[i] ? 1 : 0) + (w[i] ? 1 : 0));
         }
     }
 

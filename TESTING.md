@@ -171,6 +171,15 @@ clang-format 19.1.7** (see the `format` job in `.github/workflows/ci.yml`).
 Formatting rules change between releases, so use the pinned version locally to
 avoid spurious drift.
 
+### Warning flags
+
+The warning set in `CMakeLists.txt` includes **`-Wsign-conversion`** in addition
+to `-Wconversion`. This matters: clang turns `-Wsign-conversion` on as part of
+`-Wconversion`, but gcc does not, so a gcc-only host would silently miss a
+signed index reaching `vector::operator[]` that the clang CI job rejects. With
+the flag enabled on both compilers, `scripts/dev.sh build` alone is enough to
+catch that class of bug — clang is no longer required locally to reproduce it.
+
 ---
 
 ## 8. Differential testing (Phase 2+)

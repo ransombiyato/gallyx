@@ -16,6 +16,16 @@ Meaningful changes by milestone. Format loosely follows
   reaches `vector::operator[]`. `scripts/dev.sh clang-build` added so this
   class of failure is catchable locally before pushing.
 
+### Fixed — gcc now catches the same sign-conversion bug as clang
+- `CMakeLists.txt` adds **`-Wsign-conversion`** to the warning set. clang
+  enables it implicitly under `-Wconversion`; gcc does not, so a gcc-only host
+  silently accepted `files[fd]` and `refs[i] += (r[i] ? 1 : 0) + ...`. Both
+  are now rejected by `scripts/dev.sh build` on gcc, so reproducing this class
+  of CI failure no longer requires a local clang.
+- `src/core/translator.cpp`: cast the flag-reference increment to
+  `std::size_t` (second latent instance of the same bug, found only after
+  enabling the flag).
+
 ### Added — guest descriptor table (third syscall slice)
 - `MinimalSyscallHandler` now owns a **guest descriptor table**
   (guest fd → host `FILE*`), so `read`/`close`/`lseek` operate on descriptors

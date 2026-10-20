@@ -38,8 +38,11 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 # --- Compiler warnings (portable across GCC and Clang) ----------------------
 add_library(hyperion_warnings INTERFACE)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+    # -Wsign-conversion is the flag that catches a signed index reaching
+    # vector::operator[]; clang enables it under -Wconversion but gcc does not,
+    # so without it a gcc-only host misses a bug the clang CI job rejects.
     target_compile_options(hyperion_warnings INTERFACE
-        -Wall -Wextra -Wpedantic -Wshadow -Wconversion
+        -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion
         -Wcast-qual -Wformat=2 -Wundef -Wnon-virtual-dtor)
     if(HYPERION_WARNINGS_AS_ERRORS)
         target_compile_options(hyperion_warnings INTERFACE -Werror)

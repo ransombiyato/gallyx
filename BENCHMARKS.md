@@ -348,6 +348,45 @@ would be the right place to measure it; that hardware is unavailable (4.3).
 
 **Reproduce:** `scripts/bench-tier-qemu.sh --iterations 200000 --repeats 7`.
 
+#### 4.2.4 Optimization 4 — direct-mapped dispatch (Phase 5)
+
+**Hypothesis.** After every block exit the dispatcher resolves the next guest PC
+through an `std::unordered_map`, which is a hash computation plus a pointer
+chase per block. A hot loop re-enters a handful of PCs millions of times, so a
+small direct-mapped table indexed by the low bits of the PC should answer almost
+every lookup with one array access.
+
+**Change.** `TranslationCache` gained a 4096-entry direct-mapped table
+(`direct_`) plus `lookup()`/`install()` (`include/hyperion/translation_cache.hpp`,
+`src/core/translation_cache.cpp`). `lookup()` checks `direct_[pc & 0xFFF]` and
+only falls back to the hash map on a slot mismatch. **The hash map remains
+authoritative**: a slot is used only if `block->start == pc`, so a collision
+(a different PC in the same slot) is a safe fall-through to the map, never a
+wrong block. The fast path therefore carries no correctness risk by construction.
+
+**Evidence (deterministic — dispatch counters, not timing).**
+
+| Metric | Value |
+| --- | --- |
+| Dispatch hits | 199,998 |
+| Dispatch misses | 3 |
+| Hit rate | 99.9985% |
+| Generated AArch64 bytes | 352 (unchanged) |
+
+The 3 misses are exactly the first sighting of each of the 3 blocks; every
+subsequent dispatch is served by the direct table. This is a *dispatch-overhead*
+reduction: it removes a hash lookup from the per-block cost. As with 4.2.3 the
+wall-clock effect under `qemu-user` is not measurable here (qemu has already
+translated both paths to host code) and is not claimed; the counters are the
+honest evidence.
+
+**Correctness.** `translation_cache.direct_map_collision_falls_back_to_map`
+forces two PCs (`0x400000` and `0x401000`) into the same slot and checks that all
+three runs return the right value with only two translations. The counters are
+exposed in the benchmark JSON (`dispatch_hits`, `dispatch_misses`).
+
+**Reproduce:** `scripts/bench-tier-qemu.sh --iterations 200000 --repeats 7`.
+
 ### 4.3 Reference target device (Snapdragon 855)
 
 **unavailable.** The reference device is not present in this environment.

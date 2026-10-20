@@ -37,10 +37,25 @@ std::size_t read_window(Memory& memory, std::uint64_t pc, std::uint8_t* out, std
 
 } // namespace
 
-const CachedBlock* TranslationCache::translate_at(Memory& memory, std::uint64_t pc) {
+const CachedBlock* TranslationCache::lookup(std::uint64_t pc) {
+    const CachedBlock* fast = direct_[pc & kDirectMask];
+    if (fast != nullptr && fast->start == pc) {
+        ++dispatch_hits_;
+        return fast;
+    }
+    ++dispatch_misses_;
     const auto it = blocks_.find(pc);
-    if (it != blocks_.end()) {
-        return it->second.get();
+    return it == blocks_.end() ? nullptr : it->second.get();
+}
+
+void TranslationCache::install(const CachedBlock* block) {
+    direct_[block->start & kDirectMask] = block;
+}
+
+const CachedBlock* TranslationCache::translate_at(Memory& memory, std::uint64_t pc) {
+    const CachedBlock* cached = lookup(pc);
+    if (cached != nullptr) {
+        return cached;
     }
 
     if (fetch_.size() < kMaxWindow) {
@@ -74,6 +89,7 @@ const CachedBlock* TranslationCache::translate_at(Memory& memory, std::uint64_t 
 
     const CachedBlock* raw = block.get();
     blocks_.emplace(pc, std::move(block));
+    install(raw);
     return raw;
 }
 

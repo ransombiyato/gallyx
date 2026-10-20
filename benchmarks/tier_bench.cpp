@@ -166,6 +166,8 @@ int main(int argc, char** argv) {
     // so it can never affect the measurement. Deterministic, unlike timing.
     std::size_t tier1_code_bytes = 0;
     std::size_t tier1_block_count = 0;
+    std::uint64_t tier1_dispatch_hits = 0;
+    std::uint64_t tier1_dispatch_misses = 0;
 
     // One discarded warm-up run, then `repeats` timed samples.
     for (std::uint32_t i = 0; i <= opts.repeats; ++i) {
@@ -214,6 +216,8 @@ int main(int argc, char** argv) {
         cache.run(mem, st);
         tier1_code_bytes = cache.total_code_bytes();
         tier1_block_count = cache.block_count();
+        tier1_dispatch_hits = cache.dispatch_hits();
+        tier1_dispatch_misses = cache.dispatch_misses();
     }
     const auto per_step = [&](double ns) {
         return steps == 0 ? 0.0 : ns / static_cast<double>(steps);
@@ -253,6 +257,10 @@ int main(int argc, char** argv) {
             std::printf("    \"iqr_fraction\": %.6f,\n", s1.iqr_fraction);
             std::printf("    \"blocks\": %zu,\n", tier1_block_count);
             std::printf("    \"generated_code_bytes\": %zu,\n", tier1_code_bytes);
+            std::printf("    \"dispatch_hits\": %llu,\n",
+                        static_cast<unsigned long long>(tier1_dispatch_hits));
+            std::printf("    \"dispatch_misses\": %llu,\n",
+                        static_cast<unsigned long long>(tier1_dispatch_misses));
             std::printf("    \"tier1_over_tier0_ratio\": %.6f\n", ratio);
         } else {
             std::printf("    \"reason\": \"%s\"\n", tier1_reason.c_str());

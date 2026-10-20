@@ -67,6 +67,14 @@ public:
     // Number of blocks currently cached (diagnostics/tests).
     std::size_t block_count() const { return blocks_.size(); }
 
+    // Dispatch fast-path counters (diagnostics/tests/benchmarks). A "hit" is a
+    // block found in the direct-mapped lookup cache without touching the hash
+    // map; a "miss" is a lookup that fell back to the map (and translated the
+    // block if it was not there yet). The hit rate is a deterministic proxy for
+    // dispatch overhead, unlike timing.
+    std::uint64_t dispatch_hits() const { return dispatch_hits_; }
+    std::uint64_t dispatch_misses() const { return dispatch_misses_; }
+
     // Number of times a guest PC was translated (diagnostics/tests). Equal to
     // the number of cached blocks; exposed separately to make the intent clear.
     std::size_t translation_count() const { return blocks_.size(); }
@@ -82,7 +90,28 @@ private:
     // instruction there cannot be decoded. Never executes anything.
     const CachedBlock* translate_at(Memory& memory, std::uint64_t pc);
 
+    // Look up `pc` through the direct-mapped fast path, then the map. Updates
+    // the hit/miss counters. Returns nullptr only if the block is absent.
+    const CachedBlock* lookup(std::uint64_t pc);
+
+    // Install `block` (whose guest PC is `block->start`) in the map and the
+    // direct-mapped cache.
+    void install(const CachedBlock* block);
+
     std::unordered_map<std::uint64_t, std::unique_ptr<CachedBlock>> blocks_;
+
+    // Direct-mapped dispatch cache: a small power-of-two table indexed by the
+    // low bits of the guest PC, consulted before the hash map. It is a *pure
+    // accelerator* - the map remains authoritative, so a collision (two PCs
+    // sharing a slot) can only cause a fall-through to the map, never a wrong
+    // block. This keeps the fast path free of correctness risk.
+    static constexpr std::size_t kDirectBits = 12; // 4096 slots
+    static constexpr std::size_t kDirectSize = 1u << kDirectBits;
+    static constexpr std::size_t kDirectMask = kDirectSize - 1;
+    std::vector<const CachedBlock*> direct_{kDirectSize, nullptr};
+    std::uint64_t dispatch_hits_ = 0;
+    std::uint64_t dispatch_misses_ = 0;
+
     // Scratch buffer reused for fetching guest code, to avoid an allocation per
     // block. Sized generously; a block is cut at the first unsupported
     // instruction well before this limit in practice.

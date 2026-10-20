@@ -55,9 +55,9 @@ HYPERION_TEST("translation_cache", "refuses_to_run_without_exec_support") {
 #if defined(__aarch64__)
 
 HYPERION_TEST("translation_cache", "caches_blocks_and_agrees_with_interpreter") {
-    // A loop body: mov ecx, 5 ; add rbx, rax ; dec rcx ; jnz -5 ; hlt
+    // A loop body: mov ecx, 50 ; add rbx, rax ; dec rcx ; jnz -5 ; hlt
     const std::vector<std::uint8_t> program = {
-        0xB9, 0x05, 0x00, 0x00, 0x00, 0x48, 0x01, 0xC3, 0x48, 0xFF, 0xC9, 0x75, 0xF8, 0xF4,
+        0xB9, 0x32, 0x00, 0x00, 0x00, 0x48, 0x01, 0xC3, 0x48, 0xFF, 0xC9, 0x75, 0xF8, 0xF4,
     };
 
     GuestState initial;
@@ -81,11 +81,53 @@ HYPERION_TEST("translation_cache", "caches_blocks_and_agrees_with_interpreter") 
     // block count stays small: this is the cache working, not a re-translation.
     HYPERION_CHECK(cache.block_count() > 0);
     HYPERION_CHECK(cache.block_count() <= 4);
+    // The direct-mapped fast path should absorb the repeated dispatches; only
+    // the first sighting of each PC is a miss.
+    HYPERION_CHECK(cache.dispatch_hits() > cache.dispatch_misses());
+}
+
+HYPERION_TEST("translation_cache", "direct_map_collision_falls_back_to_map") {
+    // Two guest PCs that share a direct-map slot must both still run correctly:
+    // the fast path is a pure accelerator and the hash map is authoritative, so
+    // a collision can only cost a fall-through, never a wrong block. kBase and
+    // kBase + 0x1000 both index slot 0 (kDirectMask = 0xFFF).
+    constexpr std::uint64_t kSecond = kBase + 0x1000;
+    const std::vector<std::uint8_t> first = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xF4};  // mov eax,1; hlt
+    const std::vector<std::uint8_t> second = {0xB8, 0x02, 0x00, 0x00, 0x00, 0xF4}; // mov eax,2; hlt
+
+    FlatMemory mem(kBase, 0x3000);
+    std::memcpy(mem.data(), first.data(), first.size());
+    std::memcpy(mem.data() + 0x1000, second.data(), second.size());
+
+    TranslationCache cache;
+
+    GuestState a;
+    a.rip = kBase;
+    const hyperion::RunResult ra = cache.run(mem, a);
+    HYPERION_CHECK(ra.status == RunStatus::kOk);
+    HYPERION_CHECK_EQ(ra.state.reg(Gpr::kRax), std::uint64_t{1});
+
+    GuestState b;
+    b.rip = kSecond; // installs into slot 0, evicting the kBase entry
+    const hyperion::RunResult rb = cache.run(mem, b);
+    HYPERION_CHECK(rb.status == RunStatus::kOk);
+    HYPERION_CHECK_EQ(rb.state.reg(Gpr::kRax), std::uint64_t{2});
+
+    GuestState a2;
+    a2.rip = kBase; // slot 0 now holds kSecond: must fall back to the map
+    const hyperion::RunResult ra2 = cache.run(mem, a2);
+    HYPERION_CHECK(ra2.status == RunStatus::kOk);
+    HYPERION_CHECK_EQ(ra2.state.reg(Gpr::kRax), std::uint64_t{1}); // still correct
+    HYPERION_CHECK_EQ(cache.block_count(), std::size_t{2});        // not re-translated
 }
 
 #else
 
 HYPERION_TEST("translation_cache", "caches_blocks_and_agrees_with_interpreter") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translation_cache", "direct_map_collision_falls_back_to_map") {
     HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
 }
 

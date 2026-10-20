@@ -223,6 +223,22 @@ void emit_flags_logical(a64::Encoder& e, a64::Width w, std::uint8_t mask, a64::R
     }
 }
 
+// Whether `value` fits the AArch64 ADD/SUB 12-bit immediate form (imm12,
+// optionally shifted left by 12). If so, fills `imm12`/`shift12`.
+bool encode_imm12(std::uint64_t value, std::uint32_t& imm12, bool& shift12) {
+    if (value <= 0xFFFu) {
+        imm12 = static_cast<std::uint32_t>(value);
+        shift12 = false;
+        return true;
+    }
+    if ((value & 0xFFFu) == 0 && (value >> 12) <= 0xFFFu) {
+        imm12 = static_cast<std::uint32_t>(value >> 12);
+        shift12 = true;
+        return true;
+    }
+    return false;
+}
+
 // Load a source operand into `dst`. Only registers and immediates are in scope
 // for this increment.
 TranslateError load_source(a64::Encoder& e, const Operand& src, a64::Reg dst, int bits) {
@@ -402,10 +418,6 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
     case Opcode::kXor:
     case Opcode::kCmp: {
         load_gpr(e, insn.dst.reg, kA);
-        const TranslateError err = load_source(e, insn.src, kB, bits);
-        if (err != TranslateError::kNone) {
-            return err;
-        }
 
         const bool is_logical = insn.opcode == Opcode::kAnd || insn.opcode == Opcode::kOr ||
                                 insn.opcode == Opcode::kXor;
@@ -416,6 +428,29 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
         // flag prologue disappears.
         const std::uint8_t mask =
             static_cast<std::uint8_t>(flags_written(insn.opcode) & live_flags);
+
+        // An immediate source that fits the AArch64 ADD/SUB immediate form is
+        // folded into the operation instead of being materialised into kB first
+        // (mov_imm64 is 1-4 instructions) - but only when AF is not live. AF is
+        // derived from (a ^ b ^ r), which needs b in a register, so when AF is
+        // needed we keep the register form and stay bit-exact rather than
+        // trading correctness for size.
+        std::uint32_t imm12 = 0;
+        bool shift12 = false;
+        const bool imm_foldable =
+            insn.has_src && insn.src.kind == OperandKind::kImmediate &&
+            (insn.opcode == Opcode::kAdd || insn.opcode == Opcode::kSub ||
+             insn.opcode == Opcode::kCmp) &&
+            encode_imm12((bits == 32) ? (insn.src.imm & 0xFFFFFFFFULL) : insn.src.imm, imm12,
+                         shift12);
+        const bool imm_folded = imm_foldable && (mask & kFbAf) == 0;
+
+        if (!imm_folded) {
+            const TranslateError err = load_source(e, insn.src, kB, bits);
+            if (err != TranslateError::kNone) {
+                return err;
+            }
+        }
 
         if (is_logical) {
             switch (insn.opcode) {
@@ -437,7 +472,13 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
                 // t2 = a ^ b, completed to (a ^ b ^ r) after the op for AF.
                 e.eor(a64::Width::k64, kT2, kA, kB);
             }
-            if (is_sub) {
+            if (imm_folded) {
+                if (is_sub) {
+                    e.subs_imm(w, kR, kA, imm12);
+                } else {
+                    e.adds_imm(w, kR, kA, imm12);
+                }
+            } else if (is_sub) {
                 e.subs(w, kR, kA, kB);
             } else {
                 e.adds(w, kR, kA, kB);

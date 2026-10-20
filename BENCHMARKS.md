@@ -387,6 +387,43 @@ exposed in the benchmark JSON (`dispatch_hits`, `dispatch_misses`).
 
 **Reproduce:** `scripts/bench-tier-qemu.sh --iterations 200000 --repeats 7`.
 
+#### 4.2.5 Optimization 5 — ALU immediate folding (Phase 5)
+
+**Hypothesis.** An `add/sub/cmp reg, imm` whose immediate fits the AArch64
+ADD/SUB 12-bit immediate form was lowered as *materialise the constant into a
+register, then ADDS/SUBS register-register*. The materialisation (`mov_imm64`) is
+1-4 instructions, so the immediate form is a pure instruction-selection win.
+
+**Change.** `emit_one` folds a foldable immediate straight into `adds_imm`/
+`subs_imm` (new `encode_imm12` helper), skipping `load_source`. The fold is
+applied **only when AF is not live**: AF is derived from `a ^ b ^ r` and needs
+`b` in a register, so a live-AF instruction keeps the register form to stay
+bit-exact. This is the honesty rule in action — the differential test
+(`differential_mov_and_alu`) caught a first attempt that folded unconditionally
+and got AF wrong, and the fold was narrowed until the test passed.
+
+**Evidence.** Deterministic code size for the size-guard program:
+
+| Metric | After 4.2.3 | After immediate folding | Change |
+| --- | --- | --- | --- |
+| AArch64 words, `translated_code_size_is_bounded` | 90 | 88 | −2 |
+
+The benchmark loop workload uses a register-form `add`, so it is unchanged at
+352 bytes; the win shows on immediate-heavy code. The −2 words are exactly the
+`mov`+`movk` that `add rdx, 1` no longer emits.
+
+**Interpretation, and limits.**
+
+- Small, and honestly reported as small. It is included because it is a clean,
+  isolated instruction-selection change with a dedicated test
+  (`translator.alu_immediate_is_folded`), not because it moves the headline.
+- The AF guard means the common "compare against a small constant then branch"
+  pattern (`cmp r, imm`; `jcc`) still materialises when the branch reads AF —
+  but branches read ZF/CF/SF/OF, not AF, so in practice `cmp r, imm; jcc` folds.
+- As with 4.2.3/4.2.4, no wall-clock claim under `qemu-user`.
+
+**Reproduce:** `scripts/bench-tier-qemu.sh --iterations 200000 --repeats 7`.
+
 ### 4.3 Reference target device (Snapdragon 855)
 
 **unavailable.** The reference device is not present in this environment.

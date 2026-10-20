@@ -497,14 +497,50 @@ HYPERION_TEST("translator", "translated_code_size_is_bounded") {
     // lies inside the entry block's byte range.
     HYPERION_CHECK_EQ(cache.block_count(), std::size_t{3});
     const std::size_t words = cache.total_code_bytes() / 4;
-    // Exact count at the time of writing is 90 words (360 bytes), after the
-    // flag-liveness pass (BENCHMARKS.md 4.2.3). The guard is
-    // an upper bound so a *reduction* is allowed but any growth fails CI; a
-    // code-size regression is otherwise easy to miss under qemu-user timing
-    // noise. Update the bound deliberately when the count legitimately changes,
-    // and record the exact figure in BENCHMARKS.md.
+    // Exact count at the time of writing is 88 words (352 bytes), after the
+    // flag-liveness pass (BENCHMARKS.md 4.2.3) and immediate folding (4.2.5).
+    // The guard is an upper bound so a *reduction* is allowed but any growth
+    // fails CI; a code-size regression is otherwise easy to miss under qemu-user
+    // timing noise. Update the bound deliberately when the count legitimately
+    // changes, and record the exact figure in BENCHMARKS.md.
     HYPERION_CHECK_EQ(cache.total_code_bytes() % 4, std::size_t{0});
-    HYPERION_CHECK(words > 0 && words <= 90);
+    HYPERION_CHECK(words > 0 && words <= 88);
+}
+
+HYPERION_TEST("translator", "alu_immediate_is_folded") {
+    // Instruction selection (BENCHMARKS.md 4.2.5): an immediate that fits the
+    // AArch64 ADDS-immediate form is folded into the operation *when AF is
+    // dead*. AF is derived from (a ^ b ^ r) and needs b in a register, so a
+    // live-AF instruction keeps the register form for bit-exactness. The first
+    // `add` below is killed by the second, so its AF is dead and it folds; the
+    // second is live and does not.
+    //
+    //   add rdx, <imm>   48 83 C2 01        (small, foldable)
+    //                    48 81 C2 10 32 54 76 (large, not foldable)
+    //   add rdx, 1       48 83 C2 01
+    //   jnz +0           75 00
+    //   hlt              F4
+    auto words_of = [](std::vector<std::uint8_t> program) {
+        FlatMemory mem(kBase, 4096);
+        std::memcpy(mem.data(), program.data(), program.size());
+        GuestState st;
+        st.rip = kBase;
+        hyperion::TranslationCache cache;
+        const hyperion::RunResult r = cache.run(mem, st);
+        HYPERION_CHECK(r.status == hyperion::RunStatus::kOk);
+        return cache.total_code_bytes() / 4;
+    };
+
+    const std::size_t small =
+        words_of({0x48, 0x83, 0xC2, 0x01, 0x48, 0x83, 0xC2, 0x01, 0x75, 0x00, 0xF4});
+    const std::size_t large = words_of(
+        {0x48, 0x81, 0xC2, 0x10, 0x32, 0x54, 0x76, 0x48, 0x83, 0xC2, 0x01, 0x75, 0x00, 0xF4});
+
+    // Only the first `add` differs. The foldable small immediate needs one
+    // ADDS-immediate; the large one must be materialised (movz+movk) first, so
+    // the otherwise-identical program is strictly larger.
+    HYPERION_CHECK(large > small);
+    HYPERION_CHECK(large - small >= 2);
 }
 
 HYPERION_TEST("translator", "dead_flags_are_not_computed") {

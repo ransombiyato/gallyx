@@ -16,11 +16,22 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_dir="${root}/build/cross-bench"
-qemu="${HYPERION_QEMU:-qemu-aarch64}"
+# Prefer the repo-local cached emulator (tools/cache) if present: it survives the
+# container resets that wipe /usr, so a benchmark uses the same qemu across
+# sessions. HYPERION_QEMU still overrides everything.
+cached_qemu="${root}/tools/cache/bin/qemu-aarch64-static"
+if [ -n "${HYPERION_QEMU:-}" ]; then
+    qemu="${HYPERION_QEMU}"
+elif [ -x "${cached_qemu}" ]; then
+    qemu="${cached_qemu}"
+else
+    qemu="qemu-aarch64"
+fi
 sysroot="${HYPERION_AARCH64_SYSROOT:-/usr/aarch64-linux-gnu}"
 
 iterations=200000
 repeats=7
+wide=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --iterations)
@@ -30,6 +41,10 @@ while [[ $# -gt 0 ]]; do
     --repeats)
         repeats="$2"
         shift 2
+        ;;
+    --wide)
+        wide="--wide"
+        shift
         ;;
     *)
         echo "unknown argument: $1" >&2
@@ -52,6 +67,6 @@ cmake -S "${root}" -B "${build_dir}" \
 cmake --build "${build_dir}" --target hyperion_tier_bench >/dev/null
 
 echo "# host: $(uname -srm)"
-echo "# command: ${qemu} -L ${sysroot} hyperion_tier_bench --iterations ${iterations} --repeats ${repeats} --json"
+echo "# command: ${qemu} -L ${sysroot} hyperion_tier_bench --iterations ${iterations} --repeats ${repeats} ${wide} --json"
 "${qemu}" -L "${sysroot}" "${build_dir}/benchmarks/hyperion_tier_bench" \
-    --iterations "${iterations}" --repeats "${repeats}" --json
+    --iterations "${iterations}" --repeats "${repeats}" ${wide} --json

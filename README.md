@@ -179,6 +179,15 @@ this exact mechanism to validate generated AArch64 code against the x86-64
 reference interpreter: `translator.differential_*` executes translated blocks
 under `qemu-user` and compares every register and flag against the interpreter.
 
+The development container does not persist `/usr` between sessions, but the
+repository does, so the emulator and cross toolchain are cached under
+`tools/cache/` (git-ignored). After a reset, restore them offline with:
+
+```bash
+scripts/toolcache.sh restore
+scripts/toolcache.sh status
+```
+
 See [`TESTING.md`](TESTING.md) for the full guide.
 
 ---

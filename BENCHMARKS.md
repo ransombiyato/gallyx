@@ -424,6 +424,104 @@ The benchmark loop workload uses a register-form `add`, so it is unchanged at
 
 **Reproduce:** `scripts/bench-tier-qemu.sh --iterations 200000 --repeats 7`.
 
+#### 4.2.6 Optimization 6 — guest-register allocation within a block (Phase 5)
+
+**Hypothesis.** Every guest register access lowered to a load or store of
+`GuestState` in memory, so `add rbx, rax` was `ldr/ldr/add/str`. Keeping the
+block's hot guest registers in **callee-saved host registers** (x19..x28) for the
+duration of the block should remove most of that traffic.
+
+**Change.** A new pass (1.5) counts, per guest register, how many instructions
+reference it in the block, ranks registers by that count, and maps the top ones
+to x19..x28. A save/restore prologue/epilogue wraps the block (paired `stp`/`ldp`
+for the borrowed callee-saved registers, plus one `ldr` at entry and one `str` at
+exit per allocated register). `kMov`, the ALU ops and `inc`/`dec` were rewritten
+to operate directly on the allocated host register when both operands are
+allocated. `GuestState` remains authoritative at every block boundary, so the
+block signature and the cross-block flag invariant are unchanged.
+
+**Profitability guard — measured, not assumed.** The first implementation
+allocated *every* touched register. That **regressed** the code size of the
+3-instruction benchmark loop (364 → 388 bytes) because the prologue/epilogue
+outweighed the saved loads for a tiny block, and it was neutral-to-slower in
+time. The allocator was therefore made *profitability-aware*: a register is
+allocated only when its body memory-op count exceeds the step increase in
+overhead (`alloc_cost(n) = 2n + 2*ceil(n/2)`). With the guard, the narrow loop
+correctly declines allocation for its hot block and the code size comes out at
+356 bytes (RA on) vs 364 (RA off).
+
+**A second workload was required to measure the win.** The narrow loop's hot
+block is only 3 instructions, so allocation never fires there; it cannot show
+what RA is worth. A `--wide` workload was added to `hyperion_tier_bench`: a
+12-instruction loop body that touches **eleven** guest registers (more than the
+ten allocatable host registers), so the allocator must choose.
+
+**Evidence — wide workload, `--iterations 100000 --repeats 7`:**
+
+| Metric | RA off | RA on | Change |
+| --- | --- | --- | --- |
+| Generated code bytes | 620 | 608 | −1.9% |
+| Tier 1 ns / guest instruction | 10.70 | 9.05 | −15.4% |
+| Blocks | 2 | 2 | — |
+| Correct | yes | yes | — |
+
+The −15% tier-1 time is reproducible across repeated runs (9.07, 9.01 ns on
+separate runs) and is the direction the change predicts: fewer memory ops per
+instruction in the hot block. As always under `qemu-user`, this is a *relative*
+signal — qemu additionally translates both tiers — not a hardware claim.
+
+**Correctness.** Two differential tests were added:
+
+- `translator.differential_register_allocation_many_registers` — an
+  eleven-register program with **distinct** values per register (all-zero would
+  not discriminate a misallocated register), checked instruction-by-instruction
+  against the interpreter via `check_program_matches`.
+- `translator.differential_register_allocation_immediates` — an allocated
+  destination written by a `mov` immediate and then read by a later op.
+
+Adding the first test **exposed a pre-existing correctness bug**: when a block
+ended in `HLT` after body instructions, the generated code never wrote `rip`, so
+the halted `rip` leaked the block's *start* address instead of the `HLT`
+address (the interpreter leaves `rip` on the `HLT`). `check_program_matches` had
+always compared `rip`, but no earlier program ended a multi-instruction block in
+`HLT`, so it went unnoticed. Fixed by emitting `rip = insn.address` on the halt
+path (BENCHMARKS.md 4.2.7).
+
+**Interpretation, and limits.**
+
+- The win is real but narrow: it is a per-block allocation with no live-range
+  splitting, no cross-block allocation and no spilling heuristics beyond "stop
+  when it no longer pays". A register used across a block boundary is still
+  reloaded.
+- The profitability model is a static instruction count, not a measured cost;
+  it is deliberately conservative (it prefers to *not* allocate when unsure),
+  which is why the narrow loop is untouched.
+- No wall-clock claim under `qemu-user`.
+
+**Reproduce:** `scripts/bench-tier-qemu.sh --wide --iterations 100000 --repeats 7`
+and, for the code-size figures, the size guard in `translated_code_size_is_bounded`.
+
+#### 4.2.7 Correctness fix — halted `rip` was the block start (Phase 5)
+
+**Bug.** Tier 1's block epilogue for a normal exit advanced `rip`, but a block
+ending in `HLT` (or `RET`) returned `kHalted` **without** writing `rip`. The
+dispatcher then reported `state.rip` unchanged from block entry, i.e. the block's
+first address, whereas the interpreter leaves `rip` on the `HLT` instruction.
+
+**Impact.** Any guest program that halts after more than one instruction in its
+final block (i.e. almost all of them) reported the wrong halted `rip`. The
+`rdx`-only checks in earlier benchmarks and tests never looked at `rip`, so it
+went unnoticed until the RA differential test compared full state.
+
+**Fix.** Emit `emit_set_rip(e, step.insn.address)` on the `HLT`/`RET` path before
+`emit_return(kHalted)`. Cost: 3 AArch64 words on the halt block; the size guard
+moved 88 → 91 with RA off, back to 88 with RA on (the profitability guard's −3
+offsets it exactly).
+
+**Test.** `translator.differential_register_allocation_many_registers` (the
+program that caught it) now locks the regression out; every other
+`check_program_matches` program compares `rip` as well.
+
 ### 4.3 Reference target device (Snapdragon 855)
 
 **unavailable.** The reference device is not present in this environment.

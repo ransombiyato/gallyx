@@ -60,6 +60,41 @@ const std::vector<std::uint8_t> kLoopProgram = {
     0x31, 0xD2, 0x48, 0x01, 0xC2, 0x48, 0xFF, 0xC9, 0x75, 0xF8, 0xF4,
 };
 
+// Guest program with a deliberately *wide* hot block, so register allocation has
+// something to allocate. The loop body touches eleven guest registers, which
+// exceeds the ten callee-saved host registers the allocator can use.
+//   mov r12d, <iterations>  ; 41 BC xx xx xx xx   (immediate patched below)
+// loop:
+//   add rax, {rbx,rcx,rdx,rsi,rdi,r8,r9,r10,r11}   ; 10 adds, rax accumulates
+//   add rax, rbx                                   ; one repeat use of rbx
+//   dec r12                                        ; 49 FF CC
+//   jne loop                                       ; 75 DD
+//   hlt                                            ; F4
+// All sources are zero, so rax ends at 0; r12 counts down to 0.
+std::vector<std::uint8_t> make_wide_program(std::uint32_t iterations) {
+    std::vector<std::uint8_t> p = {
+        0x41, 0xBC, 0x00, 0x00, 0x00, 0x00, // mov r12d, imm32 (patched)
+        0x48, 0x01, 0xD8,                   // add rax, rbx
+        0x48, 0x01, 0xC8,                   // add rax, rcx
+        0x48, 0x01, 0xD0,                   // add rax, rdx
+        0x48, 0x01, 0xF0,                   // add rax, rsi
+        0x48, 0x01, 0xF8,                   // add rax, rdi
+        0x4C, 0x01, 0xC0,                   // add rax, r8
+        0x4C, 0x01, 0xC8,                   // add rax, r9
+        0x4C, 0x01, 0xD0,                   // add rax, r10
+        0x4C, 0x01, 0xD8,                   // add rax, r11
+        0x48, 0x01, 0xD8,                   // add rax, rbx
+        0x49, 0xFF, 0xCC,                   // dec r12
+        0x75, 0xDD,                         // jne loop (offset 6)
+        0xF4,                               // hlt
+    };
+    p[2] = static_cast<std::uint8_t>(iterations & 0xFF);
+    p[3] = static_cast<std::uint8_t>((iterations >> 8) & 0xFF);
+    p[4] = static_cast<std::uint8_t>((iterations >> 16) & 0xFF);
+    p[5] = static_cast<std::uint8_t>((iterations >> 24) & 0xFF);
+    return p;
+}
+
 // Compiler barrier: keep the timed run from being hoisted or eliminated.
 inline void optimization_barrier(const void* p) {
 #if defined(__GNUC__) || defined(__clang__)
@@ -73,13 +108,15 @@ struct Options {
     std::uint64_t iterations = 1'000'000; // loop iterations per sample
     std::uint32_t repeats = 5;            // timed samples (one warm-up discarded)
     bool json = false;
+    bool wide = false; // use the wide-register workload
 };
 
 void usage() {
     std::fprintf(stderr,
-                 "usage: hyperion_tier_bench [--iterations N] [--repeats N] [--json]\n"
+                 "usage: hyperion_tier_bench [--iterations N] [--repeats N] [--wide] [--json]\n"
                  "  --iterations N  guest loop iterations per sample (default 1000000)\n"
                  "  --repeats N     timed samples, one warm-up discarded (default 5, min 2)\n"
+                 "  --wide          use the 11-register wide-block workload (default: narrow)\n"
                  "  --json          machine-readable report\n");
 }
 
@@ -88,6 +125,8 @@ bool parse(int argc, char** argv, Options& o) {
         const std::string a = argv[i];
         if (a == "--json") {
             o.json = true;
+        } else if (a == "--wide") {
+            o.wide = true;
         } else if (a == "--help" || a == "-h") {
             usage();
             std::exit(0);
@@ -124,25 +163,61 @@ struct RunOutcome {
     double ns = 0.0;
 };
 
-// Time one full run of the loop program through the given tier.
-template<typename RunFn> RunOutcome time_run(RunFn&& run, std::uint64_t iterations) {
-    FlatMemory mem(kBase, 4096);
-    std::memcpy(mem.data(), kLoopProgram.data(), kLoopProgram.size());
+// A fixed guest workload: the program bytes, its initial state and a check of
+// the final state, so a benchmark can never silently measure a broken
+// translator.
+struct Workload {
+    const char* name;
+    std::vector<std::uint8_t> program;
     GuestState initial;
-    initial.rip = kBase;
-    initial.reg(Gpr::kRax) = 1;
-    initial.reg(Gpr::kRcx) = iterations;
+    std::uint64_t iterations;
+    std::uint64_t steps_per_iteration;
+    bool (*check)(const GuestState&, std::uint64_t);
+};
+
+bool check_loop(const GuestState& s, std::uint64_t iterations) {
+    return s.reg(Gpr::kRdx) == iterations;
+}
+
+bool check_wide(const GuestState& s, std::uint64_t) {
+    // All sources are zero, so rax accumulates 0; r12 counts down to 0.
+    return s.reg(Gpr::kRax) == 0 && s.reg(Gpr::kR12) == 0;
+}
+
+Workload make_workload(bool wide, std::uint64_t iterations) {
+    Workload w;
+    w.initial.rip = kBase;
+    w.iterations = iterations;
+    if (wide) {
+        w.name = "wide hot block: 11 guest registers, 12-instruction loop body";
+        w.program = make_wide_program(static_cast<std::uint32_t>(iterations));
+        w.steps_per_iteration = 13; // 12 loop-body insns + the final hlt amortised
+        w.check = check_wide;
+    } else {
+        w.name = "accumulate rax into rdx rcx times, halt";
+        w.program = kLoopProgram;
+        w.initial.reg(Gpr::kRax) = 1;
+        w.initial.reg(Gpr::kRcx) = iterations;
+        w.steps_per_iteration = 4;
+        w.check = check_loop;
+    }
+    return w;
+}
+
+// Time one full run of the workload through the given tier. The step budget is
+// sized to the workload so a long run is never mistaken for a translation
+// failure: a `kStepLimit` result would otherwise fail the correctness check.
+template<typename RunFn> RunOutcome time_run(RunFn&& run, const Workload& w) {
+    FlatMemory mem(kBase, 4096);
+    std::memcpy(mem.data(), w.program.data(), w.program.size());
+    const GuestState initial = w.initial;
+    const std::uint64_t max_steps = w.steps_per_iteration * w.iterations;
 
     const auto t0 = Clock::now();
-    RunResult r = run(mem, initial);
+    RunResult r = run(mem, initial, max_steps);
     const auto t1 = Clock::now();
     optimization_barrier(&r);
     return RunOutcome{r, std::chrono::duration<double, std::nano>(t1 - t0).count()};
-}
-
-// The expected final rdx after `iterations` additions of 1.
-std::uint64_t expected_rdx(std::uint64_t iterations) {
-    return iterations;
 }
 
 } // namespace
@@ -154,6 +229,7 @@ int main(int argc, char** argv) {
     }
 
     const bool tier1_available = hyperion::ExecMem::executable_supported();
+    const Workload workload = make_workload(opts.wide, opts.iterations);
 
     std::vector<double> tier0_ns;
     std::vector<double> tier1_ns;
@@ -174,10 +250,11 @@ int main(int argc, char** argv) {
         const bool warmup = (i == 0);
 
         const RunOutcome r0 =
-            time_run([](FlatMemory& mem, GuestState st) { return hyperion::run_program(mem, st); },
-                     opts.iterations);
+            time_run([](FlatMemory& mem, GuestState st,
+                        std::uint64_t budget) { return hyperion::run_program(mem, st, budget); },
+                     workload);
         if (r0.result.status != RunStatus::kOk ||
-            r0.result.state.reg(Gpr::kRdx) != expected_rdx(opts.iterations)) {
+            !workload.check(r0.result.state, workload.iterations)) {
             tier0_ok = false;
         }
         steps = r0.result.steps;
@@ -187,13 +264,13 @@ int main(int argc, char** argv) {
 
         if (tier1_available) {
             const RunOutcome r1 = time_run(
-                [](FlatMemory& mem, GuestState st) {
+                [](FlatMemory& mem, GuestState st, std::uint64_t budget) {
                     TranslationCache cache;
-                    return cache.run(mem, st);
+                    return cache.run(mem, st, budget);
                 },
-                opts.iterations);
+                workload);
             if (r1.result.status != RunStatus::kOk ||
-                r1.result.state.reg(Gpr::kRdx) != expected_rdx(opts.iterations)) {
+                !workload.check(r1.result.state, workload.iterations)) {
                 tier1_ok = false;
             }
             if (!warmup) {
@@ -207,11 +284,8 @@ int main(int argc, char** argv) {
 
     if (tier1_available) {
         FlatMemory mem(kBase, 4096);
-        std::memcpy(mem.data(), kLoopProgram.data(), kLoopProgram.size());
-        GuestState st;
-        st.rip = kBase;
-        st.reg(Gpr::kRax) = 1;
-        st.reg(Gpr::kRcx) = opts.iterations;
+        std::memcpy(mem.data(), workload.program.data(), workload.program.size());
+        const GuestState st = workload.initial;
         hyperion::TranslationCache cache;
         cache.run(mem, st);
         tier1_code_bytes = cache.total_code_bytes();
@@ -233,7 +307,7 @@ int main(int argc, char** argv) {
         std::printf("  \"hyperion_version\": \"%s\",\n", hyperion::version_string().c_str());
         std::printf("  \"host\": { \"arch\": \"%s\" },\n", hyperion::to_string(host.arch));
         std::printf("  \"workload\": {\n");
-        std::printf("    \"program\": \"accumulate rax into rdx rcx times, halt\",\n");
+        std::printf("    \"program\": \"%s\",\n", workload.name);
         std::printf("    \"iterations\": %llu,\n",
                     static_cast<unsigned long long>(opts.iterations));
         std::printf("    \"guest_instructions_retired\": %llu,\n",
@@ -266,7 +340,8 @@ int main(int argc, char** argv) {
             std::printf("    \"reason\": \"%s\"\n", tier1_reason.c_str());
         }
         std::printf("  },\n");
-        std::printf("  \"notes\": \"Tier 1 has no register allocation or block chaining yet. On a "
+        std::printf("  \"notes\": \"Tier 1 has register allocation within a block (4.2.6) but no "
+                    "block chaining yet. On a "
                     "host that can execute AArch64 directly these numbers reflect that; under "
                     "qemu-user both tiers are additionally translated by qemu, so the ratio is a "
                     "relative sanity signal, not a hardware performance claim.\"\n");
@@ -274,7 +349,7 @@ int main(int argc, char** argv) {
     } else {
         std::printf("hyperion tier 0 vs tier 1 benchmark\n");
         std::printf("%s", hyperion::format_host_info(host).c_str());
-        std::printf("workload:        accumulate rax into rdx rcx times, halt\n");
+        std::printf("workload:        %s\n", workload.name);
         std::printf("iterations:      %llu\n", static_cast<unsigned long long>(opts.iterations));
         std::printf("guest instrs:    %llu retired\n", static_cast<unsigned long long>(steps));
         std::printf("samples:         %zu (1 warm-up discarded, %u requested)\n", s0.count,

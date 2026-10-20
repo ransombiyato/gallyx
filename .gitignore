@@ -32,6 +32,10 @@ venv/
 benchmarks/results/*.local.json
 .agent_tmp/
 
+# Repo-local tool cache (scripts/toolcache.sh). Binaries and toolchain archives
+# are large and machine-specific; they are never committed.
+tools/cache/
+
 # UML feasibility experiments (large, regenerable via experiments/uml/run.sh)
 .uml-rootfs/
 .uml-tmp/

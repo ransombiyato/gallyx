@@ -47,13 +47,21 @@ test() {
 cross_test() {
     need cmake
     need aarch64-linux-gnu-g++
-    need qemu-aarch64
+    # Prefer the repo-local cached emulator (tools/cache); it survives the
+    # container resets that wipe /usr.
+    local qemu="qemu-aarch64"
+    if [ -n "${HYPERION_QEMU:-}" ]; then
+        qemu="${HYPERION_QEMU}"
+    elif [ -x "${ROOT}/tools/cache/bin/qemu-aarch64-static" ]; then
+        qemu="${ROOT}/tools/cache/bin/qemu-aarch64-static"
+    fi
+    need "${qemu}"
     local dir="${ROOT}/build/cross-test"
     cmake -S "${ROOT}" -B "${dir}" -G Ninja \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
         -DHYPERION_ENABLE_CROSS_TESTS=ON \
         -DHYPERION_AARCH64_CXX=aarch64-linux-gnu-g++ \
-        -DHYPERION_QEMU_AARCH64=qemu-aarch64 \
+        -DHYPERION_QEMU_AARCH64="${qemu}" \
         -DHYPERION_BUILD_BENCHMARKS=OFF
     cmake --build "${dir}"
     ctest --test-dir "${dir}" --output-on-failure

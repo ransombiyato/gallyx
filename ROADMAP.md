@@ -264,7 +264,15 @@ changes failing correctness tests or regressing performance.
 - ✅ **Instruction selection: ALU immediate folding.** Foldable `add/sub/cmp`
   immediates lower to one ADDS/SUBS-immediate when AF is dead. Size-guard program
   90 → 88 words. `BENCHMARKS.md` §4.2.5.
-- ⬜ Register allocation.
+- ✅ **Register allocation (within a block).** The block's most-used guest
+  registers are held in callee-saved host registers (x19..x28) and saved/restored
+  around the block, with a *profitability guard* that declines allocation when
+  the prologue/epilogue would cost more than the saved loads. On a new `--wide`
+  workload (12-instruction body, 11 guest registers): 620 → 608 bytes and
+  10.70 → 9.05 ns/guest-instruction. `BENCHMARKS.md` §4.2.6. Guards:
+  `translator.differential_register_allocation_many_registers`,
+  `translator.differential_register_allocation_immediates`. This work also found
+  and fixed a pre-existing halted-`rip` bug (`BENCHMARKS.md` §4.2.7).
 - ⬜ Block chaining.
 - ⬜ Multi-tier compilation.
 

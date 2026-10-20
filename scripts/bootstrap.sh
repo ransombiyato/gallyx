@@ -61,4 +61,8 @@ for tool in cmake ninja clang clang-format clang-tidy aarch64-linux-gnu-g++ qemu
 done
 
 echo
+echo "==> caching tools into the repository (survives a container reset)"
+"${BASH_SOURCE[0]%/*}/toolcache.sh" populate --with-toolchain
+
+echo
 echo "bootstrap complete. Next: scripts/dev.sh bootstrap && scripts/dev.sh test"

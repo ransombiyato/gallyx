@@ -438,6 +438,63 @@ HYPERION_TEST("translator", "differential_branch_inside_loop") {
     HYPERION_CHECK_EQ(r.state.reg(Gpr::kRdx), std::uint64_t{48});
 }
 
+HYPERION_TEST("translator", "differential_register_allocation_many_registers") {
+    // Register allocation (BENCHMARKS.md 4.2.6) must not change behaviour when a
+    // block touches more guest registers than there are host registers to
+    // allocate (kMaxAllocated), nor when the allocation count is odd. This
+    // program touches 11 distinct guest registers (rax..r11), so the allocator
+    // must spill and reuse, and the odd save/restore prologue path is exercised.
+    // Bytes verified with `as`/`objdump`:
+    //   mov eax..r11d, 1..10    ; distinct values so a misallocated register is
+    //                           ; caught (all-zero would not discriminate)
+    //   add rax, rbx..r11       ; accumulate the 2..10
+    //   hlt
+    // Expected rax = 55 (1 + 2 + 3 + ... + 10).
+    const std::vector<std::uint8_t> program = {
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xBB, 0x02, 0x00, 0x00, 0x00, 0xB9, 0x03, 0x00, 0x00,
+        0x00, 0xBA, 0x04, 0x00, 0x00, 0x00, 0xBE, 0x05, 0x00, 0x00, 0x00, 0xBF, 0x06, 0x00,
+        0x00, 0x00, 0x41, 0xB8, 0x07, 0x00, 0x00, 0x00, 0x41, 0xB9, 0x08, 0x00, 0x00, 0x00,
+        0x41, 0xBA, 0x09, 0x00, 0x00, 0x00, 0x41, 0xBB, 0x0A, 0x00, 0x00, 0x00, 0x48, 0x01,
+        0xD8, 0x48, 0x01, 0xC8, 0x48, 0x01, 0xD0, 0x48, 0x01, 0xF0, 0x48, 0x01, 0xF8, 0x4C,
+        0x01, 0xC0, 0x4C, 0x01, 0xC8, 0x4C, 0x01, 0xD0, 0x4C, 0x01, 0xD8, 0xF4,
+    };
+    GuestState initial;
+    initial.rip = kBase;
+    check_program_matches(program, initial);
+    FlatMemory mem(kBase, 4096);
+    std::memcpy(mem.data(), program.data(), program.size());
+    hyperion::TranslationCache cache;
+    const hyperion::RunResult r = cache.run(mem, initial);
+    HYPERION_CHECK(r.status == hyperion::RunStatus::kOk);
+    HYPERION_CHECK_EQ(r.state.reg(Gpr::kRax), std::uint64_t{55});
+}
+
+HYPERION_TEST("translator", "differential_register_allocation_immediates") {
+    // A mov-immediate whose destination is allocated must land in the host
+    // register (a fast path in emit_one), and a later add must see it. The
+    // values are chosen so the 32-bit zero-extension of `mov eax, imm32` matters.
+    //   mov eax, 1              ; B8 01 00 00 00
+    //   mov ebx, 2              ; BB 02 00 00 00
+    //   mov ecx, 3              ; B9 03 00 00 00
+    //   add eax, ebx            ; 01 D8
+    //   add eax, ecx            ; 01 C8
+    //   hlt                     ; F4
+    // Expected eax = 6.
+    const std::vector<std::uint8_t> program = {
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xBB, 0x02, 0x00, 0x00, 0x00,
+        0xB9, 0x03, 0x00, 0x00, 0x00, 0x01, 0xD8, 0x01, 0xC8, 0xF4,
+    };
+    GuestState initial;
+    initial.rip = kBase;
+    check_program_matches(program, initial);
+    FlatMemory mem(kBase, 4096);
+    std::memcpy(mem.data(), program.data(), program.size());
+    hyperion::TranslationCache cache;
+    const hyperion::RunResult r = cache.run(mem, initial);
+    HYPERION_CHECK(r.status == hyperion::RunStatus::kOk);
+    HYPERION_CHECK_EQ(r.state.reg(Gpr::kRax), std::uint64_t{6});
+}
+
 HYPERION_TEST("translator", "dispatcher_stops_at_unsupported") {
     // mov eax, 1 ; push rax ; hlt. The dispatcher translates `mov`, then stops
     // at `push` with kUnsupported and leaves rip on the push, never running the
@@ -497,8 +554,12 @@ HYPERION_TEST("translator", "translated_code_size_is_bounded") {
     // lies inside the entry block's byte range.
     HYPERION_CHECK_EQ(cache.block_count(), std::size_t{3});
     const std::size_t words = cache.total_code_bytes() / 4;
-    // Exact count at the time of writing is 88 words (352 bytes), after the
-    // flag-liveness pass (BENCHMARKS.md 4.2.3) and immediate folding (4.2.5).
+    // Exact count at the time of writing is 88 words (352 bytes). Guest-register
+    // allocation (4.2.6) takes the halt block's prologue+epilogue but removes
+    // enough load/store traffic to net −3 words; the correctness fix that writes
+    // rip on a halt (4.2.7) adds 3 words back, landing on the same 88 recorded
+    // in 4.2.5 by coincidence. The profitability guard in pass 1.5 is what keeps
+    // allocation from regressing small blocks (see BENCHMARKS.md 4.2.6).
     // The guard is an upper bound so a *reduction* is allowed but any growth
     // fails CI; a code-size regression is otherwise easy to miss under qemu-user
     // timing noise. Update the bound deliberately when the count legitimately

@@ -8,10 +8,11 @@ the reference interpreter (Tier 0) and a translation cache that runs whole
 programs through generated AArch64 code (Tier 1).** Phase 4's exit criteria are
 met and recorded. Phase 5 has begun with a *measured baseline before any
 optimisation*: on AArch64 under `qemu-user`, Tier 1 is ~12.8× faster than Tier 0
-on a fixed loop workload (BENCHMARKS.md §4.2), and **five optimizations are now
+on a fixed loop workload (BENCHMARKS.md §4.2), and **six optimizations are now
 accepted and measured** (parity fast path, dead-`rip` elimination, flag
-liveness, direct-mapped dispatch, ALU immediate folding — BENCHMARKS.md
-§4.2.1–4.2.5). Phase 6's syscall inventory is complete and validated
+liveness, direct-mapped dispatch, ALU immediate folding, guest-register
+allocation — BENCHMARKS.md §4.2.1–4.2.6). Phase 6's syscall inventory is
+complete and validated
 (docs/syscalls/), and the **first syscall slice (`write`/`exit`/`exit_group`) is
 implemented in both tiers**, with unimplemented numbers returning `-ENOSYS`
 explicitly. The guest instruction subset remains small; see COMPATIBILITY.md.**
@@ -57,7 +58,7 @@ each. Distribution: U4=39, U3=75, U2=32, U1=14, E1=8, E2=100, E3=107.
 | 5. Optimization 3: flag liveness (skip dead flags) | **Done & measured** — BENCHMARKS.md §4.2.3; −39.7% generated code for the fixed workload |
 | 6. Optimization 4: direct-mapped dispatch | **Done & measured** — BENCHMARKS.md §4.2.4; 99.9985% dispatch hit rate |
 | 7. Optimization 5: ALU immediate folding | **Done & measured** — BENCHMARKS.md §4.2.5; −2 words on the size-guard program |
-| 8. Register allocation | **Not started** |
+| 8. Optimization 6: guest-register allocation | **Done & measured** — BENCHMARKS.md §4.2.6; −15% Tier 1 time / −1.9% code on the wide workload, with a profitability guard |
 | 9. Block chaining | **Not started** |
 | 10. Multi-tier compilation | **Not started** |
 
@@ -114,6 +115,24 @@ register first. The fold is applied only when AF is dead (AF needs `b` in a
 register); a first unconditional attempt was caught by the differential test and
 narrowed. Size-guard program fell 90 → 88 words (BENCHMARKS.md §4.2.5). New
 test: `translator.alu_immediate_is_folded`.
+
+**Optimization 6 (guest-register allocation) — accepted.** A pass now keeps the
+block's most-used guest registers in callee-saved host registers (x19..x28) for
+the block's duration, saving/restoring them around the block; `mov`, the ALU ops
+and `inc`/`dec` operate directly on the allocated register when both operands are
+allocated. The first version allocated *every* touched register and **regressed**
+the tiny benchmark loop (364 → 388 bytes); it was replaced by a *profitability
+guard* — allocate only when a register's body memory-op count exceeds the step
+increase in prologue/epilogue overhead — which declines the 3-instruction loop
+and fires on larger blocks. Because the narrow loop cannot show the win, a
+`--wide` workload (12-instruction body, 11 guest registers) was added to the
+harness: it measures **608 vs 620 bytes and 9.05 vs 10.70 ns/guest-instruction
+(RA on vs off)**, reproducible across runs (BENCHMARKS.md §4.2.6). Adding the
+many-register differential test also **exposed a pre-existing `rip` bug** (a
+block ending in `HLT` never wrote `rip`, so the halted `rip` was the block start
+instead of the `HLT` address); fixed and documented in BENCHMARKS.md §4.2.7. New
+tests: `translator.differential_register_allocation_many_registers`,
+`translator.differential_register_allocation_immediates`.
 
 ---
 
@@ -360,23 +379,30 @@ GCC 14.2.0, Clang 19.1.7, CMake 3.31.6, Ninja 1.12.1, qemu-aarch64 10.0.13,
 aarch64-linux-gnu-g++ 14.2.0.
 
 > **Environment note (important for the next agent).** This environment does
-> **not** persist between sessions. A new container starts with *no* toolchain:
-> no `cmake`, `ninja`, `clang`, `qemu-aarch64`, or AArch64 cross compiler. The
-> `build/` directory from a previous session may still exist and look valid
-> (including genuine AArch64 ELF binaries), but the tools to rebuild it will be
-> missing. Run `scripts/bootstrap.sh` first. Do not report a test as passing
-> because an artifact from a previous session is present - rerun it.
+> **not** persist `/usr` between sessions. A new container starts with *no*
+> toolchain: no `cmake`, `ninja`, `clang`, `qemu-aarch64`, or AArch64 cross
+> compiler. The `build/` directory from a previous session may still exist and
+> look valid (including genuine AArch64 ELF binaries), but the tools to rebuild
+> it will be missing.
+>
+> The **repository directory itself does persist**, so the emulator and cross
+> toolchain are cached under `tools/cache/` (git-ignored). Recovery order:
+> `scripts/toolcache.sh restore` (reinstates a cached AArch64 toolchain without a
+> network), then `scripts/bootstrap.sh` only if a tool is still missing. The
+> benchmark and cross-test scripts pick up `tools/cache/bin/qemu-aarch64-static`
+> automatically. Do not report a test as passing because an artifact from a
+> previous session is present - rerun it.
 
 | Check | Command | Result |
 | --- | --- | --- |
 | Native build (`-Werror`) | `cmake --build build/dev` | PASS — no warnings |
-| Native tests | `ctest --test-dir build/dev` | PASS — **9/9** entries (100 unit cases + 8 differential) |
+| Native tests | `ctest --test-dir build/dev` | PASS — **9/9** entries (101 unit cases + 8 differential) |
 | Differential vs. hardware | `./build/dev/tests/hyperion_differential_tests` | PASS — 8/8 compared against real x86-64 |
 | CLI smoke (both tiers) | `ctest --test-dir build/dev -R cli.smoke` | PASS — tiers agree, `steps=17` |
 | Syscall layer (decode/handler/interpreter) | `hyperion_unit_tests --filter=syscall` | PASS — **11/11** new cases |
 | Syscall inventory validator | `python3 tools/gen_syscall_inventory.py --check` | PASS — inventory complete, consistent, valid |
 | Cross build | `cmake --build build/cross-aarch64` | PASS — AArch64 binaries produced |
-| Cross tests under qemu | `ctest --test-dir build/cross-aarch64` | PASS — **10/10** (111 passed, 0 failed, 2 skipped unit cases) |
+| Cross tests under qemu | `ctest --test-dir build/cross-aarch64` | PASS — **10/10** (117 passed, 0 failed, 2 skipped unit cases) |
 | Tier 1 syscall path (AArch64) | `translation_cache.tier1_syscall_write_matches_interpreter` under qemu | PASS — generated code returns `kSyscall`, dispatcher handles it |
 | AArch64 differential | `qemu-aarch64 .../hyperion_differential_tests` | SKIP — 0 passed, **8 skipped** (no x86-64 oracle) |
 | Translator blocks vs. interpreter (AArch64) | `translator.block_*` under qemu | PASS — block cuts at terminators/unsupported/buffer end |
@@ -386,6 +412,10 @@ aarch64-linux-gnu-g++ 14.2.0.
 | Dispatch collision safety (AArch64) | `translation_cache.direct_map_collision_falls_back_to_map` | PASS — two PCs in one slot both run correctly, no re-translation |
 | Flag liveness (AArch64) | `translator.dead_flags_are_not_computed` | PASS — a dead-flag `add` costs ≤4 words, a live one ≥15 |
 | ALU immediate folding (AArch64) | `translator.alu_immediate_is_folded` | PASS — foldable immediate is strictly smaller than a materialised one |
+| Register allocation, many registers (AArch64) | `translator.differential_register_allocation_many_registers` | PASS — 11-register program matches the interpreter instruction-for-instruction, including `rip` |
+| Register allocation, immediates (AArch64) | `translator.differential_register_allocation_immediates` | PASS — allocated destination written by `mov` imm then read |
+| Register-allocation benchmark (AArch64) | `scripts/bench-tier-qemu.sh --wide --iterations 100000 --repeats 7` | PASS — 608 vs 620 bytes, 9.05 vs 10.70 ns/guest-ins (RA on vs off) |
+| Tool cache recovery | `scripts/toolcache.sh restore` after removing the sysroot | PASS — cross compiler and sysroot restored, cross tests still 100% |
 | CLI tier 1 executes generated code | `HYPERION_EMULATOR=qemu-aarch64 ... cli_smoke.sh` | PASS — **3 basic blocks translated**, `steps=17` |
 | ASan/UBSan (clang) | `ctest --test-dir build/san` | PASS — 9/9 |
 | Formatting | `clang-format --dry-run --Werror` | PASS — clean |
@@ -395,12 +425,12 @@ aarch64-linux-gnu-g++ 14.2.0.
 | UML feasibility (smoke) | `experiments/uml/run.sh smoke` | PASS — kernel boots unprivileged; all 6 namespace types OK |
 | UML feasibility (systemd) | `experiments/uml/run.sh systemd` | PASS — systemd 257 as PID 1 → `multi-user.target` |
 
-The native suite is 9 CTest entries: `unit.native` (one entry running **100**
+The native suite is 9 CTest entries: `unit.native` (one entry running **101**
 unit test cases across 11 files), `differential.native_vs_interpreter` (**8**
 cases compared against real x86-64 hardware), `syscall.inventory_valid`,
 `cli.smoke`, `bench.smoke`, `bench.methodology`, `bench.timing_not_eliminated`
 and `bench.rejects_single_sample`. The cross build has 10 entries (the same set
-plus `cross.aarch64_tests`).
+plus `cross.aarch64_tests`, which runs **117** unit cases under `qemu-user`).
 
 ### Remote verification (GitHub Actions)
 
@@ -496,23 +526,23 @@ stable-vs-noisy discrimination case).
 ## 4. Immediate next task
 
 **Phase 6's first syscall slice (`write`/`exit`/`exit_group`) is implemented and
-tested in both tiers. Phase 5 has five accepted, measured optimizations
-(BENCHMARKS.md §4.2.1–4.2.5), all deterministic-evidence based. The next
-structural Phase 5 work is register allocation; the next Phase 6 work is the
-guest address space.**
+tested in both tiers. Phase 5 has six accepted, measured optimizations
+(BENCHMARKS.md §4.2.1–4.2.6), all deterministic-evidence based. The next
+structural Phase 5 work is block chaining; the next Phase 6 work is the guest
+address space.**
 
 The single best next action:
 
-- **Guest register allocation (Phase 5, start small).** Today every guest
-  instruction is a load/compute/store against `GuestState` in memory, which
-  dominates the generated code. As a first, provably-safe step, keep the
-  *most-used* guest registers in AArch64 registers within a block: load them at
-  block entry, operate in registers, spill at block exit. Keep the block
-  signature and the authoritative-`rip` rule unchanged, keep the interpreter as
-  the oracle, and require the whole differential suite to pass before accepting
-  the change. Then re-run `scripts/bench-tier-qemu.sh` and record before/after in
-  BENCHMARKS.md with a verdict. Add a deterministic guard for whatever the change
-  is expected to move (e.g. a `GuestState` load/store count) so the improvement
+- **Block chaining (Phase 5, start small).** Today every block exit returns to
+  the dispatcher, which does a direct-mapped lookup. Link a block's exit
+  directly to its successor's generated code so a hot loop stays in generated
+  code, guarded by the same authoritative-`rip` rule and keeping the dispatcher
+  as the fallback for any unlinked exit. The direct-mapped table (BENCHMARKS.md
+  §4.2.4) gives a natural place to record a link, and the block exit already
+  reports the target hint. Require the whole differential suite to pass before
+  accepting, and re-run `scripts/bench-tier-qemu.sh` (both workloads) and record
+  before/after in BENCHMARKS.md with a verdict. Add a deterministic guard for
+  whatever the change should move (e.g. dispatcher lookups per run) so the win
   is provable even when `qemu-user` timing is noisy.
 
 Then, independent and larger (Phase 6):
@@ -561,13 +591,16 @@ performance-trend baseline), but neither blocks Phase 5.
 ## 5. Exact commands to reproduce this state
 
 ```bash
-scripts/bootstrap.sh            # one-time toolchain install (needs sudo)
+scripts/bootstrap.sh            # one-time toolchain install + repo tool cache (needs sudo)
+scripts/toolcache.sh restore    # after a container reset: reinstate the cached toolchain
+scripts/toolcache.sh status     # what is cached
 scripts/dev.sh bootstrap        # configure
 scripts/dev.sh build            # build
 scripts/dev.sh test             # native tests
 scripts/dev.sh cross-test       # AArch64 tests under qemu-user
 scripts/dev.sh bench --iterations 1000000 --repeats 9 --json
-scripts/bench-tier-qemu.sh --iterations 200000 --repeats 7   # Tier 0 vs Tier 1 (AArch64 under qemu)
+scripts/bench-tier-qemu.sh --iterations 200000 --repeats 7        # Tier 0 vs Tier 1 (narrow loop)
+scripts/bench-tier-qemu.sh --wide --iterations 100000 --repeats 7 # register-allocation workload
 
 # installer (no root, installs into ~/.local by default)
 curl -fsSL https://raw.githubusercontent.com/ransombiyato/hyperion-dbt/main/install.sh | bash
@@ -584,8 +617,11 @@ experiments/uml/run.sh clean    # remove generated images/logs
 
 - The **development host is x86-64**, not AArch64. Use the cross + qemu
   pipeline (`scripts/dev.sh cross-test`) to execute AArch64 code.
-- **Nothing persists between sessions** - see the note in section 2. Reinstall
-  the toolchain before concluding that something is broken.
+- **Nothing in `/usr` persists between sessions** - see the note in section 2.
+  The repository directory *does* persist, so a tool cache lives at
+  `tools/cache/` (git-ignored). Recover with `scripts/toolcache.sh restore`
+  before concluding that something is broken; `scripts/bootstrap.sh` reinstalls
+  and re-populates the cache.
 - The reference **target** device (Snapdragon 855, Android 10) is not present in
   this environment. Target-device claims must be measured on real hardware
   before being asserted; see `docs/target-environment.md`.

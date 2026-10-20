@@ -468,3 +468,71 @@ expected direction, e.g. a dead-flag `add` costs fewer words than a live one), s
 it cannot be satisfied by an unrelated change. When real ARM hardware becomes
 available, the timing claims can be revisited; the deterministic guards stay
 valid regardless.
+
+---
+
+## D-021 — Guest-register allocation is per block, conservative, and gated on profitability
+
+**Date:** Phase 5.
+**Status:** Accepted.
+
+**Context.** With flags recomputed in generated code and `rip` written once per
+block, the remaining dominant cost is that every guest register access is a
+load or store of `GuestState` in memory. Keeping the hot registers in host
+registers within a block is the obvious next step, but a naive version (allocate
+every register touched) *regressed* both code size and time on a small block,
+because the save/restore prologue/epilogue cost more than the loads it removed.
+
+**Decision.** Allocation is scoped to a single translation block and guarded by
+a profitability model:
+
+1. **Per block, not global.** A register is loaded at block entry, kept in a
+   callee-saved host register (x19..x28) for the block, and stored at block exit.
+   There is no cross-block allocation and no live-range splitting, so
+   `GuestState` stays authoritative at every block boundary and the block
+   signature is unchanged.
+2. **Callee-saved host registers only.** x19..x28 are preserved by the AArch64
+   ABI, so generated code that borrows them cannot corrupt its host caller.
+3. **Profitability gate.** A register is allocated only when its body memory-op
+   count exceeds the step increase in prologue/epilogue cost
+   (`alloc_cost(n) = 2n + 2*ceil(n/2)`). This prefers *not* to allocate when
+   unsure, which is why the 3-instruction benchmark loop is left alone.
+4. **Oracle unchanged.** The reference interpreter is untouched; the change is
+   accepted only if the full differential suite (which compares `rip` and flags)
+   passes, so a misallocation cannot pass silently.
+
+**Consequences.** The change is a measured win on blocks large enough to pay for
+the prologue (608 vs 620 bytes, 9.05 vs 10.70 ns/guest-instruction on the `--wide`
+workload, BENCHMARKS.md §4.2.6) and a no-op on tiny blocks. The cost is that the
+profitability model is a static count, not a measured cost, and a register used
+across a block boundary is still reloaded; both are documented limits, not
+hidden. Writing the many-register differential test immediately exposed a
+pre-existing halted-`rip` bug, which is the intended behaviour of the "oracle
+unchanged, full state compared" rule.
+
+---
+
+## D-022 — Tools that the container wipes are cached inside the repository
+
+**Date:** Phase 5.
+**Status:** Accepted.
+
+**Context.** The development container does not persist `/usr` between sessions,
+but the repository directory does. A session can therefore start with the build
+tree intact and no `cmake`, `qemu-aarch64` or AArch64 cross compiler, making a
+previous green build unverifiable. Re-running the package bootstrap every session
+is slow and depends on a network mirror.
+
+**Decision.** The emulator and (optionally) the cross toolchain are cached under
+`tools/cache/`, which is **git-ignored** so binaries and archives never enter
+version control. `scripts/bootstrap.sh` populates the cache; `scripts/toolcache.sh`
+manages it (`populate`, `restore`, `status`, `env`). The benchmark and cross-test
+scripts prefer the cached `qemu-aarch64-static` when it exists, so a run uses the
+same emulator across sessions.
+
+**Consequences.** Recovery after a reset is `scripts/toolcache.sh restore`
+(offline) rather than a full package install. The cache is machine-specific and
+must never be committed; `.gitignore` enforces that, and the restore path is
+verified by deleting the sysroot and restoring it (STATUS.md §2). If a cached
+binary is ever stale or suspect, `HYPERION_QEMU` overrides it and `populate`
+refreshes it from the system package.

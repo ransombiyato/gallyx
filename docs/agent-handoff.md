@@ -59,14 +59,17 @@ not-taken branches) run under `qemu-user` and match the interpreter on final
 state and step count. `hyperion run <file> --tier=0|1` runs a raw x86-64 blob
 through either tier and the two must agree (`tests/cli/cli_smoke.sh`).
 
-**What is still missing.** No block chaining, no register allocation (guest
-registers stay in memory), and no cache invalidation (self-modifying code would
-run stale translations — a documented boundary). The syscall layer exists but is
-a **first slice only**: `write`/`exit`/`exit_group` are implemented, everything
-else returns `-ENOSYS`. The guest stack (`push`/`pop`/`ret`) and memory operands
-are still *refused explicitly* rather than miscompiled, because they need a guest
-address space (Phase 6). The interpreter remains the only *complete* execution
-path. Phase 5 continues with register allocation; `STATUS.md` §4 lists the steps.
+**What is still missing.** No block chaining and no cache invalidation
+(self-modifying code would run stale translations — a documented boundary).
+Guest-register allocation now exists **within a block** (the hottest registers are
+held in callee-saved host registers, with a profitability guard that declines
+allocation on tiny blocks), but there is no cross-block allocation or spilling.
+The syscall layer exists but is a **first slice only**: `write`/`exit`/`exit_group`
+are implemented, everything else returns `-ENOSYS`. The guest stack
+(`push`/`pop`/`ret`) and memory operands are still *refused explicitly* rather than
+miscompiled, because they need a guest address space (Phase 6). The interpreter
+remains the only *complete* execution path. Phase 5 continues with block chaining;
+`STATUS.md` §4 lists the steps.
 
 **Two real defects were found and fixed in Phase 4**, both by testing: a block
 whose *first* instruction was unsupported was emitted empty and made the
@@ -95,16 +98,19 @@ workload. Read `docs/known-issues.md` §"Benchmarking defects" before touching
 `benchmarks/`. The lesson generalises: a measurement that looks too good is
 usually broken, and this project requires evidence, not plausible numbers.
 
-> **The environment does not persist.** A new session starts with no toolchain.
-> Run `scripts/bootstrap.sh` first, and do not treat a stale `build/` directory
-> as evidence that tests pass — rerun them.
+> **The environment does not persist.** A new session starts with no toolchain in
+> `/usr`. The **repository directory does persist**, so a tool cache lives at
+> `tools/cache/` (git-ignored): recover with `scripts/toolcache.sh restore`
+> (offline) and only then `scripts/bootstrap.sh` if a tool is still missing. Do
+> not treat a stale `build/` directory as evidence that tests pass — rerun them.
 
 ---
 
 ## 3. Verify the current state (do this first)
 
 ```bash
-scripts/bootstrap.sh        # toolchain (sudo); skip if already installed
+scripts/toolcache.sh restore # after a container reset: reinstate cached tools (offline)
+scripts/bootstrap.sh        # full toolchain (sudo); skip if already installed
 scripts/dev.sh bootstrap
 scripts/dev.sh build
 scripts/dev.sh test         # expect: all tests passed
@@ -149,12 +155,13 @@ build.
 
 ## 5. Your next task
 
-**Phases 0–4 are closed. Phase 5 is active (five optimizations accepted and
+**Phases 0–4 are closed. Phase 5 is active (six optimizations accepted and
 measured: parity fast path, dead-`rip` elimination, flag liveness, direct-mapped
-dispatch, ALU immediate folding). Phase 6's syscall inventory is complete and
-CI-validated, and the first syscall slice (`write`/`exit`/`exit_group`) is
-implemented and tested in both tiers. The next concrete step is guest register
-allocation (Phase 5), then the guest address space (Phase 6).** Guest state, the
+dispatch, ALU immediate folding, guest-register allocation). Phase 6's syscall
+inventory is complete and CI-validated, and the first syscall slice
+(`write`/`exit`/`exit_group`) is implemented and tested in both tiers. The next
+concrete step is block chaining (Phase 5), then the guest address space
+(Phase 6).** Guest state, the
 decoder, the reference interpreter, the subset contract (`COMPATIBILITY.md` §2),
 the hardware differential, the AArch64 encoder, executable memory,
 single-instruction translation, whole-block translation, the translation-cache
@@ -186,6 +193,16 @@ dispatcher, and the syscall dispatch layer all exist and pass.
 5c. ~~Optimization 5: ALU immediate folding~~ **Done & measured.** (BENCHMARKS.md
    §4.2.5; size-guard 90 → 88 words. Guard:
    `translator.alu_immediate_is_folded`.)
+5d. ~~Optimization 6: guest-register allocation (within a block)~~ **Done &
+   measured.** (BENCHMARKS.md §4.2.6; on the new `--wide` workload 620 → 608
+   bytes and 10.70 → 9.05 ns/guest-ins, with a profitability guard that declines
+   tiny blocks. Guards: `translator.differential_register_allocation_many_registers`,
+   `translator.differential_register_allocation_immediates`.) This work also found
+   and fixed a pre-existing halted-`rip` bug (BENCHMARKS.md §4.2.7).
+5e. ~~Cache the emulator and cross toolchain in the repository~~ **Done.**
+   `scripts/toolcache.sh` (`populate`/`restore`/`status`/`env`), because the
+   container wipes `/usr` between sessions but the repo persists (DECISIONS.md
+   D-022).
 6. ~~Establish the seven-file syscall inventory~~ **Done.** `docs/syscalls/`
    holds `U1.md`–`U4.md`, `E1.md`–`E3.md`, generated from `inventory.tsv` and
    validated against the pinned Linux v6.12 table by
@@ -199,15 +216,16 @@ dispatcher, and the syscall dispatch layer all exist and pass.
    are implemented; every other number returns `-ENOSYS`, counted in
    `RunResult::unimplemented_syscalls`. 11 new tests, including a Tier 1
    differential under `qemu-user`.
-8. **Next (Phase 5): guest register allocation (start small).** Keep the
-   most-used guest registers in AArch64 registers *within* a block (load at
-   entry, spill at exit), leaving the block signature and the authoritative-`rip`
-   rule unchanged. Require the whole differential suite to pass, then re-run
-   `scripts/bench-tier-qemu.sh` and record before/after in BENCHMARKS.md with an
-   accept/reject verdict. Never change the baseline to make a candidate look
-   good. Add a deterministic guard for whatever the change should move (e.g. a
-   `GuestState` load/store count), since `qemu-user` timing is noisy (DECISIONS.md
-   D-020).
+8. **Next (Phase 5): block chaining.** Today every block exit returns to the
+   dispatcher for a lookup. Link a block's exit directly to its successor's
+   generated code so a hot loop stays in generated code, guarded by the same
+   authoritative-`rip` rule, with the dispatcher as the fallback for any
+   unlinked exit. Require the whole differential suite to pass, then re-run
+   `scripts/bench-tier-qemu.sh` (both workloads) and record before/after in
+   BENCHMARKS.md with an accept/reject verdict. Never change the baseline to make
+   a candidate look good. Add a deterministic guard for whatever the change
+   should move (e.g. dispatcher lookups per run), since `qemu-user` timing is
+   noisy (DECISIONS.md D-020).
 9. **Then (Phase 6): build the guest address space.** Implement
    `mmap`/`munmap`/`mprotect`/`brk` over a guest-managed region with explicit
    bounds and permission checks, so the loader and dynamic programs can allocate
@@ -270,10 +288,11 @@ first CI performance-trend baseline.
 
 - **Development host is x86-64** (Debian 13). You cannot natively run AArch64
   binaries here — use the cross + qemu pipeline.
-- **Nothing persists between sessions.** A fresh container has no `cmake`,
-  `ninja`, `clang`, `qemu-aarch64`, or AArch64 cross compiler, even if a
-  `build/` directory survives. Run `scripts/bootstrap.sh` before concluding
-  anything is broken.
+- **Nothing in `/usr` persists between sessions.** A fresh container has no
+  `cmake`, `ninja`, `clang`, `qemu-aarch64`, or AArch64 cross compiler, even if a
+  `build/` directory survives. The repository directory *does* persist, so recover
+  with `scripts/toolcache.sh restore` first, then `scripts/bootstrap.sh` only if a
+  tool is still missing.
 - **`qemu-user` is a correctness oracle only**, never a performance model.
 - **Passwordless `sudo`** is available for package installation.
 - The reference Snapdragon 855 device is **not** present; target-device claims
@@ -294,7 +313,7 @@ first CI performance-trend baseline.
 | Tests | `tests/harness/`, `tests/unit/` |
 | Cross-arch driver | `tests/run_cross_tests.cmake` |
 | Benchmarks | `benchmarks/` |
-| Scripts | `scripts/dev.sh`, `scripts/bootstrap.sh` |
+| Scripts | `scripts/dev.sh`, `scripts/bootstrap.sh`, `scripts/toolcache.sh` |
 | CI | `.github/workflows/ci.yml` |
 | Feasibility experiment | `experiments/uml/` |
 | Architecture analysis | `docs/architecture-feasibility.md` |

@@ -17,6 +17,13 @@ which installs on Debian/Ubuntu: `build-essential cmake ninja-build clang
 clang-format clang-tidy llvm gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 binutils-aarch64-linux-gnu qemu-user qemu-user-static gdb-multiarch`.
 
+It also caches the emulator and cross toolchain under `tools/cache/`
+(git-ignored), because the development container does not persist `/usr` between
+sessions but the repository does. After a reset, `scripts/toolcache.sh restore`
+reinstates the cached toolchain offline; `scripts/toolcache.sh status` shows what
+is cached. The benchmark and cross-test scripts use the cached
+`qemu-aarch64-static` automatically.
+
 ---
 
 ## 2. Standard workflow

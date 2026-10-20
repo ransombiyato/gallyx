@@ -5,7 +5,7 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
-## [Unreleased] — Phase 5 (performance optimizations 3–5)
+## [Unreleased] — Phase 5 (performance optimizations 3–6)
 
 ### Added — flag liveness (BENCHMARKS.md §4.2.3)
 - `translate_block` is now three passes: decode the block, run backward flag
@@ -33,11 +33,43 @@ Meaningful changes by milestone. Format loosely follows
 - Size-guard program fell 90 → 88 words.
 - New test: `translator.alu_immediate_is_folded`.
 
+### Added — guest-register allocation within a block (BENCHMARKS.md §4.2.6)
+- Pass 1.5 ranks guest registers by use count in the block and maps the hottest to
+  callee-saved host registers (x19..x28), saved/restored around the block with
+  `stp`/`ldp`. `mov`, the ALU ops and `inc`/`dec` operate directly on the
+  allocated register when both operands are allocated.
+- A **profitability guard** declines allocation when the prologue/epilogue would
+  cost more than the saved loads. The first version allocated every touched
+  register and *regressed* the tiny benchmark loop (364 → 388 bytes); the guard
+  fixes that (356 bytes on, 364 off).
+- New `--wide` workload (12-instruction body, 11 guest registers) added to
+  `hyperion_tier_bench` because the narrow loop cannot show the win. Result:
+  620 → 608 bytes and 10.70 → 9.05 ns/guest-instruction (RA off → on),
+  reproducible across runs.
+- New tests: `translator.differential_register_allocation_many_registers`,
+  `translator.differential_register_allocation_immediates`.
+
+### Fixed — halted `rip` was the block start (BENCHMARKS.md §4.2.7)
+- A block ending in `HLT` (or `RET`) returned `kHalted` without writing `rip`, so
+  the reported halted `rip` was the block's first address instead of the `HLT`
+  address. Fixed by emitting `rip = insn.address` on the halt path. Found by the
+  new many-register differential test (the first program to end a
+  multi-instruction block in `HLT` and compare full state).
+
+### Added — repo-local tool cache (`scripts/toolcache.sh`)
+- The container wipes `/usr` between sessions but the repository directory
+  persists, so the AArch64 emulator and cross toolchain are cached under
+  `tools/cache/` (git-ignored). `scripts/bootstrap.sh` populates the cache;
+  `scripts/toolcache.sh restore` reinstates the toolchain offline after a reset.
+  The benchmark and cross-test scripts pick up the cached `qemu-aarch64-static`
+  automatically. Recovery path verified by deleting the sysroot and restoring it.
+
 ### Notes
-- All three optimizations were accepted on **deterministic** evidence (generated
-  code size, dispatch counters), because `qemu-user` wall-clock is too noisy to
-  judge them; no speedup is claimed from the timing harness. The interpreter
-  remains the correctness oracle and the differential suite must pass unchanged.
+- All four optimizations were accepted on **deterministic** evidence (generated
+  code size, dispatch counters) plus a relative Tier 1 time signal; `qemu-user`
+  wall-clock is too noisy for absolute claims, so no hardware speedup is claimed.
+  The interpreter remains the correctness oracle and the differential suite must
+  pass unchanged.
 
 ---
 

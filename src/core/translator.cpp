@@ -6,17 +6,21 @@
 // `BlockResult block(GuestState*)` and updates the guest state in place.
 //
 // Design notes:
-//   - Guest registers live in memory (the GuestState). Generated code loads
-//     and stores them; there is no register allocation yet (Phase 5).
+//   - Guest registers are allocated to callee-saved host registers within a
+//     block (Phase 5); see the RegAlloc comment below. GuestState remains
+//     authoritative at block boundaries.
 //   - x86 flags are *computed*, not delegated: AArch64's ADDS/SUBS set N/Z/C/V,
 //     which map onto x86 SF/ZF/CF/OF directly; AF and PF are derived with two
 //     ALU identities documented below. This is what makes the translation
 //     independently checkable against the interpreter rather than a re-entry
 //     into it.
 //   - The x8 register holds the GuestState pointer. It is caller-saved in the
-//     AAPCS64, so the block needs no prologue/epilogue.
+//     AAPCS64, so the block needs no prologue/epilogue unless it allocates.
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
+#include <vector>
 
 #include "hyperion/translator.hpp"
 
@@ -34,6 +38,37 @@ constexpr a64::Reg kT0 = 12;   // scratch
 constexpr a64::Reg kT1 = 13;   // scratch
 constexpr a64::Reg kT2 = 14;   // scratch
 constexpr a64::Reg kT3 = 15;   // scratch
+
+// Guest-register allocation (Phase 5, BENCHMARKS.md §4.2.6).
+//
+// Within a block, the most-used guest registers are held in callee-saved host
+// registers (x19..x28) rather than GuestState memory. Each is loaded once at
+// block entry, kept in sync by every instruction that touches it, and spilled
+// once at block exit. This lets `add rbx, rax` become a single `adds x_h,
+// x_h, x_h` instead of load-load-add-store.
+//
+// The mapping is a pure fast path: GuestState remains the authoritative home of
+// every register at block entry and exit, so the block signature and the
+// authoritative-rip rule are unchanged, and a block with no allocation (or a
+// guest register beyond the cap) keeps the old memory lowering. Because the
+// host registers are callee-saved, they are saved/restored around the block.
+constexpr std::size_t kMaxAllocated = 10; // x19..x28
+constexpr a64::Reg kAllocBase = 19;
+
+struct RegAlloc {
+    std::int8_t host_of_guest[kGprCount];
+    RegAlloc() {
+        for (auto& h : host_of_guest) {
+            h = -1;
+        }
+    }
+    bool mapped(Gpr r) const { return host_of_guest[static_cast<unsigned>(r)] >= 0; }
+    a64::Reg host(Gpr r) const {
+        return static_cast<a64::Reg>(host_of_guest[static_cast<unsigned>(r)]);
+    }
+    // The host registers actually in use, in allocation order.
+    std::vector<a64::Reg> allocated;
+};
 
 // Offsets into GuestState. Generated code hard-codes these, so they are tied
 // to the struct with offsetof/static_assert: a layout change becomes a compile
@@ -64,6 +99,36 @@ void load_gpr(a64::Encoder& e, Gpr r, a64::Reg dst) {
 
 void store_gpr(a64::Encoder& e, a64::Reg src, Gpr r) {
     e.str(a64::Width::k64, src, kState, gpr_offset(r));
+}
+
+// Register-allocation-aware load/store. If guest register `r` is allocated to a
+// host register, the value is copied to/from that register; otherwise it goes
+// through GuestState as before.
+void load_gpr_rb(a64::Encoder& e, const RegAlloc* ra, Gpr r, a64::Reg dst) {
+    if (ra != nullptr && ra->mapped(r)) {
+        e.mov_reg(a64::Width::k64, dst, ra->host(r));
+    } else {
+        load_gpr(e, r, dst);
+    }
+}
+
+void store_gpr_rb(a64::Encoder& e, const RegAlloc* ra, a64::Reg src, Gpr r) {
+    if (ra != nullptr && ra->mapped(r)) {
+        e.mov_reg(a64::Width::k64, ra->host(r), src);
+    } else {
+        store_gpr(e, src, r);
+    }
+}
+
+// The guest register held in host register `h`, or XZR (31) if none. Used to
+// spill an allocated register back to its GuestState slot.
+Gpr guest_of_host(const RegAlloc& ra, a64::Reg h) {
+    for (unsigned r = 0; r < kGprCount; ++r) {
+        if (ra.host_of_guest[r] == static_cast<std::int8_t>(h)) {
+            return static_cast<Gpr>(r);
+        }
+    }
+    return static_cast<Gpr>(31);
 }
 
 // Parity of the low byte of `src`, into `dst` (0 = odd, 1 = even).
@@ -151,6 +216,55 @@ std::uint8_t condition_flags(Condition c) {
         return static_cast<std::uint8_t>(kFbSf | kFbOf | kFbZf);
     }
     return 0;
+}
+
+// Guest registers an instruction reads, and those it writes. Used both to pick
+// which registers to allocate and to price that allocation. Conservative: it
+// names every register the instruction could read or write, so the allocation is
+// a pure fast path that never changes which registers exist.
+void regs_read_write(const Instruction& insn, bool reads[kGprCount], bool writes[kGprCount]) {
+    switch (insn.opcode) {
+    case Opcode::kMov:
+        if (insn.has_src && insn.src.kind == OperandKind::kRegister) {
+            reads[static_cast<unsigned>(insn.src.reg)] = true;
+        }
+        writes[static_cast<unsigned>(insn.dst.reg)] = true;
+        break;
+    case Opcode::kAdd:
+    case Opcode::kSub:
+    case Opcode::kAnd:
+    case Opcode::kOr:
+    case Opcode::kXor:
+        reads[static_cast<unsigned>(insn.dst.reg)] = true;
+        if (insn.has_src && insn.src.kind == OperandKind::kRegister) {
+            reads[static_cast<unsigned>(insn.src.reg)] = true;
+        }
+        writes[static_cast<unsigned>(insn.dst.reg)] = true;
+        break;
+    case Opcode::kCmp:
+        // Reads both operands, writes no register (only flags).
+        reads[static_cast<unsigned>(insn.dst.reg)] = true;
+        if (insn.has_src && insn.src.kind == OperandKind::kRegister) {
+            reads[static_cast<unsigned>(insn.src.reg)] = true;
+        }
+        break;
+    case Opcode::kInc:
+    case Opcode::kDec:
+        reads[static_cast<unsigned>(insn.dst.reg)] = true;
+        writes[static_cast<unsigned>(insn.dst.reg)] = true;
+        break;
+    default:
+        // Control flow, syscall, hlt, nop: no guest register operand.
+        break;
+    }
+}
+
+// Instructions an allocation of `n` registers adds to the block: the
+// save/restore of the borrowed callee-saved host registers (one stp/ldp per
+// pair, with an odd register stored as a pair with XZR) plus one ldr in the
+// prologue and one str in the epilogue per allocated guest register.
+std::size_t alloc_cost(std::size_t n) {
+    return 2 * n + 2 * ((n + 1) / 2);
 }
 
 // Store the masked flags from the AArch64 condition flags, which must have been
@@ -241,10 +355,11 @@ bool encode_imm12(std::uint64_t value, std::uint32_t& imm12, bool& shift12) {
 
 // Load a source operand into `dst`. Only registers and immediates are in scope
 // for this increment.
-TranslateError load_source(a64::Encoder& e, const Operand& src, a64::Reg dst, int bits) {
+TranslateError load_source(a64::Encoder& e, const Operand& src, a64::Reg dst, int bits,
+                           const RegAlloc* ra) {
     switch (src.kind) {
     case OperandKind::kRegister:
-        load_gpr(e, src.reg, dst);
+        load_gpr_rb(e, ra, src.reg, dst);
         if (bits == 32) {
             // A 32-bit operand use sees only the low 32 bits, and a 32-bit MOV
             // must zero-extend into the destination (the x86-64 rule).
@@ -262,9 +377,44 @@ TranslateError load_source(a64::Encoder& e, const Operand& src, a64::Reg dst, in
     return TranslateError::kInternal;
 }
 
-void emit_return(a64::Encoder& e, BlockResult result) {
+void emit_return(a64::Encoder& e, BlockResult result, const RegAlloc* ra = nullptr) {
+    if (ra != nullptr) {
+        // Spill every allocated guest register back to its GuestState slot.
+        // Spills are individual stores: two allocated host registers are not
+        // necessarily consecutive in GuestState, so a pair store would write the
+        // wrong slot.
+        for (a64::Reg h : ra->allocated) {
+            e.str(a64::Width::k64, h, kState, gpr_offset(guest_of_host(*ra, h)));
+        }
+        // Restore the callee-saved host registers the block borrowed, in the
+        // exact reverse of the prologue. An odd count was stored as a pair with
+        // XZR, so it is restored first and its second element is discarded.
+        const std::size_t npairs = ra->allocated.size() / 2;
+        if (ra->allocated.size() % 2 == 1) {
+            e.ldp_post(ra->allocated.back(), 31, 31, 16);
+        }
+        for (std::size_t i = npairs; i > 0; --i) {
+            e.ldp_post(ra->allocated[2 * i - 2], ra->allocated[2 * i - 1], 31, 16);
+        }
+    }
     e.movz(a64::Width::k64, 0, static_cast<std::uint16_t>(result));
     e.ret();
+}
+
+// Save the callee-saved host registers a block borrows. Pairs are stored with
+// a pre-index writeback; an odd count stores the last alongside XZR.
+void emit_prologue(a64::Encoder& e, const RegAlloc& ra) {
+    for (std::size_t i = 0; i + 1 < ra.allocated.size(); i += 2) {
+        e.stp_pre(ra.allocated[i], ra.allocated[i + 1], 31, -16);
+    }
+    if (ra.allocated.size() % 2 == 1) {
+        e.stp_pre(ra.allocated.back(), 31, 31, -16);
+    }
+    // Load the allocated guest registers from GuestState into their host
+    // registers. This must run after the saves above, which use the stack.
+    for (a64::Reg h : ra.allocated) {
+        e.ldr(a64::Width::k64, h, kState, gpr_offset(guest_of_host(ra, h)));
+    }
 }
 
 // Emit `rip = value` for a constant guest address.
@@ -374,7 +524,7 @@ const char* to_string(BlockExit exit) {
 namespace {
 
 TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip,
-                        std::uint8_t live_flags) {
+                        std::uint8_t live_flags, const RegAlloc* ra = nullptr) {
     const bool is32 = insn.dst.size == OperandSize::k32;
     const a64::Width w = is32 ? a64::Width::k32 : a64::Width::k64;
     const int bits = is32 ? 32 : 64;
@@ -400,11 +550,25 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
         return TranslateError::kNone;
 
     case Opcode::kMov: {
-        const TranslateError err = load_source(e, insn.src, kA, bits);
-        if (err != TranslateError::kNone) {
-            return err;
+        // If both operands are allocated, the move is a single host-register
+        // move (the 32-bit form zero-extends, matching x86-64). If the source is
+        // an immediate and the destination is allocated, materialise straight
+        // into the host register. Otherwise fall back to the memory path.
+        if (ra != nullptr && ra->mapped(insn.dst.reg) && insn.src.kind == OperandKind::kRegister &&
+            ra->mapped(insn.src.reg)) {
+            e.mov_reg(w, ra->host(insn.dst.reg), ra->host(insn.src.reg));
+        } else if (ra != nullptr && ra->mapped(insn.dst.reg) &&
+                   insn.src.kind == OperandKind::kImmediate) {
+            const std::uint64_t value =
+                (bits == 32) ? (insn.src.imm & 0xFFFFFFFFULL) : insn.src.imm;
+            e.mov_imm64(ra->host(insn.dst.reg), value);
+        } else {
+            const TranslateError err = load_source(e, insn.src, kA, bits, ra);
+            if (err != TranslateError::kNone) {
+                return err;
+            }
+            store_gpr_rb(e, ra, kA, insn.dst.reg);
         }
-        store_gpr(e, kA, insn.dst.reg);
         if (write_rip) {
             emit_advance_rip(e, insn);
         }
@@ -417,7 +581,22 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
     case Opcode::kOr:
     case Opcode::kXor:
     case Opcode::kCmp: {
-        load_gpr(e, insn.dst.reg, kA);
+        // Operate directly on the allocated host registers when both operands
+        // are allocated; kA/kB/kR are used only as fallbacks. This is what turns
+        // `add rdx, rax` into one `adds x, x, x` instead of load/load/add/store.
+        const a64::Reg A =
+            (ra != nullptr && ra->mapped(insn.dst.reg)) ? ra->host(insn.dst.reg) : kA;
+        if (A == kA) {
+            load_gpr(e, insn.dst.reg, kA);
+        }
+        const a64::Reg B = (ra != nullptr && insn.has_src &&
+                            insn.src.kind == OperandKind::kRegister && ra->mapped(insn.src.reg))
+                               ? ra->host(insn.src.reg)
+                               : kB;
+        // CMP is not a write, so its "result" is only needed for the flags.
+        const bool writes_dst = insn.opcode != Opcode::kCmp;
+        const a64::Reg R =
+            (ra != nullptr && writes_dst && ra->mapped(insn.dst.reg)) ? ra->host(insn.dst.reg) : kR;
 
         const bool is_logical = insn.opcode == Opcode::kAnd || insn.opcode == Opcode::kOr ||
                                 insn.opcode == Opcode::kXor;
@@ -445,8 +624,8 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
                          shift12);
         const bool imm_folded = imm_foldable && (mask & kFbAf) == 0;
 
-        if (!imm_folded) {
-            const TranslateError err = load_source(e, insn.src, kB, bits);
+        if (!imm_folded && B == kB) {
+            const TranslateError err = load_source(e, insn.src, kB, bits, ra);
             if (err != TranslateError::kNone) {
                 return err;
             }
@@ -455,44 +634,47 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
         if (is_logical) {
             switch (insn.opcode) {
             case Opcode::kAnd:
-                e.and_(w, kR, kA, kB);
+                e.and_(w, R, A, B);
                 break;
             case Opcode::kOr:
-                e.orr(w, kR, kA, kB);
+                e.orr(w, R, A, B);
                 break;
             default:
-                e.eor(w, kR, kA, kB);
+                e.eor(w, R, A, B);
                 break;
             }
             if (mask != 0) {
-                emit_flags_logical(e, w, mask, kR);
+                emit_flags_logical(e, w, mask, R);
             }
         } else {
             if (mask & kFbAf) {
                 // t2 = a ^ b, completed to (a ^ b ^ r) after the op for AF.
-                e.eor(a64::Width::k64, kT2, kA, kB);
+                e.eor(a64::Width::k64, kT2, A, B);
             }
             if (imm_folded) {
                 if (is_sub) {
-                    e.subs_imm(w, kR, kA, imm12);
+                    e.subs_imm(w, R, A, imm12);
                 } else {
-                    e.adds_imm(w, kR, kA, imm12);
+                    e.adds_imm(w, R, A, imm12);
                 }
             } else if (is_sub) {
-                e.subs(w, kR, kA, kB);
+                e.subs(w, R, A, B);
             } else {
-                e.adds(w, kR, kA, kB);
+                e.adds(w, R, A, B);
             }
             if (mask != 0) {
                 if (mask & kFbAf) {
-                    e.eor(a64::Width::k64, kT2, kT2, kR);
+                    e.eor(a64::Width::k64, kT2, kT2, R);
                 }
-                emit_flags_from_nzcv(e, is_sub, mask, kT2, kR);
+                emit_flags_from_nzcv(e, is_sub, mask, kT2, R);
             }
         }
 
-        if (insn.opcode != Opcode::kCmp) {
-            store_gpr(e, kR, insn.dst.reg);
+        if (writes_dst && R == kR) {
+            // The result landed in the scratch register, so it must be written
+            // back. When R is the destination's own host register it is already
+            // in place.
+            store_gpr_rb(e, ra, kR, insn.dst.reg);
         }
         if (write_rip) {
             emit_advance_rip(e, insn);
@@ -504,27 +686,36 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
     case Opcode::kDec: {
         // INC/DEC are ADD/SUB of 1, except that CF is preserved. flags_written()
         // excludes CF for these, so CF is never stored and its old value stands;
-        // no explicit save/restore is needed.
-        load_gpr(e, insn.dst.reg, kA);
+        // no explicit save/restore is needed. As with the ALU ops, operate
+        // directly on the allocated host register when there is one.
+        const a64::Reg A =
+            (ra != nullptr && ra->mapped(insn.dst.reg)) ? ra->host(insn.dst.reg) : kA;
+        if (A == kA) {
+            load_gpr(e, insn.dst.reg, kA);
+        }
         e.movz(a64::Width::k32, kB, 1);
         const bool is_sub = insn.opcode == Opcode::kDec;
         const std::uint8_t mask =
             static_cast<std::uint8_t>(flags_written(insn.opcode) & live_flags);
+        const a64::Reg R =
+            (ra != nullptr && ra->mapped(insn.dst.reg)) ? ra->host(insn.dst.reg) : kR;
         if (mask & kFbAf) {
-            e.eor(a64::Width::k64, kT2, kA, kB);
+            e.eor(a64::Width::k64, kT2, A, kB);
         }
         if (is_sub) {
-            e.subs(w, kR, kA, kB);
+            e.subs(w, R, A, kB);
         } else {
-            e.adds(w, kR, kA, kB);
+            e.adds(w, R, A, kB);
         }
         if (mask != 0) {
             if (mask & kFbAf) {
-                e.eor(a64::Width::k64, kT2, kT2, kR);
+                e.eor(a64::Width::k64, kT2, kT2, R);
             }
-            emit_flags_from_nzcv(e, is_sub, mask, kT2, kR);
+            emit_flags_from_nzcv(e, is_sub, mask, kT2, R);
         }
-        store_gpr(e, kR, insn.dst.reg);
+        if (R == kR) {
+            store_gpr_rb(e, ra, kR, insn.dst.reg);
+        }
         if (write_rip) {
             emit_advance_rip(e, insn);
         }
@@ -722,6 +913,53 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
         next_offset += insn.length;
     }
 
+    // Pass 1.5: choose which guest registers to keep in host registers for this
+    // block. Without allocation every source reference emits one `ldr` from
+    // GuestState and every write emits one `str`; with allocation all of those
+    // disappear from the body, at the cost of one `ldr` (prologue) and one `str`
+    // (epilogue) per allocated register plus the save/restore of the borrowed
+    // host registers. A register is worth a slot only when its body references
+    // outnumber that overhead; see alloc_cost().
+    std::size_t refs[kGprCount] = {};
+    for (const Step& step : steps) {
+        bool r[kGprCount] = {};
+        bool w[kGprCount] = {};
+        regs_read_write(step.insn, r, w);
+        for (unsigned i = 0; i < kGprCount; ++i) {
+            refs[i] += (r[i] ? 1 : 0) + (w[i] ? 1 : 0);
+        }
+    }
+
+    RegAlloc ra;
+    // Take the registers with the largest saving first and stop as soon as the
+    // marginal register no longer covers the step increase in overhead, so a
+    // block is allocated only when it nets positive.
+    std::vector<unsigned> order;
+    for (unsigned i = 0; i < kGprCount; ++i) {
+        if (refs[i] > 0) {
+            order.push_back(i);
+        }
+    }
+    std::sort(order.begin(), order.end(), [&](unsigned a, unsigned b) {
+        return refs[a] != refs[b] ? refs[a] > refs[b] : a < b;
+    });
+    std::size_t total_saving = 0;
+    std::size_t nalloc = 0;
+    while (nalloc < order.size() && nalloc < kMaxAllocated) {
+        const std::size_t next = nalloc + 1;
+        const std::size_t gain = refs[order[nalloc]];
+        if (total_saving + gain < alloc_cost(next)) {
+            break;
+        }
+        total_saving += gain;
+        ++nalloc;
+    }
+    for (std::size_t i = 0; i < nalloc; ++i) {
+        const a64::Reg h = static_cast<a64::Reg>(kAllocBase + i);
+        ra.host_of_guest[order[i]] = static_cast<std::int8_t>(h);
+        ra.allocated.push_back(h);
+    }
+
     // Pass 2: backward flag liveness. Flags live in GuestState and persist
     // across blocks, so at a block exit every flag is conservatively live: a
     // successor block may read any of them, and there is no cross-block
@@ -749,21 +987,30 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
     // at its exit. See BENCHMARKS.md §4.2.2.
     a64::Encoder e;
     e.mov_reg(a64::Width::k64, kState, 0); // x8 = GuestState*
+    // Save the callee-saved host registers this block borrows and load the
+    // allocated guest registers into them. Empty (no code) when nothing is
+    // allocated, which keeps the previous lowering byte-for-byte.
+    emit_prologue(e, ra);
 
     for (const Step& step : steps) {
         const Opcode op = step.insn.opcode;
         if (op == Opcode::kHlt || op == Opcode::kRet) {
-            emit_return(e, BlockResult::kHalted);
+            // The interpreter leaves rip on the HLT/RET instruction (a real CPU
+            // faults on HLT with rip at the instruction). Body instructions do
+            // not write rip, so it must be set explicitly here or the block's
+            // start address would leak out as the halted rip.
+            emit_set_rip(e, step.insn.address);
+            emit_return(e, BlockResult::kHalted, &ra);
             break;
         }
         if (op == Opcode::kSyscall) {
             emit_set_rip(e, step.insn.address + step.insn.length);
-            emit_return(e, BlockResult::kSyscall);
+            emit_return(e, BlockResult::kSyscall, &ra);
             break;
         }
         if (op == Opcode::kJmp) {
             emit_set_rip(e, step.insn.dst.imm);
-            emit_return(e, BlockResult::kOk);
+            emit_return(e, BlockResult::kOk, &ra);
             break;
         }
         if (op == Opcode::kJcc) {
@@ -778,11 +1025,11 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
             e.bind(taken);
             emit_set_rip(e, step.insn.dst.imm);
             e.bind(done);
-            emit_return(e, BlockResult::kOk);
+            emit_return(e, BlockResult::kOk, &ra);
             break;
         }
         const TranslateError emit_err =
-            emit_one(e, step.insn, /*write_rip=*/false, step.live_flags);
+            emit_one(e, step.insn, /*write_rip=*/false, step.live_flags, &ra);
         if (emit_err != TranslateError::kNone) {
             // validate_body() already rejected every operand shape emit_one()
             // cannot handle, so reaching here is an internal inconsistency.
@@ -793,7 +1040,7 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
 
     if (exit == BlockExit::kFallThrough) {
         emit_set_rip(e, target);
-        emit_return(e, BlockResult::kOk);
+        emit_return(e, BlockResult::kOk, &ra);
     }
 
     out.exit = exit;

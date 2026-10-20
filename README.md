@@ -89,6 +89,7 @@ Documentation index:
 | [`STATUS.md`](STATUS.md) | Current state, last successful test, next task |
 | [`DECISIONS.md`](DECISIONS.md) | Architectural decisions and reasoning |
 | [`COMPATIBILITY.md`](COMPATIBILITY.md) | Implemented vs missing instruction/ABI features |
+| [`docs/syscalls/README.md`](docs/syscalls/README.md) | Syscall inventory (U1–U4, E1–E3): tiers, evidence and validation |
 | [`BENCHMARKS.md`](BENCHMARKS.md) | Benchmark methodology and measured results |
 | [`TESTING.md`](TESTING.md) | Build, test, fuzzing and differential-testing guide |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Coding conventions and workflow |

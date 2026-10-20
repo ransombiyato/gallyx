@@ -21,7 +21,7 @@ noted in `CHANGELOG.md`.
 
 | ID | Limitation | Notes |
 | --- | --- | --- |
-| LIM-002 | No syscall or ABI layer. | Phase 6. Guest `syscall` is not decoded. |
+| LIM-002 | No syscall or ABI layer. | Phase 6. Guest `syscall` is not decoded. The syscall *inventory* now exists and is validated (`docs/syscalls/`), but no syscall is implemented; every entry is `not-started`. |
 | LIM-003 | The translation cache **never invalidates**. | Self-modifying guest code runs stale translations. Deliberate boundary for the first version; precise invalidation is Phase 7. |
 | LIM-004 | `qemu-user` validates correctness, not performance. | Never quote qemu numbers as performance. |
 | LIM-005 | Benchmark harness measures host only. | `guest_execution.available = false` until a Tier 1/Tier 0 benchmark exists (D-009). No Tier-1 performance measurement exists yet. |

@@ -107,11 +107,12 @@ usually broken, and this project requires evidence, not plausible numbers.
 scripts/bootstrap.sh        # toolchain (sudo); skip if already installed
 scripts/dev.sh bootstrap
 scripts/dev.sh build
-scripts/dev.sh test         # expect: 6/6 test entries passed
-scripts/dev.sh cross-test   # expect: 3/3 tests passed incl. cross.aarch64_tests
+scripts/dev.sh test         # expect: all tests passed
+scripts/dev.sh cross-test   # expect: all tests passed incl. cross.aarch64_tests
 ./build/dev/tests/hyperion_differential_tests   # expect: 8 passed, 0 skipped (x86-64)
 ./build/dev/hyperion version
 ./build/dev/hyperion probe
+python3 tools/gen_syscall_inventory.py --check   # expect: OK, inventory valid
 
 # optional: the installer path (no root, installs into a temp prefix)
 bash install.sh --src . --prefix /tmp/hp --yes
@@ -122,9 +123,11 @@ bash install.sh --uninstall --prefix /tmp/hp
 If `test` or `cross-test` does not pass, **stop and fix that first**. Do not
 build new features on a broken base.
 
-Expected test names: `unit.native`, `bench.smoke`, `bench.methodology`,
-`bench.timing_not_eliminated`, `bench.rejects_single_sample`,
-`cross.aarch64_tests`.
+Expected test names: `unit.native`, `cli.smoke`, `differential.native_vs_interpreter`,
+`syscall.inventory_valid`, `tier_bench.smoke`, `bench.smoke`, `bench.methodology`,
+`bench.timing_not_eliminated`, `bench.rejects_single_sample`, and (cross build
+only) `cross.aarch64_tests`. The suite has 9 tests natively and 10 in the cross
+build.
 
 ---
 
@@ -139,18 +142,20 @@ Expected test names: `unit.native`, `bench.smoke`, `bench.methodology`,
 6. `CONTRIBUTING.md` — conventions and the milestone workflow.
 7. `docs/known-issues.md` — current limitations, including BENCH-001.
 8. `docs/prior-art.md` — the survey and the reuse-vs-build boundary.
+9. `docs/syscalls/README.md` — the syscall inventory, its tiers and its
+   evidence policy; then the seven generated files `U1.md`–`U4.md`, `E1.md`–`E3.md`.
 
 ---
 
 ## 5. Your next task
 
-**Phase 4 is closed. Phase 5 (performance measurement and optimization) has
-begun; its baseline is recorded and the next step is the first optimization
-experiment, judged against that fixed baseline.** Guest state, the decoder, the
-reference interpreter, the subset contract (`COMPATIBILITY.md` §2), the hardware
-differential, the AArch64 encoder, executable memory, single-instruction
-translation, whole-block translation and the translation-cache dispatcher all
-exist and pass.
+**Phases 0–4 are closed. Phase 5 is active (two optimizations accepted and
+measured). Phase 6's syscall inventory is complete and CI-validated. The next
+concrete step is the first slice of the Phase 6 syscall layer.** Guest state, the
+decoder, the reference interpreter, the subset contract (`COMPATIBILITY.md` §2),
+the hardware differential, the AArch64 encoder, executable memory,
+single-instruction translation, whole-block translation and the
+translation-cache dispatcher all exist and pass.
 
 1. ~~Build an AArch64 encoder~~ **Done** (`a64::Encoder`). ~~Add executable-code
    management~~ **Done** (`ExecMem`). ~~Marshall `GuestState` and translate one
@@ -159,51 +164,60 @@ exist and pass.
    (`TranslationCache`). Add encoder instructions as the translator needs them,
    each with a binutils-verified test.
 2. ~~Close Phase 4 out~~ **Done.** Exit criterion met (nested loops, a branch
-   inside a loop, and the earlier programs all match the interpreter), CI green
-   (run `39294174801`), recorded in `STATUS.md` §2.
+   inside a loop, and the earlier programs all match the interpreter), CI green,
+   recorded in `STATUS.md` §2.
 3. ~~Build the Tier-1-vs-Tier-0 timing harness and record a baseline~~ **Done**
    (`benchmarks/tier_bench.cpp`, `scripts/bench-tier-qemu.sh`, BENCHMARKS.md
    §4.2): Tier 1 = 38.4 ns/guest-ins vs Tier 0 = 491.9 ns/guest-ins (ratio
    0.078) on a fixed loop under `qemu-user`.
-4. ~~Optimization 1: parity (PF) fast path~~ **Done & measured.** `emit_parity`
-   now XOR-folds with shifted `EOR` (19 → 6 emitted instructions). Interleaved
-   A/B against the pre-change commit: generated code **904 → 644 bytes
-   (−28.8%)**, Tier 1 wall time **−17.5%** (BENCHMARKS.md §4.2.1). Full
-   differential suite green under `qemu-aarch64`. A deterministic code-size
-   guard (`translator.translated_code_size_is_bounded`) now fails CI on an
-   accidental code-size blow-up.
-5. ~~Optimization 2: dead `rip` stores~~ **Done & measured.** Blocks write `rip`
-   once at their exit instead of after every body instruction (nothing inside a
-   block reads it). Generated code **644 → 584 bytes (−9.3%)**, Tier 1 wall time
-   ≈ −4% (BENCHMARKS.md §4.2.2).
-6. **Next: register allocation (start small).** Every guest instruction is still
-   a load/compute/store of `GuestState`. Keep the most-used guest registers in
-   AArch64 registers *within* a block (load at entry, spill at exit). Keep the
-   block signature and the authoritative-`rip` rule unchanged. Require the whole
-   differential suite to pass, then re-run `scripts/bench-tier-qemu.sh` and
-   record before/after in BENCHMARKS.md with an accept/reject verdict. Never
-   change the baseline to make a candidate look good. Add a deterministic guard
-   for whatever the change should move, since `qemu-user` timing is noisy.
-7. **Keep the oracle.** Run each multi-instruction program through both the
+4. ~~Optimization 1: parity (PF) fast path~~ **Done & measured.** (BENCHMARKS.md
+   §4.2.1; 904 → 644 bytes, Tier 1 wall time −17.5%.)
+5. ~~Optimization 2: dead `rip` stores~~ **Done & measured.** (BENCHMARKS.md
+   §4.2.2; 644 → 584 bytes, Tier 1 wall time ≈ −4%.)
+6. ~~Establish the seven-file syscall inventory~~ **Done.** `docs/syscalls/`
+   holds `U1.md`–`U4.md`, `E1.md`–`E3.md`, generated from `inventory.tsv` and
+   validated against the pinned Linux v6.12 table by
+   `tools/gen_syscall_inventory.py` (ctest `syscall.inventory_valid`, CI job
+   `inventory`). Tiers are evidence-backed via `scripts/trace-syscalls.sh`.
+7. **Next: implement the `syscall` instruction and a minimal dispatch layer
+   (Phase 6).** Add `Opcode::kSyscall` (`0F 05`) to the decoder, handle it in the
+   interpreter and translator, and route it through a `SyscallHandler` interface.
+   Implement only `write` (1), `exit` (60) and `exit_group` (231) first — enough
+   for a hand-written guest program to print and terminate — and return `-ENOSYS`
+   explicitly for everything else. Follow the x86-64 convention: args in
+   `rdi, rsi, rdx, r10, r8, r9`; result in `rax`; errors as negative errno. Move
+   the corresponding `status` values in `inventory.tsv` and regenerate. Then
+   build the guest address space (mmap/brk/mprotect/munmap), which the loader and
+   every dynamic program need.
+8. **Also open (Phase 5): register allocation (start small).** Keep the most-used
+   guest registers in AArch64 registers *within* a block (load at entry, spill at
+   exit), leaving the block signature and the authoritative-`rip` rule unchanged.
+   Require the whole differential suite to pass, then re-run
+   `scripts/bench-tier-qemu.sh` and record before/after in BENCHMARKS.md with an
+   accept/reject verdict. Never change the baseline to make a candidate look
+   good. Add a deterministic guard for whatever the change should move, since
+   `qemu-user` timing is noisy.
+9. **Keep the oracle.** Run each multi-instruction program through both the
    generated blocks and the interpreter's `run_program`, and require the final
    `GuestState` to match bit-for-bit. A mismatch must fail loudly; there is no
    tolerance for "close enough".
-8. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
-   pipeline builds the tests for AArch64, runs them under `qemu-user`, and runs
-   the CLI smoke test with `HYPERION_EMULATOR`, so generated code is exercised in
-   CI without the target device.
+10. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
+    pipeline builds the tests for AArch64, runs them under `qemu-user`, and runs
+    the CLI smoke test with `HYPERION_EMULATOR`, so generated code is exercised in
+    CI without the target device.
 
 **The interpreter stays.** It is the oracle. Do not weaken it to make the code
 generator look correct.
 
-Full Phase 5 acceptance criteria are in `ROADMAP.md`; the concrete first steps
-are in `STATUS.md` §4.
+Full Phase 5 and Phase 6 acceptance criteria are in `ROADMAP.md`; the concrete
+first steps are in `STATUS.md` §4.
 
 **Do not** write kernel-level code — the tier is unvalidated on the reference
-device.
+device. **Do not** claim a syscall works until it has a test and its inventory
+`status` reflects reality.
 
-Optional Phase 1 leftovers, neither blocking Phase 5: unblocking the AArch64 UML
-build (a host glibc/kernel-header problem, see `docs/prior-art.md` §6), and a
+Optional Phase 1 leftovers, neither blocking Phase 5/6: unblocking the AArch64
+UML build (a host glibc/kernel-header problem, see `docs/prior-art.md` §6), and a
 first CI performance-trend baseline.
 
 ---

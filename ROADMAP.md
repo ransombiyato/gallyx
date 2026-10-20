@@ -263,12 +263,28 @@ optimization decisions.
 
 ---
 
-## Phase 6 — Linux ABI and syscall compatibility ⬜
+## Phase 6 — Linux ABI and syscall compatibility 🟡 (inventory started)
 
 **Objective.** Run real Linux guest programs.
 
 **Work items.** Guest syscall layer, ABI-sensitive structures, memory mapping,
 file descriptors, signals, threading, futexes. Feature matrix + integration tests.
+
+**Progress.**
+
+- ✅ **Syscall inventory established (evidence-based).** The complete x86-64
+  syscall set (375 `common`/`64` entries, Linux v6.12) is classified into the
+  seven required files `docs/syscalls/U1.md`–`U4.md` and `E1.md`–`E3.md`,
+  generated from `docs/syscalls/inventory.tsv`. Tiers are backed by a
+  reproducible strace sweep (`scripts/trace-syscalls.sh`) rather than invented
+  frequencies; unmeasured entries are marked `provisional`. A validator
+  (`tools/gen_syscall_inventory.py`) fails CI on any missing, duplicated,
+  misnumbered or mis-tiered entry, so the inventory cannot drift from the pinned
+  kernel table.
+- ⬜ Guest syscall layer + dispatch.
+- ⬜ Guest address space (mmap/brk/mprotect).
+- ⬜ File descriptors and the file syscalls.
+- ⬜ Signals, threads, futexes.
 
 **Exit criteria.** A clearly defined set of real Linux guest programs works
 correctly. No claim of general compatibility.

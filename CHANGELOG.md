@@ -5,6 +5,34 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 6 (syscall inventory)
+
+### Added — evidence-based syscall inventory
+- `docs/syscalls/inventory.tsv`: the canonical, one-row-per-syscall data source
+  (number, name, tier, status, purpose, evidence).
+- `docs/syscalls/kernel-table-x86_64-6.12.tsv`: the pinned Linux v6.12 x86-64
+  syscall table (`arch/x86/entry/syscalls/syscall_64.tbl`), reduced to the 375
+  `common`/`64` entries.
+- `docs/syscalls/U1.md`–`U4.md`, `E1.md`–`E3.md`: the seven required inventory
+  files, generated from `inventory.tsv`. Distribution: U4=39, U3=75, U2=32,
+  U1=14, E1=8, E2=100, E3=107 (375 total).
+- `docs/syscalls/README.md`: tier criteria, the pinned-kernel policy and the
+  evidence policy.
+- `tools/gen_syscall_inventory.py`: validates the inventory against the pinned
+  table (missing, duplicate, misnumbered, mis-tiered, x32, invalid status) and
+  regenerates the seven Markdown files.
+- `scripts/trace-syscalls.sh`: the reproducible strace sweep behind the
+  `trace:N` evidence values. It is honest about its limits: a small x86-64-host
+  sample, treated as a lower bound; unmeasured entries are `provisional`.
+- Wired into the suite as `syscall.inventory_valid` and into CI as the
+  `inventory` job, which also fails if the generated Markdown is stale.
+
+### Notes
+- The inventory records *classification and priority*, not implementation. Every
+  entry is `not-started`; no syscall is claimed as working.
+
+---
+
 ## [Unreleased] — Phase 5
 
 ### Added — performance measurement

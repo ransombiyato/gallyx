@@ -1,17 +1,36 @@
 # STATUS
 
 **Last updated:** 2026-10-19
-**Current phase:** Phase 5 (performance measurement and optimization) — started
+**Current phase:** Phase 5 (performance measurement and optimization) — active;
+Phase 6 (Linux ABI and syscall compatibility) — inventory subsystem started
 **Repository state:** buildable, tested, documented. **Two execution tiers exist:
 the reference interpreter (Tier 0) and a translation cache that runs whole
 programs through generated AArch64 code (Tier 1).** Phase 4's exit criteria are
 met and recorded. Phase 5 has begun with a *measured baseline before any
 optimisation*: on AArch64 under `qemu-user`, Tier 1 is ~12.8× faster than Tier 0
-on a fixed loop workload (BENCHMARKS.md §4.2). The guest subset remains small;
-see COMPATIBILITY.md.**
+on a fixed loop workload (BENCHMARKS.md §4.2). Phase 6's syscall inventory is
+complete and validated (docs/syscalls/). The guest instruction subset remains
+small; see COMPATIBILITY.md.**
 
 This is the first file a returning agent should read. It records exactly what
 works, what was last verified, and what to do next.
+
+---
+
+## 0e. Phase 6 progress (syscall inventory)
+
+| Work item | State |
+| --- | --- |
+| 1. Seven-file syscall inventory (U1–U4, E1–E3) | **Done** — `docs/syscalls/`, generated from `inventory.tsv` |
+| 2. Evidence-based tiering | **Done** — `scripts/trace-syscalls.sh` strace sweep; unmeasured entries marked `provisional` |
+| 3. Automated completeness validation | **Done** — `tools/gen_syscall_inventory.py`; wired into ctest (`syscall.inventory_valid`) and CI |
+| 4. Guest syscall dispatch + semantics | **Not started** — next |
+
+**Inventory facts (verified).** The pinned table is Linux v6.12
+(`arch/x86/entry/syscalls/syscall_64.tbl`), reduced to the 375 `common`/`64`
+entries (numbers 0–462; 336–423 is the x32 range, which Hyperion does not
+target). The validator proves the inventory has exactly those 375, one entry
+each. Distribution: U4=39, U3=75, U2=32, U1=14, E1=8, E2=100, E3=107.
 
 ---
 
@@ -418,18 +437,30 @@ stable-vs-noisy discrimination case).
 
 ## 4. Immediate next task
 
-**Phase 4 is closed (exit criteria met, recorded, CI green). Phase 5 has begun,
-its baseline is recorded, and Optimizations 1 and 2 are complete and measured
-(BENCHMARKS.md §4.2.1, §4.2.2).**
-
-Baseline to beat (AArch64 under `qemu-user`, fixed loop, median of 7):
-Tier 1 = **38.4 ns/guest-instruction**; Tier 0 = 491.9 ns/guest-instruction
-(ratio 0.078). After Optimization 1 the interleaved A/B gives Tier 1 =
-**31.5 ns/guest-instruction**; after Optimization 2, **~29.8**. Generated code
-went **904 → 644 → 584 bytes**. Recorded in BENCHMARKS.md §4.2–§4.2.2,
-reproducible with `scripts/bench-tier-qemu.sh`.
+**Phase 5 is active (two optimizations accepted and measured). Phase 6's syscall
+inventory subsystem is complete and CI-validated. The next concrete work is the
+first slice of the Phase 6 syscall layer.**
 
 The single best next action:
+
+- **Implement the `syscall` instruction + a minimal dispatch table (Phase 6).**
+  Add `Opcode::kSyscall` (x86-64 `0F 05`) to the decoder, model it in the
+  interpreter and the translator, and route it through a `SyscallHandler`
+  interface. Implement only the *trivially correct, dependency-free* calls first
+  — `write` (1), `exit` (60), `exit_group` (231) — so a hand-written guest
+  program can print and terminate. Everything else returns `-ENOSYS` explicitly
+  (never a silent success). This is the smallest slice that produces an
+  observable, testable result and does not require the guest address space.
+- Then build the **guest address space** (mmap/brk/mprotect/munmap) since the
+  loader and every dynamic program depend on it; see `docs/syscalls/U4.md` for
+  the U4 order and `docs/syscalls/README.md` for the evidence policy.
+- Every implemented syscall must: follow the x86-64 argument/return convention
+  (args in `rdi, rsi, rdx, r10, r8, r9`; result in `rax`; errors as `-errno`),
+  validate guest pointers, be listed in `docs/syscalls/inventory.tsv` with
+  `status` moved from `not-started` to `implemented`/`validated`, and have a
+  focused test. Never present a stub as full support.
+
+Also still open from Phase 5 (independent, larger):
 
 - **Register allocation (start small).** Today every guest instruction is a
   load/compute/store against `GuestState` in memory. As a first, provably-safe
@@ -439,7 +470,7 @@ The single best next action:
   interpreter as the oracle, and require the whole differential suite to pass
   before accepting the change. Then re-run `scripts/bench-tier-qemu.sh` and
   record the before/after in BENCHMARKS.md with a verdict.
-- Add a second deterministic guard for whatever the change is expected to move
+- Add a second deterministic guard for whatever a change is expected to move
   (e.g. a guest-state access count), so the improvement is provable even when
   `qemu-user` timing is noisy.
 

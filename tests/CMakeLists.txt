@@ -64,3 +64,17 @@ if(HYPERION_ENABLE_CROSS_TESTS)
             -DHYPERION_QEMU=${HYPERION_QEMU_AARCH64}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/run_cross_tests.cmake)
 endif()
+
+# --- Syscall inventory validation -------------------------------------------
+#
+# The seven syscall inventory files (docs/syscalls/U1..U4.md, E1..E3.md) are
+# generated from docs/syscalls/inventory.tsv and must stay complete and
+# consistent with the pinned kernel syscall table. This test fails if any
+# syscall is missing, duplicated, misnumbered, or mis-tiered, so the inventory
+# cannot silently drift.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME syscall.inventory_valid
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/tools/gen_syscall_inventory.py --check)
+endif()

@@ -523,6 +523,12 @@ unit cases under `qemu-user`) and `syscall.inventory_valid`.
 
 ### Remote verification (GitHub Actions)
 
+CI run `39446173442` on `main` (commit `60114c7`, Phase 6 increment 4:
+`openat` + `fstat`): **conclusion `success`** — all six jobs passed:
+`clang-format`, `build & test (gcc)`, `build & test (clang)`, `ASan/UBSan`,
+`AArch64 cross tests (qemu-user)` and `syscall inventory & shellcheck`
+(1m18s total).
+
 CI run `39410940495` on `main` (commit `454c546`, Phase 6 increment 2:
 guest address space + memory syscalls): **conclusion `success`** — all six jobs
 passed: `clang-format`, `build & test (clang)`, `syscall inventory & shellcheck`,

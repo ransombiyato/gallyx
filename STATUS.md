@@ -404,6 +404,15 @@ plus `cross.aarch64_tests`).
 
 ### Remote verification (GitHub Actions)
 
+CI run `39392485238` on `main` (commit `c40f3fc`, Phase 5 optimizations 3–5):
+**conclusion `success`** — all six jobs passed: `build & test (gcc)`,
+`build & test (clang)`, `AArch64 cross tests (qemu-user)`, `clang-format`,
+`ASan/UBSan`, and `syscall inventory & shellcheck`. The AArch64 job executes the
+generated code for the new dispatch/folding/liveness tests under `qemu-user`.
+
+CI run `39389064540` on `main` (commit `250a148`, Phase 6 first syscall slice):
+**conclusion `success`**.
+
 CI run `39294174801` on `main` (commit `2148492`, Phase 4 translator):
 **conclusion `success`** — all five jobs passed: `ASan/UBSan` (3m4s),
 `build & test (gcc)` (27s), `clang-format` (6s), `build & test (clang)` (34s),

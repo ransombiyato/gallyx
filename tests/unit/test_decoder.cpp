@@ -143,11 +143,15 @@ HYPERION_TEST("decoder", "jcc_negative_rel8_is_signed") {
 }
 
 HYPERION_TEST("decoder", "rejects_unsupported_prefix") {
-    // 0x66 is the operand-size prefix. Ignoring it would decode a 16-bit
-    // instruction as 32-bit, which is silently wrong.
-    const auto r = dec({0x66, 0x89, 0xD8});
+    // 0x65 (GS:) and legacy segment prefixes remain unsupported, while 0x66
+    // properly decodes as 16-bit operand size.
+    const auto r = dec({0x65, 0x89, 0xD8});
     HYPERION_CHECK(!r.ok());
     HYPERION_CHECK(r.error == DecodeError::kUnsupportedPrefix);
+
+    const auto r16 = dec({0x66, 0x89, 0xD8});
+    HYPERION_CHECK(r16.ok());
+    HYPERION_CHECK(r16.instruction.dst.size == hyperion::OperandSize::k16);
 }
 
 HYPERION_TEST("decoder", "rejects_lock_prefix") {
@@ -239,11 +243,12 @@ HYPERION_TEST("decoder", "rejects_empty") {
     HYPERION_CHECK(r.error == DecodeError::kTruncated);
 }
 
-HYPERION_TEST("decoder", "rejects_adc_sbb_group") {
-    // 48 81 D0 <imm32> = adc rax, imm — group 1 extension 2, not modelled.
+HYPERION_TEST("decoder", "decodes_adc_sbb_group") {
+    // 48 81 D0 <imm32> = adc rax, 1 — group 1 extension 2.
     const auto r = dec({0x48, 0x81, 0xD0, 0x01, 0x00, 0x00, 0x00});
-    HYPERION_CHECK(!r.ok());
-    HYPERION_CHECK(r.error == DecodeError::kUnknownOpcode);
+    HYPERION_CHECK(r.ok());
+    HYPERION_CHECK(r.instruction.opcode == Opcode::kAdc);
+    HYPERION_CHECK_EQ(r.instruction.src.imm, 1ULL);
 }
 
 HYPERION_TEST("decoder", "to_string_is_readable") {
@@ -296,9 +301,13 @@ HYPERION_TEST("decoder", "benign_rex_nop_and_multi_rex_length_limit") {
     HYPERION_CHECK(nop64.instruction.opcode == Opcode::kNop);
     HYPERION_CHECK_EQ(nop64.instruction.length, 2u);
 
-    // 41 90 = xchg r8d, eax — NOT a NOP; must remain rejected.
+    // 41 90 = xchg r8d, eax — NOT a NOP; decodes as 32-bit XCHG r8d, eax.
     const auto xchg_r8 = dec({0x41, 0x90});
-    HYPERION_CHECK(!xchg_r8.ok());
+    HYPERION_CHECK(xchg_r8.ok());
+    HYPERION_CHECK(xchg_r8.instruction.opcode == Opcode::kXchg);
+    HYPERION_CHECK(xchg_r8.instruction.dst.reg == hyperion::Gpr::kR8);
+    HYPERION_CHECK(xchg_r8.instruction.dst.size == hyperion::OperandSize::k32);
+    HYPERION_CHECK(xchg_r8.instruction.src.reg == hyperion::Gpr::kRax);
 
     // 14 REX bytes + 0x90 = 15 bytes (architectural max): valid NOP.
     const auto ok15 = dec(

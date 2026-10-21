@@ -107,6 +107,7 @@ public:
     bool write(std::uint64_t address, const std::uint8_t* in, std::size_t count) override;
     bool fetch(std::uint64_t address, std::uint8_t* out, std::size_t count) override;
     std::uint64_t code_epoch() const noexcept override { return code_epoch_; }
+    PageAccess translate_page(std::uint64_t page_addr) noexcept override;
 
     // Diagnostics/tests.
     std::size_t region_count() const { return regions_.size(); }

@@ -1488,28 +1488,20 @@ HYPERION_TEST("syscall", "mmap_end_to_end_under_the_interpreter") {
 }
 
 #if defined(__aarch64__)
-// The AArch64 code generator is register-only today: it rejects any instruction
-// with a memory operand (translator.cpp validate_body) and stops the block
-// there rather than emitting wrong code. This program stores through the mmap
-// pointer with a memory operand, so under generated code it must stop with
-// kUnsupported *after* the mmap syscall has run. This test pins that boundary:
-// it is what "unsupported instructions are handled explicitly" means in
-// practice, and it will start asserting the successful store once the generator
-// learns memory operands.
-HYPERION_TEST("syscall", "mmap_end_to_end_under_generated_code_stops_at_memory_operand") {
+HYPERION_TEST("syscall", "mmap_end_to_end_under_generated_code_stores_through_mapping") {
     GuestAddressSpace as;
     Captured cap;
     const hyperion::RunResult r = run_mmap_program(as, cap, /*use_cache=*/true);
 
-    HYPERION_CHECK(r.status == RunStatus::kUnsupported);
-    HYPERION_CHECK_EQ(r.unimplemented_syscalls, std::uint64_t{0});        // mmap itself was handled
-    HYPERION_CHECK_EQ(r.state.reg(Gpr::kRbx), std::uint64_t{0x50000000}); // mapping returned
+    HYPERION_CHECK(r.status == RunStatus::kOk);
+    HYPERION_CHECK_EQ(r.unimplemented_syscalls, std::uint64_t{0});
+    HYPERION_CHECK_EQ(r.state.reg(Gpr::kRbx), std::uint64_t{0x50000000});
     std::uint8_t stored = 0;
     HYPERION_CHECK(as.read(0x50000000, &stored, 1));
-    HYPERION_CHECK(stored == 0x00); // the store was never executed
+    HYPERION_CHECK(stored == 0xAB);
 }
 #else
-HYPERION_TEST("syscall", "mmap_end_to_end_under_generated_code_stops_at_memory_operand") {
+HYPERION_TEST("syscall", "mmap_end_to_end_under_generated_code_stores_through_mapping") {
     HYPERION_SKIP("host is not AArch64; cannot execute generated AArch64 code");
 }
 #endif // __aarch64__

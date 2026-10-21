@@ -157,7 +157,7 @@ void* ExecArena::allocate(const std::uint8_t* code, std::size_t size) {
     if (size == 0) {
         throw std::invalid_argument("ExecArena: zero-sized allocation");
     }
-    const std::size_t aligned_size = round_up(size, 4);
+    const std::size_t aligned_size = round_up(size, 16);
     const std::size_t ps = page_size();
 
     Slab* target = nullptr;

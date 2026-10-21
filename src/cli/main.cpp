@@ -26,10 +26,11 @@
 namespace {
 
 constexpr std::uint64_t kLoadBase = 0x400000ULL;
-constexpr std::uint64_t kDefaultMaxSteps = 1'000'000;
+constexpr std::uint64_t kDefaultMaxSteps = 1'000'000'000ULL;
 constexpr std::size_t kMaxImageBytes = 64ULL * 1024ULL * 1024ULL;
-constexpr std::size_t kMaxAddressSpaceBytes = 256ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaxAddressSpaceBytes = 512ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t kDefaultHeapBase = 0x20000000ULL;
+constexpr std::uint64_t kDefaultHeapCapacity = 0x20000000ULL;
 constexpr std::uint64_t kDefaultMmapBase = 0x40000000ULL;
 
 void print_usage(const char* argv0) {
@@ -165,7 +166,8 @@ int cmd_run(int argc, char** argv) {
     full_argv.push_back(path);
     full_argv.insert(full_argv.end(), guest_args.begin(), guest_args.end());
 
-    hyperion::GuestAddressSpace memory(kDefaultHeapBase, kDefaultMmapBase, kMaxAddressSpaceBytes);
+    hyperion::GuestAddressSpace memory(kDefaultMmapBase, kDefaultHeapBase, kDefaultHeapCapacity,
+                                       kMaxAddressSpaceBytes);
     hyperion::GuestState state;
 
     if (hyperion::has_elf_magic(code.data(), code.size())) {

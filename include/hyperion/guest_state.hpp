@@ -39,6 +39,19 @@ enum class Gpr : std::uint8_t {
 };
 
 inline constexpr std::size_t kGprCount = 16;
+inline constexpr std::size_t kXmmCount = 16;
+
+// 128-bit SSE2 register value (`XMM0..XMM15`), stored in little-endian lane order
+// (`lo` = bits 63..0, `hi` = bits 127..64).
+struct alignas(16) XmmReg {
+    std::uint64_t lo = 0;
+    std::uint64_t hi = 0;
+
+    friend bool operator==(const XmmReg& a, const XmmReg& b) {
+        return a.lo == b.lo && a.hi == b.hi;
+    }
+    friend bool operator!=(const XmmReg& a, const XmmReg& b) { return !(a == b); }
+};
 
 // Status flags. x86-64 RFLAGS holds more (IF, DF, IOPL, ...); this project
 // models only the flags that integer ALU operations produce. Keeping the set
@@ -85,6 +98,8 @@ struct GuestState {
     std::uint64_t rip = 0;
     Flags flags{};
     std::uint64_t fs_base = 0; // IA32_FS_BASE (set via arch_prctl ARCH_SET_FS)
+    bool df = false;           // RFLAGS.DF direction flag (0 = forward, 1 = backward)
+    XmmReg xmm[kXmmCount] = {};
 
     std::uint64_t& reg(Gpr r) { return gpr[static_cast<std::size_t>(r)]; }
     std::uint64_t reg(Gpr r) const { return gpr[static_cast<std::size_t>(r)]; }

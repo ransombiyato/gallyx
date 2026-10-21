@@ -153,7 +153,9 @@ bool GuestAddressSpace::map_image(std::uint64_t base, const void* data, std::siz
     regions_.push_back(std::move(region));
     std::sort(regions_.begin(), regions_.end(),
               [](const Region& a, const Region& b) { return a.base < b.base; });
-    ++code_epoch_;
+    if (has_perm(perm, MemPerm::kExec)) {
+        ++code_epoch_;
+    }
     return true;
 }
 
@@ -231,7 +233,9 @@ std::optional<std::uint64_t> GuestAddressSpace::map_anonymous(std::size_t size, 
     if (base + *mapped_size > mmap_cursor_) {
         mmap_cursor_ = base + *mapped_size;
     }
-    ++code_epoch_;
+    if (has_perm(perm, MemPerm::kExec)) {
+        ++code_epoch_;
+    }
     return base;
 }
 
@@ -247,12 +251,15 @@ bool GuestAddressSpace::unmap(std::uint64_t addr, std::size_t size) {
 
     // Verify every page in [addr, end) is currently mapped.
     std::uint64_t cursor = addr;
+    bool had_exec = false;
     while (cursor < end) {
         const long idx = find_region(cursor);
         if (idx < 0) {
             return false;
         }
-        cursor = std::min(regions_[static_cast<std::size_t>(idx)].end(), end);
+        const Region& r = regions_[static_cast<std::size_t>(idx)];
+        had_exec = had_exec || has_perm(r.perm, MemPerm::kExec);
+        cursor = std::min(r.end(), end);
     }
 
     // Split any regions spanning `addr` or `end` so removing [addr, end)
@@ -265,7 +272,9 @@ bool GuestAddressSpace::unmap(std::uint64_t addr, std::size_t size) {
         std::remove_if(regions_.begin(), regions_.end(),
                        [&](const Region& r) { return r.base >= addr && r.end() <= end; }),
         regions_.end());
-    ++code_epoch_;
+    if (had_exec) {
+        ++code_epoch_;
+    }
     return true;
 }
 
@@ -295,12 +304,16 @@ bool GuestAddressSpace::protect(std::uint64_t addr, std::size_t size, MemPerm pe
         return false;
     }
 
+    bool exec_changed = has_perm(perm, MemPerm::kExec);
     for (Region& r : regions_) {
         if (r.base >= addr && r.end() <= end) {
+            exec_changed = exec_changed || has_perm(r.perm, MemPerm::kExec);
             r.perm = perm;
         }
     }
-    ++code_epoch_;
+    if (exec_changed) {
+        ++code_epoch_;
+    }
     return true;
 }
 
@@ -322,14 +335,12 @@ std::uint64_t GuestAddressSpace::set_brk(std::uint64_t requested) {
             const auto new_aligned = page_align_up(requested);
             if (requested == heap_base_) {
                 regions_.erase(regions_.begin() + idx);
-                ++code_epoch_;
             } else if (new_aligned && *new_aligned >= heap.base) {
                 const auto kept_pages = static_cast<std::size_t>(*new_aligned - heap.base);
                 const auto zero_from = static_cast<std::size_t>(requested - heap.base);
                 if (kept_pages < heap.bytes.size()) {
                     heap.bytes.resize(kept_pages);
                     heap.size = kept_pages;
-                    ++code_epoch_;
                 }
                 if (zero_from < heap.bytes.size()) {
                     std::memset(heap.bytes.data() + zero_from, 0, heap.bytes.size() - zero_from);
@@ -369,7 +380,6 @@ bool GuestAddressSpace::ensure_heap_mapped(std::uint64_t upto) {
                 return false;
             }
             heap.size = needed;
-            ++code_epoch_;
         }
         return true;
     }
@@ -386,7 +396,6 @@ bool GuestAddressSpace::ensure_heap_mapped(std::uint64_t upto) {
     regions_.push_back(std::move(heap));
     std::sort(regions_.begin(), regions_.end(),
               [](const Region& a, const Region& b) { return a.base < b.base; });
-    ++code_epoch_;
     return true;
 }
 
@@ -432,6 +441,25 @@ bool GuestAddressSpace::access(std::uint64_t address, std::uint8_t* buf, std::si
         cursor = stop;
     }
     return true;
+}
+
+PageAccess GuestAddressSpace::translate_page(std::uint64_t page_addr) noexcept {
+    if ((page_addr & kPageMask) != 0) {
+        return {};
+    }
+    const long idx = find_region(page_addr);
+    if (idx < 0) {
+        return {};
+    }
+    Region& r = regions_[static_cast<std::size_t>(idx)];
+    if (page_addr < r.base || r.end() - page_addr < kPageSize) {
+        return {};
+    }
+    PageAccess out;
+    out.host_page = r.bytes.data() + static_cast<std::size_t>(page_addr - r.base);
+    out.can_read = has_perm(r.perm, MemPerm::kRead);
+    out.can_write_fast = has_perm(r.perm, MemPerm::kWrite) && !has_perm(r.perm, MemPerm::kExec);
+    return out;
 }
 
 bool GuestAddressSpace::read(std::uint64_t address, std::uint8_t* out, std::size_t count) {

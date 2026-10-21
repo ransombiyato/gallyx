@@ -5,6 +5,26 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 6 (newfstatat)
+
+### Added — `newfstatat`(262) (sixth syscall slice)
+- `newfstatat`(262): the path-based metadata call glibc's `stat()`, `lstat()` and
+  `fstatat()` all funnel through. Limited to `AT_FDCWD` (a real directory
+  descriptor returns `-ENOSYS`). `AT_SYMLINK_NOFOLLOW` selects `lstat`
+  semantics; any other flag (e.g. `AT_EMPTY_PATH`) is rejected as unimplemented
+  rather than silently dropped. The pathname is read from guest memory with the
+  same bounded `read_guest_cstr` as `openat`, and a missing path is `-ENOENT`.
+- Refactored the guest (x86-64) `struct stat` writer out of `do_fstat` into a
+  shared `write_guest_stat`, so `fstat` and `newfstatat` write the ABI-sensitive
+  layout in exactly one place — still field-by-field, never `memcpy`'d, because
+  the host layout differs on AArch64.
+- Seven new unit tests (`syscall.newfstatat_*`), including a dangling-symlink
+  case that proves `stat` follows (ENOENT) while `AT_SYMLINK_NOFOLLOW` reports
+  the link itself (`S_IFLNK`). Inventory: `newfstatat` moved from `not-started`
+  to `implemented` (22 of 375). Docs regenerated (0 errors/warnings).
+
+---
+
 ## [Unreleased] — Phase 6 (identity getters + getcwd + getrandom)
 
 ### Added — process-identity getters, `getcwd`(79), `getrandom`(318) (fifth syscall slice)

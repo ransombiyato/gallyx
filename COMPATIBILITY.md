@@ -7,7 +7,7 @@ Tracks implemented versus missing instruction and ABI features.
 > block-at-a-time translation cache, a guest address space, and five syscall
 > slices (`write`/`exit`/`exit_group`; `mmap`/`mprotect`/`munmap`/`brk`;
 > `read`/`close`/`lseek` over a guest descriptor table; `openat`/`fstat`; the
-> process-identity getters plus `getcwd`/`getrandom`) exist;
+> process-identity getters plus `getcwd`/`getrandom`; `newfstatat`) exist;
 > register allocation is implemented, while memory operands in the code
 > generator and block chaining do not (§5).
 
@@ -203,11 +203,11 @@ Phase 6/7.
 
 ## 5. Linux ABI / syscall coverage
 
-Phase 6, fifth slice. The `syscall` instruction is decoded and routed through
-`SyscallHandler` in both tiers. **Twenty-one syscalls are implemented** (`read`,
+Phase 6, sixth slice. The `syscall` instruction is decoded and routed through
+`SyscallHandler` in both tiers. **Twenty-two syscalls are implemented** (`read`,
 `write`, `close`, `fstat`, `lseek`, `mmap`, `mprotect`, `munmap`, `brk`,
 `getpid`, `exit`, `getcwd`, `getuid`, `getgid`, `geteuid`, `getegid`, `getppid`,
-`gettid`, `exit_group`, `openat`, `getrandom`); every other number returns
+`gettid`, `exit_group`, `openat`, `newfstatat`, `getrandom`); every other number returns
 `-ENOSYS` explicitly (never a
 silent success) and is counted in `RunResult::unimplemented_syscalls`. Guest
 pointers are validated against the mapped region (`-EFAULT`), so a guest can
@@ -233,8 +233,11 @@ open (SECURITY.md).
 
 `fstat` reports the **guest** (x86-64) `struct stat` layout, built field-by-field
 from the host's rather than `memcpy`'d: the host layout differs on AArch64, so a
-copy would put values at the wrong offsets. This is the ABI-sensitive part and
-the pattern to reuse for `stat`/`lstat`/`newfstatat`/`statx`.
+copy would put values at the wrong offsets. `newfstatat`(262) shares that same
+builder, so the ABI-sensitive layout is written in exactly one place;
+`AT_SYMLINK_NOFOLLOW` selects `lstat` semantics, and any other flag (e.g.
+`AT_EMPTY_PATH`) or a real `dirfd` returns `-ENOSYS` and is counted as
+unimplemented.
 
 `mmap` is **anonymous-only**: a request without `MAP_ANONYMOUS` is reported
 unimplemented (and counted as such), not mapped incorrectly. `mprotect`/`munmap`
@@ -263,6 +266,7 @@ guest buffer from the host in 4 KiB chunks, accepting only the two defined
 | `lseek`(8) | ✅ | 6 | `syscall.lseek_repositions_*`, `syscall.lseek_end_and_cur_whence_work`, `syscall.lseek_bad_whence_*` |
 | `openat`(257) (`AT_FDCWD`, bounded path, honoured flags) | ✅ (scoped) | 6 | `syscall.openat_opens_a_real_file_*`, `syscall.openat_missing_file_is_enoent`, `syscall.openat_bad_path_pointer_is_efault`, `syscall.openat_with_a_real_dirfd_is_unimplemented`, `syscall.openat_unhandled_flag_is_unimplemented`, `syscall.openat_writes_and_closes_release_the_guest_fd` |
 | `fstat`(5) in the guest `struct stat` layout | ✅ | 6 | `syscall.fstat_reports_size_in_the_guest_layout`, `syscall.fstat_bad_fd_is_ebadf_and_bad_buffer_is_efault` |
+| `newfstatat`(262) (`AT_FDCWD`, `AT_SYMLINK_NOFOLLOW`, shared guest `stat` layout) | ✅ (scoped) | 6 | `syscall.newfstatat_reports_path_metadata_in_the_guest_layout`, `syscall.newfstatat_missing_path_is_enoent`, `syscall.newfstatat_bad_path_pointer_is_efault`, `syscall.newfstatat_unmapped_buffer_is_efault`, `syscall.newfstatat_with_a_real_dirfd_or_bad_flag_is_unimplemented`, `syscall.newfstatat_symlink_nofollow_uses_lstat` |
 | `getpid`(39)/`gettid`(186)/`getuid`(102)/`geteuid`(107)/`getgid`(104)/`getegid`(108)/`getppid`(110) | ✅ | 6 | `syscall.identity_getters_forward_to_the_host` |
 | `getcwd`(79) | ✅ | 6 | `syscall.getcwd_copies_the_host_working_directory`, `syscall.getcwd_too_small_is_erange_and_bad_buffer_is_efault` |
 | `getrandom`(318) | ✅ | 6 | `syscall.getrandom_fills_the_guest_buffer`, `syscall.getrandom_zero_length_is_zero_and_bad_flags_is_einval` |
@@ -270,7 +274,7 @@ guest buffer from the host in 4 KiB chunks, accepting only the two defined
 | `brk`(12) over the guest heap | ✅ | 6 | `syscall.brk_returns_the_new_break` |
 | `mmap`(9) anonymous, `mprotect`(10), `munmap`(11) | ✅ (anonymous only) | 6 | `syscall.mmap_*`, `syscall.mprotect_*`, `syscall.munmap_*`, `syscall.mmap_end_to_end_*` |
 | `open`(2, legacy), `openat2`(437) | ⬜ | 6 | — |
-| `stat`(4)/`lstat`(6)/`newfstatat`(262)/`statx`(332) (path-based; reuse the `fstat` layout) | ⬜ | 6 | — |
+| `stat`(4)/`lstat`(6) as distinct entry points (glibc uses `newfstatat`), `statx`(332) | ⬜ | 6 | — |
 | `mmap` file-backed, `MAP_SHARED` | ⬜ | 6 | — |
 | `arch_prctl` (FS/GS base, TLS) | ⬜ | 6 | — |
 | `getdents64`, `access`, `readlink`/`readlinkat`, `set_tid_address`, `rseq`, `prlimit64` | ⬜ | 6 | — |

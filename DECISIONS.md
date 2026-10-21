@@ -676,3 +676,28 @@ fills the guest buffer from the host CSPRNG in 4 KiB chunks and validates the
 `GRND_*` flag bits, returning `-EINVAL` for any undefined bit — matching the
 kernel rather than silently masking. None of these touch guest memory except
 through the validated address space (`-EFAULT`).
+
+---
+
+## D-027 — One guest `struct stat` writer shared by `fstat` and `newfstatat`
+
+**Context.** `fstat`(5) already built the guest (x86-64) `struct stat` field by
+field, because the host (AArch64) layout differs and a `memcpy` would put values
+at the wrong offsets. Adding `newfstatat`(262) — glibc's real `stat`/`lstat`
+entry point — would have duplicated that 20-line, offset-sensitive builder,
+creating a second place where an ABI offset could drift.
+
+**Decision.** Extract the builder into a single `write_guest_stat(memory, buf,
+host_stat)` and call it from both `do_fstat` and `do_newfstatat`. Keep the
+field-by-field construction (never `memcpy`), and keep the guest offsets
+declared once in `namespace guest_stat`. `newfstatat` maps
+`AT_SYMLINK_NOFOLLOW` to the host `lstat` and everything else to `stat`; any
+flag outside `{0, AT_SYMLINK_NOFOLLOW}` and any `dirfd` other than `AT_FDCWD`
+returns `-ENOSYS` and is reported unimplemented.
+
+**Consequences.** The ABI-sensitive layout is written in exactly one place, so
+`stat`/`lstat`/`fstatat`/`fstat` cannot disagree about an offset. `newfstatat`
+inherits the `AT_FDCWD`-only boundary of D-025 and the "unimplemented is
+counted, never silent" rule. A dangling symlink is the test that pins the
+follow/no-follow distinction: `stat` returns `-ENOENT`, `AT_SYMLINK_NOFOLLOW`
+reports `S_IFLNK`.

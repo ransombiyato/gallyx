@@ -292,7 +292,7 @@
 259	mknodat	E3	not-started	Create a node relative to a descriptor.	provisional
 260	fchownat	E2	not-started	Change owner relative to a descriptor.	provisional
 261	futimesat	E3	not-started	Set file times relative to a descriptor (legacy).	provisional
-262	newfstatat	U4	not-started	Stat relative to a descriptor (fstatat).	trace:2302
+262	newfstatat	U4	implemented	Stat relative to a descriptor (fstatat).	trace:2302
 263	unlinkat	U3	not-started	Remove a file relative to a descriptor.	provisional
 264	renameat	U2	not-started	Rename relative to descriptors.	provisional
 265	linkat	U2	not-started	Create a hard link relative to descriptors.	provisional

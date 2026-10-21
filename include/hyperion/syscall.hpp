@@ -13,11 +13,12 @@
 //   write(2), read(2), close(2), lseek(2), openat(2), fstat(2), exit(2),
 //   exit_group(2), the memory syscalls mmap(2), mprotect(2), munmap(2), brk(2),
 //   the process-identity getters getpid(2), gettid(2), getuid(2), geteuid(2),
-//   getgid(2), getegid(2), getppid(2), getcwd(2), and getrandom(2).
+//   getgid(2), getegid(2), getppid(2), getcwd(2), and getrandom(2), and the
+//   path-metadata call newfstatat(2).
 // Every other syscall number returns -ENOSYS explicitly. Nothing silently
-// succeeds. openat() is limited to AT_FDCWD and a guest pathname; fstat()
-// writes the *guest's* (x86-64) struct stat layout, not the host's. The
-// identity getters forward to the host process (Hyperion runs the guest
+// succeeds. openat() is limited to AT_FDCWD and a guest pathname; fstat() and
+// newfstatat() write the *guest's* (x86-64) struct stat layout, not the host's.
+// The identity getters forward to the host process (Hyperion runs the guest
 // in-process, so the guest sees the host's ids). The full inventory and the
 // implementation order live in docs/syscalls/.
 //
@@ -67,6 +68,7 @@ inline constexpr std::uint64_t kGetppid = 110;
 inline constexpr std::uint64_t kGettid = 186;
 inline constexpr std::uint64_t kExitGroup = 231;
 inline constexpr std::uint64_t kOpenat = 257;
+inline constexpr std::uint64_t kNewfstatat = 262;
 inline constexpr std::uint64_t kGetrandom = 318;
 } // namespace sysno
 
@@ -87,6 +89,9 @@ inline constexpr std::uint64_t kOExcl = 0x80;
 // directory. Only this value is supported; any other dirfd returns -ENOSYS
 // (a real *at() with an explicit directory descriptor is not implemented).
 inline constexpr std::uint64_t kAtFdcwd = static_cast<std::uint64_t>(-100);
+
+// AT_SYMLINK_NOFOLLOW: do not dereference the final path component (lstat).
+inline constexpr std::uint64_t kAtSymlinkNofollow = 0x100;
 
 // Guest (x86-64) `struct stat` field offsets. The host layout differs on
 // AArch64, so fstat() builds the guest layout field by field rather than

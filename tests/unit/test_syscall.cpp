@@ -750,6 +750,120 @@ HYPERION_TEST("syscall", "openat_is_advertised_as_minimal") {
     HYPERION_CHECK(!hyperion::is_minimal_syscall(257 + 1000));
 }
 
+// --- newfstatat (path-based stat, fifth/sixth slice) ------------------------
+
+HYPERION_TEST("syscall", "newfstatat_reports_path_metadata_in_the_guest_layout") {
+    TempFile tf;
+    HYPERION_CHECK(tf.fd >= 0);
+    HYPERION_CHECK(::write(tf.fd, "0123456789", 10) == 10);
+
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, tf.path.c_str());
+
+    GuestState s = syscall_state(hyperion::sysno::kNewfstatat,
+                                 {hyperion::kAtFdcwd, kBase + 0x400, kBase + 0x800, 0});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), std::uint64_t{0});
+
+    // Same ABI-sensitive check as fstat: st_size at offset 48, st_mode at 24.
+    HYPERION_CHECK_EQ(read_u64(memory, kBase + 0x800 + hyperion::guest_stat::kOffStSize),
+                      std::uint64_t{10});
+    const std::uint32_t mode = read_u32(memory, kBase + 0x800 + hyperion::guest_stat::kOffStMode);
+    HYPERION_CHECK((mode & 0xF000u) == 0x8000u);
+}
+
+HYPERION_TEST("syscall", "newfstatat_missing_path_is_enoent") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, "/nonexistent/hyperion/path/xyzzy");
+
+    GuestState s = syscall_state(hyperion::sysno::kNewfstatat,
+                                 {hyperion::kAtFdcwd, kBase + 0x400, kBase + 0x800, 0});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnoent));
+}
+
+HYPERION_TEST("syscall", "newfstatat_bad_path_pointer_is_efault") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    GuestState s = syscall_state(hyperion::sysno::kNewfstatat,
+                                 {hyperion::kAtFdcwd, 0xDEADBEEF0000ULL, kBase + 0x800, 0});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEfault));
+}
+
+HYPERION_TEST("syscall", "newfstatat_unmapped_buffer_is_efault") {
+    TempFile tf;
+    HYPERION_CHECK(tf.fd >= 0);
+
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, tf.path.c_str());
+
+    GuestState s = syscall_state(hyperion::sysno::kNewfstatat,
+                                 {hyperion::kAtFdcwd, kBase + 0x400, 0xDEADBEEF0000ULL, 0});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEfault));
+}
+
+HYPERION_TEST("syscall", "newfstatat_with_a_real_dirfd_or_bad_flag_is_unimplemented") {
+    TempFile tf;
+    HYPERION_CHECK(tf.fd >= 0);
+
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, tf.path.c_str());
+
+    // A real directory descriptor is not supported: -ENOSYS, counted as
+    // unimplemented rather than resolved against the wrong base.
+    GuestState dir =
+        syscall_state(hyperion::sysno::kNewfstatat, {3, kBase + 0x400, kBase + 0x800, 0});
+    HYPERION_CHECK(handler.handle(dir, memory).status == SyscallStatus::kUnimplemented);
+    HYPERION_CHECK_EQ(dir.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnosys));
+
+    // AT_EMPTY_PATH (0x1000) is outside the honoured set.
+    GuestState flag = syscall_state(hyperion::sysno::kNewfstatat,
+                                    {hyperion::kAtFdcwd, kBase + 0x400, kBase + 0x800, 0x1000});
+    HYPERION_CHECK(handler.handle(flag, memory).status == SyscallStatus::kUnimplemented);
+    HYPERION_CHECK_EQ(flag.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnosys));
+}
+
+HYPERION_TEST("syscall", "newfstatat_symlink_nofollow_uses_lstat") {
+    // A dangling symlink resolves with stat (follow -> ENOENT) but reports the
+    // link itself with AT_SYMLINK_NOFOLLOW (lstat -> S_IFLNK).
+    char link_path[] = "/tmp/hyperion_nfstat_link_XXXXXX";
+    const int fd = ::mkstemp(link_path);
+    HYPERION_CHECK(fd >= 0);
+    ::close(fd);
+    ::unlink(link_path); // remove the temp file, keep the unique name
+    HYPERION_CHECK(::symlink("/nonexistent/hyperion/target", link_path) == 0);
+
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, link_path);
+
+    GuestState follow = syscall_state(hyperion::sysno::kNewfstatat,
+                                      {hyperion::kAtFdcwd, kBase + 0x400, kBase + 0x800, 0});
+    handler.handle(follow, memory);
+    HYPERION_CHECK_EQ(follow.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnoent));
+
+    GuestState nofollow =
+        syscall_state(hyperion::sysno::kNewfstatat, {hyperion::kAtFdcwd, kBase + 0x400,
+                                                     kBase + 0x800, hyperion::kAtSymlinkNofollow});
+    HYPERION_CHECK(handler.handle(nofollow, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(nofollow.reg(Gpr::kRax), std::uint64_t{0});
+    const std::uint32_t mode = read_u32(memory, kBase + 0x800 + hyperion::guest_stat::kOffStMode);
+    HYPERION_CHECK((mode & 0xF000u) == 0xA000u); // S_IFLNK
+
+    ::unlink(link_path);
+}
+
+HYPERION_TEST("syscall", "newfstatat_is_advertised_as_minimal") {
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kNewfstatat));
+    HYPERION_CHECK(!hyperion::is_minimal_syscall(hyperion::sysno::kNewfstatat + 1000));
+}
+
 // --- Process-identity getters, getcwd, getrandom (fifth slice) -------------
 
 HYPERION_TEST("syscall", "identity_getters_forward_to_the_host") {

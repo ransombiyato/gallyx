@@ -350,22 +350,10 @@ void put_u32(std::uint8_t* buf, std::size_t off, std::uint32_t value) {
     }
 }
 
-// fstat(fd, statbuf): report metadata for a guest descriptor. The guest is
-// x86-64 and the host may be AArch64, whose struct stat has a different layout,
-// so the guest struct is built field by field from the host's — never memcpy'd.
-std::int64_t do_fstat(GuestState& s, Memory& memory, const std::vector<GuestDescriptor>& files) {
-    const std::int64_t fd = static_cast<std::int64_t>(arg(s, 0));
-    const std::uint64_t buf = arg(s, 1);
-
-    std::FILE* f = lookup_stream(files, fd);
-    if (f == nullptr) {
-        return -kEbadf;
-    }
-    struct stat st{};
-    if (::fstat(::fileno(f), &st) != 0) {
-        return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
-    }
-
+// Build the guest (x86-64) struct stat at guest address `buf` from a host
+// struct stat. The host layout differs on AArch64, so the guest struct is built
+// field by field — never memcpy'd. Returns 0, or -EFAULT on a bad guest pointer.
+std::int64_t write_guest_stat(Memory& memory, std::uint64_t buf, const struct stat& st) {
     std::array<std::uint8_t, guest_stat::kSize> out{};
     put_u64(out.data(), guest_stat::kOffStDev, static_cast<std::uint64_t>(st.st_dev));
     put_u64(out.data(), guest_stat::kOffStIno, static_cast<std::uint64_t>(st.st_ino));
@@ -396,6 +384,53 @@ std::int64_t do_fstat(GuestState& s, Memory& memory, const std::vector<GuestDesc
         return -kEfault;
     }
     return 0;
+}
+
+// fstat(fd, statbuf): report metadata for a guest descriptor.
+std::int64_t do_fstat(GuestState& s, Memory& memory, const std::vector<GuestDescriptor>& files) {
+    const std::int64_t fd = static_cast<std::int64_t>(arg(s, 0));
+    const std::uint64_t buf = arg(s, 1);
+
+    std::FILE* f = lookup_stream(files, fd);
+    if (f == nullptr) {
+        return -kEbadf;
+    }
+    struct stat st{};
+    if (::fstat(::fileno(f), &st) != 0) {
+        return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+    }
+    return write_guest_stat(memory, buf, st);
+}
+
+// newfstatat(dirfd, pathname, statbuf, flags): the path-based stat that glibc's
+// stat()/lstat()/fstatat() all funnel through. Only AT_FDCWD is supported (a real
+// directory descriptor returns -ENOSYS). AT_SYMLINK_NOFOLLOW selects lstat
+// semantics; any other flag is rejected as unimplemented rather than silently
+// dropped. The stat buffer uses the same guest layout as fstat.
+std::int64_t do_newfstatat(GuestState& s, Memory& memory) {
+    const std::int64_t dirfd = static_cast<std::int64_t>(arg(s, 0));
+    const std::uint64_t path_addr = arg(s, 1);
+    const std::uint64_t buf = arg(s, 2);
+    const std::uint64_t flags = arg(s, 3);
+
+    if (static_cast<std::uint64_t>(dirfd) != kAtFdcwd) {
+        return -kEnosys; // only AT_FDCWD is implemented
+    }
+    if ((flags & ~kAtSymlinkNofollow) != 0) {
+        return -kEnosys; // AT_EMPTY_PATH and friends are not implemented
+    }
+    std::string path;
+    const std::int64_t rc = read_guest_cstr(memory, path_addr, path);
+    if (rc != 0) {
+        return rc;
+    }
+    struct stat st{};
+    const int host_rc =
+        (flags & kAtSymlinkNofollow) != 0 ? ::lstat(path.c_str(), &st) : ::stat(path.c_str(), &st);
+    if (host_rc != 0) {
+        return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+    }
+    return write_guest_stat(memory, buf, st);
 }
 
 // Translate the guest PROT_* bits into the address space's MemPerm. Unknown bits
@@ -612,6 +647,14 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
         result.status = SyscallStatus::kHandled;
         return result;
     }
+    case sysno::kNewfstatat: {
+        const std::int64_t r = do_newfstatat(state, memory);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        // -ENOSYS means the request (a non-AT_FDCWD dirfd, or an unhandled flag)
+        // is not implemented; count it as such rather than as a handled call.
+        result.status = (r == -kEnosys) ? SyscallStatus::kUnimplemented : SyscallStatus::kHandled;
+        return result;
+    }
     case sysno::kLseek: {
         const std::int64_t r = do_lseek(state, files_);
         state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
@@ -713,9 +756,10 @@ bool is_minimal_syscall(std::uint64_t number) {
            number == sysno::kFstat || number == sysno::kLseek || number == sysno::kExit ||
            number == sysno::kExitGroup || number == sysno::kMmap || number == sysno::kMprotect ||
            number == sysno::kMunmap || number == sysno::kBrk || number == sysno::kOpenat ||
-           number == sysno::kGetpid || number == sysno::kGettid || number == sysno::kGetuid ||
-           number == sysno::kGeteuid || number == sysno::kGetgid || number == sysno::kGetegid ||
-           number == sysno::kGetppid || number == sysno::kGetcwd || number == sysno::kGetrandom;
+           number == sysno::kNewfstatat || number == sysno::kGetpid || number == sysno::kGettid ||
+           number == sysno::kGetuid || number == sysno::kGeteuid || number == sysno::kGetgid ||
+           number == sysno::kGetegid || number == sysno::kGetppid || number == sysno::kGetcwd ||
+           number == sysno::kGetrandom;
 }
 
 } // namespace hyperion

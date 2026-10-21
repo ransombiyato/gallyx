@@ -5,6 +5,25 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 6, eighth syscall slice: `readlinkat`(267)
+
+### Added
+- `readlinkat(267)`, glibc's modern `readlink` entry point, in both tiers.
+  It shares the `readlink` body (target copied without a NUL terminator,
+  truncation is not an error, `bufsiz == 0` is `-EINVAL`) and adds the leading
+  `dirfd`: only `AT_FDCWD` is accepted, matching `openat`/`newfstatat`; any other
+  descriptor returns `-ENOSYS` and is counted as unimplemented.
+- Tests `readlinkat_with_at_fdcwd_matches_readlink`,
+  `readlinkat_with_a_real_dirfd_is_unimplemented`,
+  `readlinkat_rejects_zero_size_and_bad_pointer`, `readlinkat_is_advertised_as_minimal`.
+- `docs/syscalls/inventory.tsv`: `readlinkat` moved from `not-started` to
+  `implemented`; regenerated `docs/syscalls/U3.md`.
+
+### Changed
+- The syscall layer now implements 25 numbers across eight slices.
+
+---
+
 ## [Unreleased] — README/ROADMAP still described the pre-Phase-4 CLI
 
 ### Fixed

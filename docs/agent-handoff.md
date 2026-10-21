@@ -66,7 +66,7 @@ held in callee-saved host registers, with a profitability guard that declines
 allocation on tiny blocks), but there is no cross-block allocation or spilling.
 The syscall layer exists and is a **partial slice**: `read`/`write`/`close`/
 `fstat`/`lseek`/`exit`/`exit_group`, `mmap`/`mprotect`/`munmap`/`brk`,
-`openat`, `newfstatat`, `access`, `readlink`, and the process-identity getters
+`openat`, `newfstatat`, `access`, `readlink`, `readlinkat`, and the process-identity getters
 plus `getcwd`/`getrandom` are implemented, everything else returns `-ENOSYS`. `openat` is limited
 to `AT_FDCWD` and a bounded guest pathname, and it forwards to the host kernel —
 Hyperion is **not a sandbox** (SECURITY.md, DECISIONS.md D-025). The identity
@@ -188,7 +188,7 @@ the second (the guest address space plus `mmap`/`mprotect`/`munmap`/`brk`),
 the third (a guest descriptor table plus `read`/`close`/`lseek`),
 the fourth (`openat`/`fstat`), the fifth (the process-identity getters plus
 `getcwd`/`getrandom`), the sixth (`newfstatat`, glibc's stat entry point), and
-the seventh (`access`/`readlink`).
+the seventh (`access`/`readlink`), and the eighth (`readlinkat`).
 The next concrete step is the remaining U4/E1 syscalls a real program needs to
 start (`arch_prctl`, `getdents64`, `statx`, `readlinkat`),
 then memory operands in the code generator.** Guest state, the

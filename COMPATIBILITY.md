@@ -4,11 +4,11 @@ Tracks implemented versus missing instruction and ABI features.
 
 > **Status:** a small, documented instruction subset is implemented and tested
 > (§2). Everything else is explicitly rejected. AArch64 code generation, a
-> block-at-a-time translation cache, a guest address space, and five syscall
+> block-at-a-time translation cache, a guest address space, and eight syscall
 > slices (`write`/`exit`/`exit_group`; `mmap`/`mprotect`/`munmap`/`brk`;
 > `read`/`close`/`lseek` over a guest descriptor table; `openat`/`fstat`; the
 > process-identity getters plus `getcwd`/`getrandom`; `newfstatat`; `access`
-> and `readlink`) exist;
+> and `readlink`; `readlinkat`) exist;
 > register allocation is implemented, while memory operands in the code
 > generator and block chaining do not (§5).
 
@@ -204,12 +204,12 @@ Phase 6/7.
 
 ## 5. Linux ABI / syscall coverage
 
-Phase 6, sixth slice. The `syscall` instruction is decoded and routed through
-`SyscallHandler` in both tiers. **Twenty-four syscalls are implemented** (`read`,
+Phase 6, eighth slice. The `syscall` instruction is decoded and routed through
+`SyscallHandler` in both tiers. **Twenty-five syscalls are implemented** (`read`,
 `write`, `close`, `fstat`, `lseek`, `mmap`, `mprotect`, `munmap`, `brk`,
 `getpid`, `exit`, `getcwd`, `getuid`, `getgid`, `geteuid`, `getegid`, `getppid`,
 `gettid`, `exit_group`, `openat`, `newfstatat`, `access`, `readlink`,
-`getrandom`); every other number returns
+`readlinkat`, `getrandom`); every other number returns
 `-ENOSYS` explicitly (never a
 silent success) and is counted in `RunResult::unimplemented_syscalls`. Guest
 pointers are validated against the mapped region (`-EFAULT`), so a guest can
@@ -274,6 +274,7 @@ guest buffer from the host in 4 KiB chunks, accepting only the two defined
 | `getrandom`(318) | ✅ | 6 | `syscall.getrandom_fills_the_guest_buffer`, `syscall.getrandom_zero_length_is_zero_and_bad_flags_is_einval` |
 | `access`(21) | ✅ (host permissions) | 6 | `syscall.access_reports_a_real_file_and_enoent_for_a_missing_one`, `syscall.access_bad_mode_is_einval_and_bad_path_pointer_is_efault` |
 | `readlink`(89) | ✅ (scoped) | 6 | `syscall.readlink_copies_the_target_without_a_terminator`, `syscall.readlink_truncates_a_long_target_and_rejects_zero_size` |
+| `readlinkat`(267) | ✅ (scoped) | 6 | `syscall.readlinkat_with_at_fdcwd_matches_readlink`, `syscall.readlinkat_with_a_real_dirfd_is_unimplemented`, `syscall.readlinkat_rejects_zero_size_and_bad_pointer` |
 | Unknown number → `-ENOSYS` | ✅ | 6 | `syscall.unknown_number_is_enosys_not_silent` |
 | `brk`(12) over the guest heap | ✅ | 6 | `syscall.brk_returns_the_new_break` |
 | `mmap`(9) anonymous, `mprotect`(10), `munmap`(11) | ✅ (anonymous only) | 6 | `syscall.mmap_*`, `syscall.mprotect_*`, `syscall.munmap_*`, `syscall.mmap_end_to_end_*` |

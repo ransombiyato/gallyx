@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-10-21
 **Current phase:** Phase 5 (performance measurement and optimization) — active;
-Phase 6 (Linux ABI and syscall compatibility) — seventh slice implemented
+Phase 6 (Linux ABI and syscall compatibility) — eighth slice implemented
 **Repository state:** buildable, tested, documented, CI green. **Two execution
 tiers exist: the reference interpreter (Tier 0) and a translation cache that runs
 whole programs through generated AArch64 code (Tier 1).** Phase 4's exit criteria
@@ -13,15 +13,15 @@ accepted and measured** (parity fast path, dead-`rip` elimination, flag
 liveness, direct-mapped dispatch, ALU immediate folding, guest-register
 allocation — BENCHMARKS.md §4.2.1–4.2.6). Phase 6's syscall inventory is
 complete and validated
-(docs/syscalls/), and **seven syscall slices are implemented in both tiers**: the
+(docs/syscalls/), and **eight syscall slices are implemented in both tiers**: the
 first (`write`/`exit`/`exit_group`), the second, which added the guest
 address space and `mmap`/`mprotect`/`munmap`/`brk`, the third, which added a
 guest descriptor table with `read`/`close`/`lseek`, the fourth, which added
 `openat`/`fstat`, the fifth, which added the process-identity getters
 (`getpid`/`gettid`/`getuid`/`geteuid`/`getgid`/`getegid`/`getppid`), `getcwd`
 and `getrandom`, the sixth, which added `newfstatat` (glibc's
-`stat`/`lstat` entry point), and the seventh, which added `access` and
-`readlink`. Unimplemented numbers still
+`stat`/`lstat` entry point), the seventh, which added `access` and
+`readlink`, and the eighth, which added `readlinkat`. Unimplemented numbers still
 return `-ENOSYS` explicitly. The guest instruction subset remains small; see
 COMPATIBILITY.md.**
 
@@ -54,14 +54,15 @@ works, what was last verified, and what to do next.
 | 11. Process-identity getters + `getcwd`/`getrandom` (fifth slice) | **Implemented & tested** — `getpid`(39)/`gettid`(186)/`getuid`(102)/`geteuid`(107)/`getgid`(104)/`getegid`(108)/`getppid`(110) forward to the host process (Hyperion runs the guest in-process, so the guest sees the host ids); `getcwd`(79) copies the host working directory into a bounded guest buffer (`-ERANGE` when it does not fit, `-EFAULT` on a bad pointer); `getrandom`(318) fills a guest buffer from the host in bounded chunks, validating the two defined `GRND_*` flag bits |
 | 12. `newfstatat`(262) (sixth slice) | **Implemented & tested** — glibc's `stat`/`lstat`/`fstatat` entry point. `AT_FDCWD` only; `AT_SYMLINK_NOFOLLOW` selects `lstat`, any other flag or a real `dirfd` is `-ENOSYS` and counted as unimplemented. Reuses the shared guest-`struct stat` builder extracted from `fstat`, so the ABI-sensitive layout is written in exactly one place |
 | 13. `access`(21) + `readlink`(89) (seventh slice) | **Implemented & tested** — `access` forwards to the host with mode restricted to `F_OK`/`R_OK`/`W_OK`/`X_OK` (any other bit is `-EINVAL`); `readlink` copies a symlink target without a NUL terminator, truncating to `bufsiz` (not an error) and rejecting `bufsiz == 0` with `-EINVAL`. Both read the path with the shared bounded `read_guest_cstr` |
-| 14. Broader syscall coverage (`arch_prctl`/`getdents64`/`readlinkat`/`statx`/…) | **Not started** — next slice |
+| 14. `readlinkat`(267) (eighth slice) | **Implemented & tested** — glibc's modern `readlink` entry point. Shares the `readlink` body (no NUL terminator, silent truncation, `bufsiz == 0` is `-EINVAL`); `AT_FDCWD` only, any other `dirfd` is `-ENOSYS` and counted as unimplemented |
+| 15. Broader syscall coverage (`arch_prctl`/`getdents64`/`statx`/…) | **Not started** — next slice |
 
 **Implemented-syscall status (verified).** Twenty-four numbers are implemented
 today: `read`(0), `write`(1), `close`(3), `fstat`(5), `lseek`(8), `mmap`(9),
 `mprotect`(10), `munmap`(11), `brk`(12), `access`(21), `getpid`(39), `exit`(60),
 `getcwd`(79), `readlink`(89), `getuid`(102), `getgid`(104), `geteuid`(107),
 `getegid`(108), `getppid`(110), `gettid`(186), `exit_group`(231), `openat`(257),
-`newfstatat`(262), `getrandom`(318). Everything
+`newfstatat`(262), `readlinkat`(267), `getrandom`(318). Everything
 else returns `-ENOSYS`. `mmap` is scoped: anonymous
 private mappings only. `mprotect`/`munmap` require a fully-mapped, page-aligned
 range. `read`/`close`/`lseek`/`openat`/`fstat` operate on a handler-owned guest
@@ -69,15 +70,15 @@ descriptor table (guest fd → host stream); the handler never `fclose`s a borro
 stream, and it *does* close a stream it opened via `openat`. `openat` supports
 `AT_FDCWD` and a bounded guest pathname; any other `dirfd`, or an unhandled flag,
 returns `-ENOSYS` and is counted as unimplemented. `newfstatat` shares that
-`AT_FDCWD` boundary and the `fstat` guest-`struct stat` builder. `access` and
-`readlink` are path queries over the same bounded reader. The identity
+`AT_FDCWD` boundary and the `fstat` guest-`struct stat` builder. `access`,
+`readlink` and `readlinkat` are path queries over the same bounded reader. The identity
 getters and `getcwd`/`getrandom` are pure forwards to the host with bounded guest
 buffers; `gettid` reports the host thread id because Hyperion is single-threaded
 today (a documented approximation, revisited when `clone` lands). This is **not a
-sandbox**: `openat`/`newfstatat`/`access`/`readlink` forward to the host kernel,
-so the guest can touch whatever the host process may (SECURITY.md). The inventory
-marks these twenty-four `implemented` and all others `not-started`; the validator
-enforces the status vocabulary.
+sandbox**: `openat`/`newfstatat`/`access`/`readlink`/`readlinkat` forward to the
+host kernel, so the guest can touch whatever the host process may (SECURITY.md).
+The inventory marks these twenty-five `implemented` and all others `not-started`;
+the validator enforces the status vocabulary.
 
 **Address-space facts (verified).** `GuestAddressSpace` is the guest's virtual
 memory: a set of regions with `MemPerm` (read/write/exec) and page-granular
@@ -399,12 +400,12 @@ elimination, flag liveness, direct-mapped dispatch, ALU immediate folding,
 guest-register allocation), each judged on deterministic evidence as well as
 timing (BENCHMARKS.md §4.2).
 
-Phase 6 has seven syscall slices implemented in both tiers over a
+Phase 6 has eight syscall slices implemented in both tiers over a
 `GuestAddressSpace`: `write`/`exit`/`exit_group`; `mmap`/`mprotect`/`munmap`/`brk`
 (anonymous `mmap` only); a handler-owned guest descriptor table with
 `read`/`openat`/`close`/`lseek`/`fstat`; `getcwd`/`getrandom`; the identity
 getters (`getpid`/`gettid`/`getuid`/`geteuid`/`getgid`/`getegid`/`getppid`);
-`newfstatat`; and `access`/`readlink` — twenty-four numbers in total.
+`newfstatat`; `access`/`readlink`; and `readlinkat` — twenty-five numbers in total.
 `openat` is limited to `AT_FDCWD`; every other number returns `-ENOSYS` and is
 counted, never silently ignored.
 
@@ -447,13 +448,18 @@ removed `/usr`; the toolchain was restored from `tools/vendor/host-debs/` and
 
 | Suite | Command | Result |
 | --- | --- | --- |
-| Native | `scripts/dev.sh test` | 10/10 ctest passed (171 unit cases, 0 failed, 13 skipped) |
-| Cross (qemu-user) | `scripts/dev.sh cross-test` | 6/6 ctest passed (188 unit cases, 0 failed, 2 skipped) |
-| Clang | `scripts/dev.sh clang-build` | 10/10 passed (171 unit cases, 0 failed) |
-| ASan/UBSan | `scripts/dev.sh sanitize` | 10/10 passed (171 unit cases, 0 failed) |
+| Native | `scripts/dev.sh test` | 10/10 ctest passed (175 unit cases, 0 failed, 13 skipped) |
+| Cross (qemu-user) | `scripts/dev.sh cross-test` | 6/6 ctest passed (192 unit cases, 0 failed, 2 skipped) |
+| Clang | `scripts/dev.sh clang-build` | 10/10 passed (175 unit cases, 0 failed) |
+| ASan/UBSan | `scripts/dev.sh sanitize` | 10/10 passed (175 unit cases, 0 failed) |
 | Formatting | `scripts/dev.sh format` | clean (clang-format 19.1.7) |
 | Lint | `shellcheck scripts/*.sh tests/cli/*.sh` | clean |
 | Syscall inventory | `python3 tools/gen_syscall_inventory.py --check` | OK (0 errors, 0 warnings) |
+
+Re-verified after the Phase 6 eighth slice (`readlinkat`): native **175/0**,
+13 skipped (of 188); cross **192/0**, 2 skipped (of 194) under `qemu-user`;
+ASan/UBSan **175/0**; clang-build **175/0**; format clean; shellcheck clean;
+syscall inventory valid (readlinkat now `implemented`).
 
 Re-verified after the decoder truncation-diagnostic fix: native **171/0**,
 13 skipped (of 184); cross **188/0**, 2 skipped (of 190) under `qemu-user`;
@@ -735,8 +741,8 @@ stable-vs-noisy discrimination case).
 
 ## 4. Immediate next task
 
-**Phase 6's seventh syscall slice (`access` + `readlink`) is implemented and
-tested in both tiers. Phase 5 has six accepted, measured optimizations
+**Phase 6's eighth syscall slice (`readlinkat`) is implemented and tested in
+both tiers. Phase 5 has six accepted, measured optimizations
 (BENCHMARKS.md §4.2.1–4.2.6), all deterministic-evidence based.**
 
 The single best next action (Phase 6, extend coverage in U4 order):
@@ -744,11 +750,12 @@ The single best next action (Phase 6, extend coverage in U4 order):
 - **Add the remaining U4/E1 syscalls a real program needs to start and run**:
   `arch_prctl`(158) (set up the thread-local/FS base — required before glibc
   startup, and the one that needs a new `GuestState.fs_base` field),
-  `getdents64`(217) (read a directory), `readlinkat`(267),
+  `getdents64`(217) (read a directory),
   `set_tid_address`(218), `rseq`(334), `prlimit64`(302) and `statx`(332).
   `newfstatat` now covers glibc's `stat`/`lstat` entry point through the shared
-  guest-`struct stat` builder, and `access`/`readlink` cover the common path
-  queries; `statx` needs the same field-by-field discipline for its own layout.
+  guest-`struct stat` builder, and `access`/`readlink`/`readlinkat` cover the
+  common path queries; `statx` needs the same field-by-field discipline for its
+  own layout.
   Validate
   every guest buffer pointer against the address
   space before use; return `-EBADF`/`-EFAULT`/`-ENOENT`/`-ENOSYS` exactly as the
@@ -782,9 +789,8 @@ Then, larger Phase 6/7 work (independent):
   written to guest memory. Until it lands, Tier 1 stops honestly at the first
   memory operand (see the `mmap_end_to_end_..._stops_at_memory_operand` test).
 - **Extend coverage in U4 order** (`docs/syscalls/U4.md`) beyond the above:
-  `getdents64`, `access`, `readlink`, `getrandom`, `set_tid_address`, `rseq`,
-  `prlimit64`, `arch_prctl` (TLS setup is required for most dynamically linked
-  programs).
+  `getdents64`, `getrandom`, `set_tid_address`, `rseq`, `prlimit64`,
+  `arch_prctl` (TLS setup is required for most dynamically linked programs).
 - Every implemented syscall must: follow the x86-64 argument/return convention
   (args in `rdi, rsi, rdx, r10, r8, r9`; result in `rax`; errors as `-errno`),
   validate guest pointers, be listed in `docs/syscalls/inventory.tsv` with

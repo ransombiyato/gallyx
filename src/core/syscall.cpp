@@ -437,11 +437,12 @@ std::int64_t do_newfstatat(GuestState& s, Memory& memory) {
 // buffer. As readlink(2): the result is *not* NUL-terminated, a target longer
 // than bufsiz is silently truncated (not an error), and a zero bufsiz is
 // -EINVAL. The path is read with the same bounded reader as openat.
-std::int64_t do_readlink(GuestState& s, Memory& memory) {
-    const std::uint64_t path_addr = arg(s, 0);
-    const std::uint64_t buf = arg(s, 1);
-    const std::uint64_t bufsiz = arg(s, 2);
-
+//
+// readlinkat(dirfd, pathname, buf, bufsiz) shares this body: the only
+// difference is the leading dirfd, and only AT_FDCWD is supported (an explicit
+// directory descriptor returns -ENOSYS, matching openat/newfstatat).
+std::int64_t readlink_common(Memory& memory, std::uint64_t path_addr, std::uint64_t buf,
+                             std::uint64_t bufsiz) {
     if (bufsiz == 0) {
         return -kEinval;
     }
@@ -464,6 +465,20 @@ std::int64_t do_readlink(GuestState& s, Memory& memory) {
         return -kEfault;
     }
     return static_cast<std::int64_t>(got);
+}
+
+std::int64_t do_readlink(GuestState& s, Memory& memory) {
+    return readlink_common(memory, arg(s, 0), arg(s, 1), arg(s, 2));
+}
+
+// readlinkat(dirfd, pathname, buf, bufsiz): glibc's modern readlink entry
+// point. Only AT_FDCWD is implemented.
+std::int64_t do_readlinkat(GuestState& s, Memory& memory) {
+    const std::int64_t dirfd = static_cast<std::int64_t>(arg(s, 0));
+    if (static_cast<std::uint64_t>(dirfd) != kAtFdcwd) {
+        return -kEnosys; // only AT_FDCWD is implemented
+    }
+    return readlink_common(memory, arg(s, 1), arg(s, 2), arg(s, 3));
 }
 
 // access(pathname, mode): check whether the host process may access a path.
@@ -717,6 +732,14 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
         result.status = SyscallStatus::kHandled;
         return result;
     }
+    case sysno::kReadlinkat: {
+        const std::int64_t r = do_readlinkat(state, memory);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        // A non-AT_FDCWD dirfd is outside this increment, so report it as
+        // unimplemented rather than as a handled call returning an error.
+        result.status = (r == -kEnosys) ? SyscallStatus::kUnimplemented : SyscallStatus::kHandled;
+        return result;
+    }
     case sysno::kAccess: {
         const std::int64_t r = do_access(state, memory);
         state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
@@ -827,7 +850,8 @@ bool is_minimal_syscall(std::uint64_t number) {
            number == sysno::kNewfstatat || number == sysno::kGetpid || number == sysno::kGettid ||
            number == sysno::kGetuid || number == sysno::kGeteuid || number == sysno::kGetgid ||
            number == sysno::kGetegid || number == sysno::kGetppid || number == sysno::kGetcwd ||
-           number == sysno::kGetrandom || number == sysno::kReadlink || number == sysno::kAccess;
+           number == sysno::kGetrandom || number == sysno::kReadlink || number == sysno::kAccess ||
+           number == sysno::kReadlinkat;
 }
 
 } // namespace hyperion

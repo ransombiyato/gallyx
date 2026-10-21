@@ -12,16 +12,16 @@ on other Linux hosts, so target-device compatibility is *measured, not
 assumed* — see [`docs/target-environment.md`](docs/target-environment.md).
 
 > **Status: Phase 5 (performance measurement and optimization) active; Phase 6
-> (Linux ABI and syscall compatibility) seven slices implemented.** The repository
+> (Linux ABI and syscall compatibility) eight slices implemented.** The repository
 > builds, its tests pass, and a documented subset of x86-64 instructions executes
 > through generated AArch64 code, verified against the reference interpreter
 > under `qemu-user`. There are **two execution tiers**: the reference interpreter
 > (Tier 0) and a translation cache that runs whole programs through generated
-> AArch64 code (Tier 1). **Seven syscall slices** are implemented in both tiers:
+> AArch64 code (Tier 1). **Eight syscall slices** are implemented in both tiers:
 > `write`/`exit`/`exit_group`; the guest address space with
 > `mmap`/`mprotect`/`munmap`/`brk`; a guest descriptor table with
 > `read`/`openat`/`close`/`lseek`/`fstat`; `getcwd`/`getrandom`; the process
-> identity getters; `newfstatat`; and `access`/`readlink` (guest paths are
+> identity getters; `newfstatat`; `access`/`readlink`; and `readlinkat` (guest paths are
 > forwarded to the host kernel — Hyperion is **not a sandbox**). Every other
 > syscall returns `-ENOSYS`. There is
 > **no block chaining and no cache invalidation yet**, so
@@ -53,7 +53,7 @@ assumed* — see [`docs/target-environment.md`](docs/target-environment.md).
 | W^X executable memory | Implemented |
 | x86-64 → AArch64 instruction translation | **Partial** — register/immediate ALU ops only |
 | Multi-instruction program translation + code cache | Implemented (Phase 4) — block-at-a-time dispatcher |
-| Linux syscall layer | **Partial** (Phase 6, seven slices) — 24 numbers implemented (`read`/`write`/`close`/`fstat`/`lseek`/`mmap`/`mprotect`/`munmap`/`brk`/`access`/`openat`/`newfstatat`/`getrandom`/`getcwd`/`readlink`/identity getters/`exit`/`exit_group`); `-ENOSYS` otherwise. See `STATUS.md` §4 for the full list |
+| Linux syscall layer | **Partial** (Phase 6, eight slices) — 25 numbers implemented (`read`/`write`/`close`/`fstat`/`lseek`/`mmap`/`mprotect`/`munmap`/`brk`/`access`/`openat`/`newfstatat`/`getrandom`/`getcwd`/`readlink`/`readlinkat`/identity getters/`exit`/`exit_group`); `-ENOSYS` otherwise. See `STATUS.md` §4 for the full list |
 | Guest address space (mmap/brk) | **Implemented** (Phase 6) — permissioned regions, page-granular, reserved heap window, per-mapping size cap (D-029) |
 | Guest descriptor table (read/openat/close/lseek/fstat) | **Implemented** (Phase 6) — handler-owned; `adopt()` attaches a host stream; `openat` opens handler-owned streams (`AT_FDCWD` only) |
 | Register allocation | **Implemented within a block** (Phase 5, D-021) — guests registers are spilled back to `GuestState` at each block exit, so no value survives a block boundary in a host register |

@@ -72,6 +72,7 @@ inline constexpr std::uint64_t kGettid = 186;
 inline constexpr std::uint64_t kExitGroup = 231;
 inline constexpr std::uint64_t kOpenat = 257;
 inline constexpr std::uint64_t kNewfstatat = 262;
+inline constexpr std::uint64_t kReadlinkat = 267;
 inline constexpr std::uint64_t kGetrandom = 318;
 } // namespace sysno
 

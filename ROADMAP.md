@@ -282,7 +282,7 @@ optimization decisions.
 
 ---
 
-## Phase 6 — Linux ABI and syscall compatibility 🟡 (seven slices implemented)
+## Phase 6 — Linux ABI and syscall compatibility 🟡 (eight slices implemented)
 
 **Objective.** Run real Linux guest programs.
 
@@ -348,6 +348,8 @@ file descriptors, signals, threading, futexes. Feature matrix + integration test
   host with `mode` restricted to `F_OK`/`R_OK`/`W_OK`/`X_OK`; `readlink` copies a
   symlink target with the kernel's truncation (not NUL-termination) semantics
   (D-028).
+- ✅ **`readlinkat`(267) (eighth slice).** glibc's modern `readlink` entry point;
+  shares the `readlink` body, `AT_FDCWD` only.
 - ⬜ The remaining U4 syscalls a program needs to start (`arch_prctl`,
   `getdents64`, `set_tid_address`, `set_robust_list`, …) — **next**.
 - ⬜ Signals, threads, futexes.

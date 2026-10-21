@@ -982,6 +982,66 @@ HYPERION_TEST("syscall", "access_and_readlink_are_advertised_as_minimal") {
     HYPERION_CHECK(!hyperion::is_minimal_syscall(hyperion::sysno::kAccess + 1000));
 }
 
+// --- readlinkat(267) (eighth slice) ----------------------------------------
+
+HYPERION_TEST("syscall", "readlinkat_with_at_fdcwd_matches_readlink") {
+    char link_path[] = "/tmp/hyperion_readlinkat_XXXXXX";
+    const int fd = ::mkstemp(link_path);
+    HYPERION_CHECK(fd >= 0);
+    ::close(fd);
+    ::unlink(link_path);
+    HYPERION_CHECK(::symlink("/tmp/hyperion/at_target", link_path) == 0);
+
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, link_path);
+
+    GuestState s = syscall_state(hyperion::sysno::kReadlinkat,
+                                 {hyperion::kAtFdcwd, kBase + 0x400, kBase + 0x800, 64});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    const char* expected = "/tmp/hyperion/at_target";
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(std::strlen(expected)));
+
+    std::uint8_t got[64] = {};
+    HYPERION_CHECK(memory.read(kBase + 0x800, got, std::strlen(expected)));
+    HYPERION_CHECK_EQ(
+        std::strncmp(reinterpret_cast<const char*>(got), expected, std::strlen(expected)), 0);
+
+    ::unlink(link_path);
+}
+
+HYPERION_TEST("syscall", "readlinkat_with_a_real_dirfd_is_unimplemented") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, "/tmp");
+
+    // dirfd 3 is a real descriptor, not AT_FDCWD: outside this increment.
+    GuestState s =
+        syscall_state(hyperion::sysno::kReadlinkat, {3, kBase + 0x400, kBase + 0x800, 64});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kUnimplemented);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnosys));
+}
+
+HYPERION_TEST("syscall", "readlinkat_rejects_zero_size_and_bad_pointer") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, "/tmp");
+
+    GuestState zero = syscall_state(hyperion::sysno::kReadlinkat,
+                                    {hyperion::kAtFdcwd, kBase + 0x400, kBase + 0x800, 0});
+    handler.handle(zero, memory);
+    HYPERION_CHECK_EQ(zero.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEinval));
+
+    GuestState fault = syscall_state(hyperion::sysno::kReadlinkat,
+                                     {hyperion::kAtFdcwd, 0xDEADBEEF0000ULL, kBase + 0x800, 64});
+    handler.handle(fault, memory);
+    HYPERION_CHECK_EQ(fault.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEfault));
+}
+
+HYPERION_TEST("syscall", "readlinkat_is_advertised_as_minimal") {
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kReadlinkat));
+}
+
 // --- Process-identity getters, getcwd, getrandom (fifth slice) -------------
 
 HYPERION_TEST("syscall", "identity_getters_forward_to_the_host") {

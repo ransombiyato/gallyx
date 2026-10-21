@@ -297,7 +297,7 @@
 264	renameat	U2	not-started	Rename relative to descriptors.	provisional
 265	linkat	U2	not-started	Create a hard link relative to descriptors.	provisional
 266	symlinkat	U2	not-started	Create a symlink relative to a descriptor.	provisional
-267	readlinkat	U3	not-started	Read a symlink relative to a descriptor.	trace:1
+267	readlinkat	U3	implemented	Read a symlink relative to a descriptor.	trace:1
 268	fchmodat	U3	not-started	Change mode relative to a descriptor.	provisional
 269	faccessat	U3	not-started	Check access relative to a descriptor.	provisional
 270	pselect6	U2	not-started	select with a signal mask.	provisional

@@ -574,6 +574,9 @@ CI run `39392485238` on `main` (commit `c40f3fc`, Phase 5 optimizations 3–5):
 `ASan/UBSan`, and `syscall inventory & shellcheck`. The AArch64 job executes the
 generated code for the new dispatch/folding/liveness tests under `qemu-user`.
 
+CI run `39540523397` on `main` (commit `0073998`, Phase 6 seventh syscall slice:
+`access` + `readlink`): **conclusion `success`**.
+
 CI run `39539804128` on `main` (commit `b9255e1`, Phase 6 sixth syscall slice:
 `newfstatat`): **conclusion `success`**.
 

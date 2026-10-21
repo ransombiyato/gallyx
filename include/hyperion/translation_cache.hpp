@@ -87,10 +87,17 @@ public:
     // regression guard (see BENCHMARKS.md).
     std::size_t total_code_bytes() const;
 
+    // Drop all cached translations (used when guest executable mappings or
+    // permissions change across mmap/munmap/mprotect).
+    void invalidate_all();
+
 private:
+    enum class TranslateFailure : std::uint8_t { kNone, kFault, kUnsupported };
+
     // Translate the block starting at `pc`, or return nullptr if the
-    // instruction there cannot be decoded. Never executes anything.
-    const CachedBlock* translate_at(Memory& memory, std::uint64_t pc);
+    // instruction there cannot be fetched (`kFault`) or decoded/translated
+    // (`kUnsupported`). Never executes anything.
+    const CachedBlock* translate_at(Memory& memory, std::uint64_t pc, TranslateFailure& failure);
 
     // Look up `pc` through the direct-mapped fast path, then the map. Updates
     // the hit/miss counters. Returns nullptr only if the block is absent.
@@ -113,6 +120,7 @@ private:
     std::vector<const CachedBlock*> direct_{kDirectSize, nullptr};
     std::uint64_t dispatch_hits_ = 0;
     std::uint64_t dispatch_misses_ = 0;
+    std::uint64_t cached_epoch_ = 0;
 
     // Scratch buffer reused for fetching guest code, to avoid an allocation per
     // block. Sized generously; a block is cut at the first unsupported

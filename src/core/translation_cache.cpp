@@ -5,6 +5,7 @@
 // correctness rules this file implements.
 #include "hyperion/translation_cache.hpp"
 
+#include <algorithm>
 #include <string>
 
 namespace hyperion {
@@ -25,7 +26,7 @@ constexpr std::size_t kMaxWindow = 4096;
 // single byte can be read.
 std::size_t read_window(Memory& memory, std::uint64_t pc, std::uint8_t* out, std::size_t capacity) {
     for (std::size_t want = capacity; want >= 1; want /= 2) {
-        if (memory.read(pc, out, want)) {
+        if (memory.fetch(pc, out, want)) {
             return want;
         }
         if (want == 1) {
@@ -52,7 +53,14 @@ void TranslationCache::install(const CachedBlock* block) {
     direct_[block->start & kDirectMask] = block;
 }
 
-const CachedBlock* TranslationCache::translate_at(Memory& memory, std::uint64_t pc) {
+void TranslationCache::invalidate_all() {
+    blocks_.clear();
+    std::fill(direct_.begin(), direct_.end(), nullptr);
+}
+
+const CachedBlock* TranslationCache::translate_at(Memory& memory, std::uint64_t pc,
+                                                  TranslateFailure& failure) {
+    failure = TranslateFailure::kNone;
     const CachedBlock* cached = lookup(pc);
     if (cached != nullptr) {
         return cached;
@@ -63,17 +71,20 @@ const CachedBlock* TranslationCache::translate_at(Memory& memory, std::uint64_t 
     }
     const std::size_t available = read_window(memory, pc, fetch_.data(), fetch_.size());
     if (available == 0) {
-        return nullptr; // cannot even read one instruction here
+        failure = TranslateFailure::kFault;
+        return nullptr; // unmapped or non-executable fetch at pc
     }
 
     const DecodeResult decoded = decode(fetch_.data(), available, pc);
     if (!decoded.ok()) {
+        failure = TranslateFailure::kUnsupported;
         return nullptr; // not a decodable instruction: report, do not guess
     }
 
     const BlockTranslation translated =
         translate_block(fetch_.data(), available, decoded.instruction);
     if (!translated.ok() || translated.code.empty()) {
+        failure = TranslateFailure::kUnsupported;
         return nullptr;
     }
 
@@ -112,13 +123,25 @@ RunResult TranslationCache::run(Memory& memory, GuestState state, std::uint64_t 
         return out;
     }
 
+    const std::uint64_t entry_epoch = memory.code_epoch();
+    if (cached_epoch_ != 0 && entry_epoch != cached_epoch_) {
+        invalidate_all();
+    }
+    cached_epoch_ = entry_epoch;
+
     std::uint64_t steps = 0;
     while (true) {
         const std::uint64_t pc = out.state.rip;
-        const CachedBlock* block = translate_at(memory, pc);
+        TranslateFailure failure = TranslateFailure::kNone;
+        const CachedBlock* block = translate_at(memory, pc, failure);
         if (block == nullptr) {
-            out.status = RunStatus::kUnsupported;
-            out.message = "unsupported instruction at pc=0x" + std::to_string(pc);
+            if (failure == TranslateFailure::kFault) {
+                out.status = RunStatus::kFault;
+                out.message = "instruction fetch fault at rip";
+            } else {
+                out.status = RunStatus::kUnsupported;
+                out.message = "unsupported instruction at pc=0x" + std::to_string(pc);
+            }
             out.steps = steps;
             return out;
         }
@@ -155,6 +178,11 @@ RunResult TranslationCache::run(Memory& memory, GuestState state, std::uint64_t 
                 return out;
             }
             const SyscallResult sr = syscalls->handle(out.state, memory);
+            const std::uint64_t post_epoch = memory.code_epoch();
+            if (post_epoch != cached_epoch_) {
+                invalidate_all();
+                cached_epoch_ = post_epoch;
+            }
             if (sr.status == SyscallStatus::kExit) {
                 out.status = RunStatus::kOk;
                 out.message = "guest exited via syscall";

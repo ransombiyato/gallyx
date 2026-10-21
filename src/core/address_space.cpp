@@ -40,7 +40,9 @@ GuestAddressSpace::GuestAddressSpace(std::uint64_t mmap_base, std::uint64_t heap
     : max_map_bytes_(max_map_bytes == 0 ? kDefaultMaxMapBytes : max_map_bytes) {
     mmap_cursor_ = mmap_base;
     heap_base_ = heap_base;
-    heap_end_ = heap_base + heap_capacity;
+    heap_end_ = (heap_capacity <= std::numeric_limits<std::uint64_t>::max() - heap_base)
+                    ? (heap_base + heap_capacity)
+                    : std::numeric_limits<std::uint64_t>::max();
     brk_ = heap_base;
 }
 
@@ -58,8 +60,44 @@ long GuestAddressSpace::find_region(std::uint64_t address) const {
     return (address < r.end()) ? index : -1;
 }
 
+bool GuestAddressSpace::split_region_at(std::uint64_t boundary) {
+    const long idx = find_region(boundary);
+    if (idx < 0) {
+        return true;
+    }
+    Region& r = regions_[static_cast<std::size_t>(idx)];
+    if (boundary <= r.base || boundary >= r.end()) {
+        return true;
+    }
+    const auto left_len = static_cast<std::size_t>(boundary - r.base);
+    const auto right_len = static_cast<std::size_t>(r.end() - boundary);
+    auto right_bytes = try_allocate_bytes(right_len);
+    if (!right_bytes) {
+        return false;
+    }
+    std::memcpy(right_bytes->data(), r.bytes.data() + left_len, right_len);
+
+    Region tail;
+    tail.base = boundary;
+    tail.size = right_len;
+    tail.perm = r.perm;
+    tail.bytes = std::move(*right_bytes);
+
+    r.bytes.resize(left_len);
+    r.size = left_len;
+
+    regions_.insert(regions_.begin() + (idx + 1), std::move(tail));
+    return true;
+}
+
 bool GuestAddressSpace::range_is_free(std::uint64_t addr, std::uint64_t size) const {
+    if (addr > std::numeric_limits<std::uint64_t>::max() - size) {
+        return false;
+    }
     const std::uint64_t end = addr + size;
+    if (heap_base_ < heap_end_ && addr < heap_end_ && heap_base_ < end) {
+        return false; // reserved for brk heap growth
+    }
     for (const Region& r : regions_) {
         if (addr < r.end() && r.base < end) {
             return false; // overlap
@@ -73,8 +111,11 @@ bool GuestAddressSpace::map_image(std::uint64_t base, const void* data, std::siz
     if ((base & kPageMask) != 0) {
         return false;
     }
+    if (size > max_map_bytes_) {
+        return false;
+    }
     const auto mapped_size = page_align_up(size == 0 ? 1 : size);
-    if (!mapped_size) {
+    if (!mapped_size || *mapped_size > max_map_bytes_) {
         return false;
     }
     if (base > std::numeric_limits<std::uint64_t>::max() - *mapped_size) {
@@ -100,6 +141,7 @@ bool GuestAddressSpace::map_image(std::uint64_t base, const void* data, std::siz
     regions_.push_back(std::move(region));
     std::sort(regions_.begin(), regions_.end(),
               [](const Region& a, const Region& b) { return a.base < b.base; });
+    ++code_epoch_;
     return true;
 }
 
@@ -116,13 +158,14 @@ std::optional<std::uint64_t> GuestAddressSpace::map_anonymous(std::size_t size, 
         return std::nullopt;
     }
     const auto mapped_size = page_align_up(size);
-    if (!mapped_size) {
+    if (!mapped_size || *mapped_size > max_map_bytes_) {
         return std::nullopt;
     }
 
     std::uint64_t base = 0;
-    if (hint != 0 && (hint & kPageMask) == 0 && range_is_free(hint, *mapped_size) &&
-        hint <= std::numeric_limits<std::uint64_t>::max() - *mapped_size) {
+    if (hint != 0 && (hint & kPageMask) == 0 &&
+        hint <= std::numeric_limits<std::uint64_t>::max() - *mapped_size &&
+        range_is_free(hint, *mapped_size)) {
         base = hint;
     } else {
         // First fit at or above the cursor.
@@ -132,11 +175,29 @@ std::optional<std::uint64_t> GuestAddressSpace::map_anonymous(std::size_t size, 
                 base = candidate;
                 break;
             }
-            const long idx = find_region(candidate);
-            if (idx < 0) {
-                break; // should not happen while range_is_free failed
+            if (heap_base_ < heap_end_ && candidate < heap_end_ &&
+                heap_base_ < candidate + *mapped_size) {
+                candidate = heap_end_;
+                continue;
             }
-            candidate = regions_[static_cast<std::size_t>(idx)].end();
+            const long idx = find_region(candidate);
+            if (idx >= 0) {
+                candidate = regions_[static_cast<std::size_t>(idx)].end();
+            } else {
+                // Jump directly past whichever region overlaps [candidate, candidate +
+                // *mapped_size).
+                bool advanced = false;
+                for (const Region& r : regions_) {
+                    if (candidate < r.end() && r.base < candidate + *mapped_size) {
+                        candidate = r.end();
+                        advanced = true;
+                        break;
+                    }
+                }
+                if (!advanced) {
+                    break;
+                }
+            }
         }
         if (base == 0) {
             return std::nullopt; // no space found
@@ -158,6 +219,7 @@ std::optional<std::uint64_t> GuestAddressSpace::map_anonymous(std::size_t size, 
     if (base + *mapped_size > mmap_cursor_) {
         mmap_cursor_ = base + *mapped_size;
     }
+    ++code_epoch_;
     return base;
 }
 
@@ -169,27 +231,21 @@ bool GuestAddressSpace::unmap(std::uint64_t addr, std::size_t size) {
     if (!mapped_size || addr > std::numeric_limits<std::uint64_t>::max() - *mapped_size) {
         return false;
     }
-
-    // The whole range must be mapped with no gaps; otherwise the call fails
-    // (the kernel unmaps partial ranges, but partial unmapping is not needed by
-    // this increment and pretending to support it would be misleading).
-    std::uint64_t cursor = addr;
     const std::uint64_t end = addr + *mapped_size;
+
+    // Verify every page in [addr, end) is currently mapped.
+    std::uint64_t cursor = addr;
     while (cursor < end) {
         const long idx = find_region(cursor);
         if (idx < 0) {
             return false;
         }
-        const Region& r = regions_[static_cast<std::size_t>(idx)];
-        if (r.base != cursor) {
-            return false; // a gap or a region that starts before the request
-        }
-        if (r.end() > end) {
-            return false; // would split a region; not supported yet
-        }
-        cursor = r.end();
+        cursor = std::min(regions_[static_cast<std::size_t>(idx)].end(), end);
     }
-    if (cursor != end) {
+
+    // Split any regions spanning `addr` or `end` so removing [addr, end)
+    // preserves surrounding pages and their contents intact.
+    if (!split_region_at(addr) || !split_region_at(end)) {
         return false;
     }
 
@@ -197,6 +253,7 @@ bool GuestAddressSpace::unmap(std::uint64_t addr, std::size_t size) {
         std::remove_if(regions_.begin(), regions_.end(),
                        [&](const Region& r) { return r.base >= addr && r.end() <= end; }),
         regions_.end());
+    ++code_epoch_;
     return true;
 }
 
@@ -217,20 +274,21 @@ bool GuestAddressSpace::protect(std::uint64_t addr, std::size_t size, MemPerm pe
         if (idx < 0) {
             return false;
         }
-        const Region& r = regions_[static_cast<std::size_t>(idx)];
-        if (r.end() < end && r.end() > cursor) {
-            cursor = r.end();
-            continue;
-        }
-        cursor = std::min(r.end(), end);
+        cursor = std::min(regions_[static_cast<std::size_t>(idx)].end(), end);
     }
 
-    // Apply the permission to every region the range touches.
+    // Split at range boundaries so sub-range mprotect never mutates permissions
+    // of adjacent pages in the same mapping.
+    if (!split_region_at(addr) || !split_region_at(end)) {
+        return false;
+    }
+
     for (Region& r : regions_) {
-        if (addr < r.end() && r.base < end) {
+        if (r.base >= addr && r.end() <= end) {
             r.perm = perm;
         }
     }
+    ++code_epoch_;
     return true;
 }
 
@@ -239,43 +297,85 @@ std::uint64_t GuestAddressSpace::set_brk(std::uint64_t requested) {
         return brk_; // unchanged: the request is outside the heap area
     }
     if (requested > brk_) {
-        ensure_heap_mapped(requested); // growing: back the new pages
+        if (!ensure_heap_mapped(requested)) {
+            return brk_; // Linux contract: on ENOMEM return unchanged break
+        }
+        brk_ = requested;
+        return brk_;
     }
-    brk_ = requested;
+    if (requested < brk_) {
+        const long idx = find_region(heap_base_);
+        if (idx >= 0) {
+            Region& heap = regions_[static_cast<std::size_t>(idx)];
+            const auto new_aligned = page_align_up(requested);
+            if (requested == heap_base_) {
+                regions_.erase(regions_.begin() + idx);
+                ++code_epoch_;
+            } else if (new_aligned && *new_aligned >= heap.base) {
+                const auto kept_pages = static_cast<std::size_t>(*new_aligned - heap.base);
+                const auto zero_from = static_cast<std::size_t>(requested - heap.base);
+                if (kept_pages < heap.bytes.size()) {
+                    heap.bytes.resize(kept_pages);
+                    heap.size = kept_pages;
+                    ++code_epoch_;
+                }
+                if (zero_from < heap.bytes.size()) {
+                    std::memset(heap.bytes.data() + zero_from, 0, heap.bytes.size() - zero_from);
+                }
+            }
+        }
+        brk_ = requested;
+    }
     return brk_;
 }
 
-void GuestAddressSpace::ensure_heap_mapped(std::uint64_t upto) {
+bool GuestAddressSpace::ensure_heap_mapped(std::uint64_t upto) {
+    if (upto <= heap_base_) {
+        return true;
+    }
     const auto aligned = page_align_up(upto);
     if (!aligned) {
-        return;
+        return false;
     }
-    // Find an existing region anchored at the heap base, if any.
+    const std::uint64_t needed = *aligned - heap_base_;
+    if (needed > max_map_bytes_) {
+        return false;
+    }
+
     const long idx = find_region(heap_base_);
     if (idx >= 0) {
         Region& heap = regions_[static_cast<std::size_t>(idx)];
-        if (heap.base == heap_base_ && heap.end() < *aligned) {
-            auto bytes = try_allocate_bytes(static_cast<std::size_t>(*aligned - heap.base));
-            if (!bytes) {
-                return; // growth failed: leave the break where it was
-            }
-            heap.bytes = std::move(*bytes);
-            heap.size = *aligned - heap.base;
+        if (heap.base != heap_base_) {
+            return false;
         }
-        return;
+        if (heap.size < needed) {
+            try {
+                // Resize preserves all existing heap bytes [0, old_size) and
+                // zero-fills newly mapped pages [old_size, needed).
+                heap.bytes.resize(static_cast<std::size_t>(needed), 0);
+            } catch (const std::exception&) {
+                return false;
+            }
+            heap.size = needed;
+            ++code_epoch_;
+        }
+        return true;
     }
-    auto bytes = try_allocate_bytes(static_cast<std::size_t>(*aligned - heap_base_));
+
+    auto bytes = try_allocate_bytes(static_cast<std::size_t>(needed));
     if (!bytes) {
-        return;
+        return false;
     }
     Region heap;
     heap.base = heap_base_;
-    heap.size = *aligned - heap_base_;
+    heap.size = needed;
     heap.perm = MemPerm::kRead | MemPerm::kWrite;
     heap.bytes = std::move(*bytes);
     regions_.push_back(std::move(heap));
     std::sort(regions_.begin(), regions_.end(),
               [](const Region& a, const Region& b) { return a.base < b.base; });
+    ++code_epoch_;
+    return true;
 }
 
 std::optional<MemPerm> GuestAddressSpace::perm_at(std::uint64_t address) const {
@@ -287,7 +387,7 @@ std::optional<MemPerm> GuestAddressSpace::perm_at(std::uint64_t address) const {
 }
 
 bool GuestAddressSpace::access(std::uint64_t address, std::uint8_t* buf, std::size_t count,
-                               bool is_write) {
+                               MemPerm need, bool is_write) {
     if (count == 0) {
         return true;
     }
@@ -295,7 +395,6 @@ bool GuestAddressSpace::access(std::uint64_t address, std::uint8_t* buf, std::si
         return false; // wrap-around
     }
     const std::uint64_t end = address + count;
-    const MemPerm need = is_write ? MemPerm::kWrite : MemPerm::kRead;
 
     std::uint64_t cursor = address;
     while (cursor < end) {
@@ -321,11 +420,16 @@ bool GuestAddressSpace::access(std::uint64_t address, std::uint8_t* buf, std::si
 }
 
 bool GuestAddressSpace::read(std::uint64_t address, std::uint8_t* out, std::size_t count) {
-    return access(address, out, count, /*is_write=*/false);
+    return access(address, out, count, MemPerm::kRead, /*is_write=*/false);
 }
 
 bool GuestAddressSpace::write(std::uint64_t address, const std::uint8_t* in, std::size_t count) {
-    return access(address, const_cast<std::uint8_t*>(in), count, /*is_write=*/true);
+    return access(address, const_cast<std::uint8_t*>(in), count, MemPerm::kWrite,
+                  /*is_write=*/true);
+}
+
+bool GuestAddressSpace::fetch(std::uint64_t address, std::uint8_t* out, std::size_t count) {
+    return access(address, out, count, MemPerm::kExec, /*is_write=*/false);
 }
 
 } // namespace hyperion

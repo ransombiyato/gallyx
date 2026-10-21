@@ -295,7 +295,7 @@ StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
     std::uint8_t code[15] = {};
     std::size_t available = 0;
     for (std::size_t n = sizeof(code); n >= 1; --n) {
-        if (memory.read(state.rip, code, n)) {
+        if (memory.fetch(state.rip, code, n)) {
             available = n;
             break;
         }

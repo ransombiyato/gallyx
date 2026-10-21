@@ -33,6 +33,14 @@ public:
     // read or write out of bounds.
     virtual bool read(std::uint64_t address, std::uint8_t* out, std::size_t count) = 0;
     virtual bool write(std::uint64_t address, const std::uint8_t* in, std::size_t count) = 0;
+    // Instruction fetch. FlatMemory treats all mapped bytes as executable; a
+    // permission-enforcing address space requires MemPerm::kExec (NX enforcement).
+    virtual bool fetch(std::uint64_t address, std::uint8_t* out, std::size_t count) {
+        return read(address, out, count);
+    }
+    // Monotonic epoch incremented whenever executable mappings/permissions
+    // change (mmap/munmap/mprotect), enabling zero-overhead Tier 1 coherence.
+    virtual std::uint64_t code_epoch() const noexcept { return 0; }
 };
 
 // A flat, byte-addressable region [base, base + size). Used by tests and by

@@ -399,12 +399,14 @@ elimination, flag liveness, direct-mapped dispatch, ALU immediate folding,
 guest-register allocation), each judged on deterministic evidence as well as
 timing (BENCHMARKS.md §4.2).
 
-Phase 6 has three syscall slices implemented in both tiers over a
+Phase 6 has seven syscall slices implemented in both tiers over a
 `GuestAddressSpace`: `write`/`exit`/`exit_group`; `mmap`/`mprotect`/`munmap`/`brk`
-(anonymous `mmap` only); and a handler-owned guest descriptor table with
-`read`/`close`/`lseek`. `open`/`openat` are deliberately **not** implemented, so a
-guest can read only descriptors the host adopted; every other number returns
-`-ENOSYS` and is counted, never silently ignored.
+(anonymous `mmap` only); a handler-owned guest descriptor table with
+`read`/`openat`/`close`/`lseek`/`fstat`; `getcwd`/`getrandom`; the identity
+getters (`getpid`/`gettid`/`getuid`/`geteuid`/`getgid`/`getegid`/`getppid`);
+`newfstatat`; and `access`/`readlink` — twenty-four numbers in total.
+`openat` is limited to `AT_FDCWD`; every other number returns `-ENOSYS` and is
+counted, never silently ignored.
 
 The project also installs with a single command:
 

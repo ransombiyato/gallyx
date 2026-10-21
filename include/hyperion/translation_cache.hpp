@@ -7,8 +7,10 @@
 // Scope (Phase 4): this is a *dispatcher*, not yet an optimising JIT. It
 // decodes a guest program, translates one basic block at a time into a fresh
 // ExecMem region, caches the result by guest program counter, and runs blocks
-// in a loop until the program halts. There is no block chaining, no register
-// allocation and no eviction policy yet; those are Phase 5.
+// in a loop until the program halts. There is no block chaining and no
+// eviction policy yet (Phase 5). Register allocation *is* present
+// (translator.cpp, D-021): a block keeps its most-used guest registers in
+// callee-saved host registers rather than GuestState memory.
 //
 // Correctness rules that this class exists to enforce:
 //   - An instruction the translator does not support is never executed.

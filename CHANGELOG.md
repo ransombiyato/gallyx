@@ -5,6 +5,24 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — documentation truth audit
+
+### Fixed — stale docs that contradicted the implemented code
+- `docs/known-issues.md` LIM-002/010/011/015 claimed features were missing that
+  are implemented (the syscall list stopped at ten numbers and said `openat` was
+  unimplemented; LIM-010 said there is no guest stack or memory operands; LIM-011
+  said there is no register allocation). Corrected to describe the real state and
+  added LIM-016 (the address-space bound is per-mapping, not total).
+- `README.md`, `ARCHITECTURE.md` and `ROADMAP.md` still said "four syscall
+  slices" / "`open`/`openat` are deliberately not implemented". Corrected to seven
+  slices / `AT_FDCWD`-limited `openat`.
+- `STATUS.md` §"current state" repeated the three-slice description and the
+  `open`/`openat`-not-implemented claim. Corrected.
+- `include/hyperion/translation_cache.hpp` claimed there is "no register
+  allocation"; per-block register allocation has been present since D-021.
+
+---
+
 ## [Unreleased] — guest address space resource bound
 
 ### Fixed — guest-controlled `mmap` length could terminate the host process

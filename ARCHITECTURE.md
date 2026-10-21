@@ -223,8 +223,9 @@ not in the table is `-EBADF`, so a guest integer can never name an arbitrary hos
 descriptor. The table starts with fd 0/1/2 on the process's stdin/stdout/stderr;
 `MinimalSyscallHandler::adopt()` attaches an already-open host stream under
 another guest fd. The handler does not own the streams and never `fclose`s them.
-`open`/`openat` are deliberately not implemented yet (see `DECISIONS.md` D-024),
-so a guest can read only descriptors the host adopted.
+`openat`(257) is implemented for `AT_FDCWD` and a bounded flag set; a real
+`dirfd` or an unhandled flag returns `-ENOSYS` and is counted as unimplemented
+(see `DECISIONS.md` D-024, D-025).
 
 Compatibility is claimed only via the feature matrix in
 [`COMPATIBILITY.md`](COMPATIBILITY.md) backed by integration tests. A handful

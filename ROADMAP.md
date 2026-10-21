@@ -282,7 +282,7 @@ optimization decisions.
 
 ---
 
-## Phase 6 — Linux ABI and syscall compatibility 🟡 (four slices implemented)
+## Phase 6 — Linux ABI and syscall compatibility 🟡 (seven slices implemented)
 
 **Objective.** Run real Linux guest programs.
 
@@ -336,8 +336,20 @@ file descriptors, signals, threading, futexes. Feature matrix + integration test
   `fstat` writes the **guest** (x86-64) `struct stat` layout field-by-field,
   because the host layout differs on AArch64. Path policy is explicit: guest
   paths are forwarded to the host kernel (D-025) — Hyperion is **not a sandbox**.
+- ✅ **Process-identity getters, `getcwd`, `getrandom` (fifth slice).**
+  `getpid`/`gettid`/`getuid`/`geteuid`/`getgid`/`getegid`/`getppid` report the
+  host process's values (Hyperion is single-process, D-026); `getcwd`(79) and
+  `getrandom`(318) copy into a validated guest buffer, `getrandom` accepting only
+  the two defined `GRND_*` bits.
+- ✅ **`newfstatat`(262) (sixth slice).** glibc's `stat`/`lstat`/`fstatat` entry
+  point; `AT_FDCWD` only, `AT_SYMLINK_NOFOLLOW` selects `lstat`. Shares the single
+  guest-`struct stat` builder with `fstat` (D-027).
+- ✅ **`access`(21) + `readlink`(89) (seventh slice).** `access` forwards to the
+  host with `mode` restricted to `F_OK`/`R_OK`/`W_OK`/`X_OK`; `readlink` copies a
+  symlink target with the kernel's truncation (not NUL-termination) semantics
+  (D-028).
 - ⬜ The remaining U4 syscalls a program needs to start (`arch_prctl`,
-  `getdents64`, `access`, `readlink`, `getrandom`, `newfstatat`, …) — **next**.
+  `getdents64`, `set_tid_address`, `set_robust_list`, …) — **next**.
 - ⬜ Signals, threads, futexes.
 
 **Exit criteria.** A clearly defined set of real Linux guest programs works

@@ -12,17 +12,18 @@ on other Linux hosts, so target-device compatibility is *measured, not
 assumed* — see [`docs/target-environment.md`](docs/target-environment.md).
 
 > **Status: Phase 5 (performance measurement and optimization) active; Phase 6
-> (Linux ABI and syscall compatibility) four slices implemented.** The repository
+> (Linux ABI and syscall compatibility) seven slices implemented.** The repository
 > builds, its tests pass, and a documented subset of x86-64 instructions executes
 > through generated AArch64 code, verified against the reference interpreter
 > under `qemu-user`. There are **two execution tiers**: the reference interpreter
 > (Tier 0) and a translation cache that runs whole programs through generated
-> AArch64 code (Tier 1). **Four syscall slices** are implemented in both tiers:
+> AArch64 code (Tier 1). **Seven syscall slices** are implemented in both tiers:
 > `write`/`exit`/`exit_group`; the guest address space with
 > `mmap`/`mprotect`/`munmap`/`brk`; a guest descriptor table with
-> `read`/`close`/`lseek`; and `openat`/`fstat` (guest paths are forwarded to the
-> host kernel — Hyperion is **not a sandbox**). Every other syscall returns
-> `-ENOSYS`. There is
+> `read`/`openat`/`close`/`lseek`/`fstat`; `getcwd`/`getrandom`; the process
+> identity getters; `newfstatat`; and `access`/`readlink` (guest paths are
+> forwarded to the host kernel — Hyperion is **not a sandbox**). Every other
+> syscall returns `-ENOSYS`. There is
 > **no block chaining and no cache invalidation yet**, so
 > only hand-written raw blobs run — no real Linux program does. See
 > [`STATUS.md`](STATUS.md) for the exact current state and

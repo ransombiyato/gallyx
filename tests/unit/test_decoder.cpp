@@ -176,6 +176,23 @@ HYPERION_TEST("decoder", "rejects_truncated") {
     HYPERION_CHECK(r.error == DecodeError::kTruncated);
 }
 
+HYPERION_TEST("decoder", "rejects_truncated_sib") {
+    // 48 8B 04 declares a SIB byte that is not present. This must be reported
+    // as truncation, not as an unsupported ModRM form: the difference matters
+    // to the caller (a truncated window may be re-fetched larger, an
+    // unsupported form never becomes decodable).
+    const auto r = dec({0x48, 0x8B, 0x04});
+    HYPERION_CHECK(!r.ok());
+    HYPERION_CHECK(r.error == DecodeError::kTruncated);
+}
+
+HYPERION_TEST("decoder", "rejects_truncated_displacement") {
+    // 48 8B 44 24 declares a mod=01 disp8 that is not present.
+    const auto r = dec({0x48, 0x8B, 0x44, 0x24});
+    HYPERION_CHECK(!r.ok());
+    HYPERION_CHECK(r.error == DecodeError::kTruncated);
+}
+
 HYPERION_TEST("decoder", "rejects_empty") {
     const auto r = hyperion::decode(nullptr, 0, 0x1000);
     HYPERION_CHECK(!r.ok());

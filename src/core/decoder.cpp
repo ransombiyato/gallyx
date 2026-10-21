@@ -102,11 +102,13 @@ bool decode_rm_operand(Reader& r, const Modrm& m, const Rex& rex, OperandSize si
     mem.address_size = OperandSize::k64;
 
     if (m.rm == 4) {
-        // SIB byte follows.
-        if (!r.has()) {
+        // SIB byte follows. Read it through the bounds-checked reader so a
+        // missing byte sets the truncation flag; a bare has() check would let
+        // the caller misclassify truncation as an unsupported ModRM form.
+        const std::uint8_t sib = r.u8();
+        if (r.truncated()) {
             return false;
         }
-        const std::uint8_t sib = r.u8();
         const std::uint8_t scale_bits = static_cast<std::uint8_t>(sib >> 6);
         const std::uint8_t index_bits = static_cast<std::uint8_t>((sib >> 3) & 0x7);
         const std::uint8_t base_bits = static_cast<std::uint8_t>(sib & 0x7);

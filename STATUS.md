@@ -447,13 +447,18 @@ removed `/usr`; the toolchain was restored from `tools/vendor/host-debs/` and
 
 | Suite | Command | Result |
 | --- | --- | --- |
-| Native | `scripts/dev.sh test` | 10/10 ctest passed (169 unit cases, 0 failed, 13 skipped) |
-| Cross (qemu-user) | `scripts/dev.sh cross-test` | 6/6 ctest passed (186 unit cases, 0 failed, 2 skipped) |
-| Clang | `scripts/dev.sh clang-build` | 10/10 passed (169 unit cases, 0 failed) |
-| ASan/UBSan | `scripts/dev.sh sanitize` | 10/10 passed (169 unit cases, 0 failed) |
+| Native | `scripts/dev.sh test` | 10/10 ctest passed (171 unit cases, 0 failed, 13 skipped) |
+| Cross (qemu-user) | `scripts/dev.sh cross-test` | 6/6 ctest passed (188 unit cases, 0 failed, 2 skipped) |
+| Clang | `scripts/dev.sh clang-build` | 10/10 passed (171 unit cases, 0 failed) |
+| ASan/UBSan | `scripts/dev.sh sanitize` | 10/10 passed (171 unit cases, 0 failed) |
 | Formatting | `scripts/dev.sh format` | clean (clang-format 19.1.7) |
 | Lint | `shellcheck scripts/*.sh tests/cli/*.sh` | clean |
 | Syscall inventory | `python3 tools/gen_syscall_inventory.py --check` | OK (0 errors, 0 warnings) |
+
+Re-verified after the decoder truncation-diagnostic fix: native **171/0**,
+13 skipped (of 184); cross **188/0**, 2 skipped (of 190) under `qemu-user`;
+ASan/UBSan **171/0**; clang-build **171/0**; format clean; shellcheck clean;
+syscall inventory valid.
 
 Re-verified after the `hyperion` wrapper fix: native **169/0**, 13 skipped
 (of 182); cross **186/0**, 2 skipped (of 188) under `qemu-user`; ASan/UBSan

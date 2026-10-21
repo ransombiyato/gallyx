@@ -5,6 +5,20 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — decoder misreported a truncated SIB byte
+
+### Fixed
+- `decode_rm_operand` pre-checked the SIB byte with a bare `Reader::has()`,
+  which does not set the truncation flag. A ModRM byte whose SIB byte was
+  missing (`48 8B 04`) therefore surfaced as `kUnsupportedModrm` instead of
+  `kTruncated`. The distinction is load-bearing: a truncated instruction may
+  become decodable when a larger window is fetched, an unsupported form never
+  will. The byte is now read through the bounds-checked reader.
+- Added decoder tests `rejects_truncated_sib` and
+  `rejects_truncated_displacement`.
+
+---
+
 ## [Unreleased] — the `hyperion` command reported a stale status and refused `run`
 
 ### Fixed

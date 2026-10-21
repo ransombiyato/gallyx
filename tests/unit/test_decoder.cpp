@@ -211,3 +211,64 @@ HYPERION_TEST("decoder", "to_string_is_readable") {
     HYPERION_CHECK(r.ok());
     HYPERION_CHECK_EQ(hyperion::to_string(r.instruction), std::string("add rax, rbx"));
 }
+
+HYPERION_TEST("decoder", "accumulator_immediate_alu_forms") {
+    // 05 78 56 34 12 = add eax, 0x12345678
+    const auto add32 = dec({0x05, 0x78, 0x56, 0x34, 0x12});
+    HYPERION_CHECK(add32.ok());
+    HYPERION_CHECK(add32.instruction.opcode == Opcode::kAdd);
+    HYPERION_CHECK(add32.instruction.dst.reg == Gpr::kRax);
+    HYPERION_CHECK(add32.instruction.dst.size == hyperion::OperandSize::k32);
+    HYPERION_CHECK_EQ(add32.instruction.src.imm, 0x12345678ULL);
+
+    // 48 3D F0 FF FF FF = cmp rax, -16
+    const auto cmp64 = dec({0x48, 0x3D, 0xF0, 0xFF, 0xFF, 0xFF});
+    HYPERION_CHECK(cmp64.ok());
+    HYPERION_CHECK(cmp64.instruction.opcode == Opcode::kCmp);
+    HYPERION_CHECK(cmp64.instruction.dst.reg == Gpr::kRax);
+    HYPERION_CHECK(cmp64.instruction.dst.size == hyperion::OperandSize::k64);
+    HYPERION_CHECK_EQ(cmp64.instruction.src.imm, static_cast<std::uint64_t>(-16LL));
+}
+
+HYPERION_TEST("decoder", "sib_disp32_without_base") {
+    // 48 8B 04 25 00 10 40 00 = mov rax, [0x401000]
+    const auto abs_mem = dec({0x48, 0x8B, 0x04, 0x25, 0x00, 0x10, 0x40, 0x00});
+    HYPERION_CHECK(abs_mem.ok());
+    HYPERION_CHECK(abs_mem.instruction.src.kind == OperandKind::kMemory);
+    HYPERION_CHECK(!abs_mem.instruction.src.mem.has_base);
+    HYPERION_CHECK(!abs_mem.instruction.src.mem.has_index);
+    HYPERION_CHECK_EQ(abs_mem.instruction.src.mem.disp, 0x401000);
+
+    // 48 8B 04 CD 80 20 40 00 = mov rax, [rcx*8 + 0x402080]
+    const auto scaled = dec({0x48, 0x8B, 0x04, 0xCD, 0x80, 0x20, 0x40, 0x00});
+    HYPERION_CHECK(scaled.ok());
+    HYPERION_CHECK(!scaled.instruction.src.mem.has_base);
+    HYPERION_CHECK(scaled.instruction.src.mem.has_index);
+    HYPERION_CHECK(scaled.instruction.src.mem.index == Gpr::kRcx);
+    HYPERION_CHECK_EQ(scaled.instruction.src.mem.scale, 8u);
+    HYPERION_CHECK_EQ(scaled.instruction.src.mem.disp, 0x402080);
+}
+
+HYPERION_TEST("decoder", "benign_rex_nop_and_multi_rex_length_limit") {
+    // 48 90 = rex.W nop (alignment NOP emitted by toolchains)
+    const auto nop64 = dec({0x48, 0x90});
+    HYPERION_CHECK(nop64.ok());
+    HYPERION_CHECK(nop64.instruction.opcode == Opcode::kNop);
+    HYPERION_CHECK_EQ(nop64.instruction.length, 2u);
+
+    // 41 90 = xchg r8d, eax — NOT a NOP; must remain rejected.
+    const auto xchg_r8 = dec({0x41, 0x90});
+    HYPERION_CHECK(!xchg_r8.ok());
+
+    // 14 REX bytes + 0x90 = 15 bytes (architectural max): valid NOP.
+    const auto ok15 = dec(
+        {0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x90});
+    HYPERION_CHECK(ok15.ok());
+    HYPERION_CHECK_EQ(ok15.instruction.length, 15u);
+
+    // 15 REX bytes + 0x90 = 16 bytes: exceeds 15-byte x86-64 limit -> kTooLong.
+    const auto too_long = dec({0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40,
+                               0x40, 0x40, 0x40, 0x40, 0x90});
+    HYPERION_CHECK(!too_long.ok());
+    HYPERION_CHECK(too_long.error == DecodeError::kTooLong);
+}

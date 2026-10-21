@@ -27,7 +27,7 @@ namespace hyperion {
 
 // Why a byte sequence was rejected. Kept explicit so tests can assert the
 // precise reason rather than "it failed".
-enum class DecodeError {
+enum class DecodeError : std::uint8_t {
     kNone = 0,
     kTruncated,          // ran out of bytes mid-instruction
     kUnknownOpcode,      // opcode not in the supported subset

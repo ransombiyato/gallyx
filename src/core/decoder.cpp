@@ -31,6 +31,12 @@ public:
 
     std::int8_t i8() { return static_cast<std::int8_t>(u8()); }
 
+    std::int64_t disp8() {
+        const std::uint8_t raw = u8();
+        return (raw & 0x80u) != 0 ? static_cast<std::int64_t>(raw) - 256
+                                  : static_cast<std::int64_t>(raw);
+    }
+
     std::uint32_t u32() {
         std::uint32_t v = 0;
         for (int i = 0; i < 4; ++i) {
@@ -100,6 +106,7 @@ bool decode_rm_operand(Reader& r, const Modrm& m, const Rex& rex, OperandSize si
 
     MemoryOperand mem;
     mem.address_size = OperandSize::k64;
+    bool sib_disp32 = false;
 
     if (m.rm == 4) {
         // SIB byte follows. Read it through the bounds-checked reader so a
@@ -123,13 +130,16 @@ bool decode_rm_operand(Reader& r, const Modrm& m, const Rex& rex, OperandSize si
             mem.index = gpr_from(static_cast<std::uint8_t>(index_bits | (rex.x ? 8 : 0)));
         }
 
-        // base == 5 with mod == 0 is "no base, disp32" (RIP-relative in 64-bit
-        // mode when there is no SIB base). Rejected: not in the subset.
+        // In 64-bit mode, SIB base == 5 with mod == 0 encodes no base register
+        // plus a 32-bit sign-extended displacement ([disp32] or
+        // [index*scale + disp32]), never RIP-relative (SIB is how 64-bit code
+        // addresses absolute 32-bit addresses).
         if (base_bits == 5 && m.mod == 0) {
-            return false;
+            sib_disp32 = true;
+        } else {
+            mem.has_base = true;
+            mem.base = gpr_from(static_cast<std::uint8_t>(base_bits | (rex.b ? 8 : 0)));
         }
-        mem.has_base = true;
-        mem.base = gpr_from(static_cast<std::uint8_t>(base_bits | (rex.b ? 8 : 0)));
     } else if (m.rm == 5 && m.mod == 0) {
         // RIP-relative addressing (mod=00, rm=101). Common in real code, but
         // not modelled yet; reject explicitly rather than mis-compute.
@@ -141,9 +151,12 @@ bool decode_rm_operand(Reader& r, const Modrm& m, const Rex& rex, OperandSize si
 
     switch (m.mod) {
     case 0:
-        break; // no displacement (the rm==5 / SIB-base==5 cases were rejected)
+        if (sib_disp32) {
+            mem.disp = r.i32();
+        }
+        break;
     case 1:
-        mem.disp = r.i8();
+        mem.disp = r.disp8();
         break;
     case 2:
         mem.disp = r.i32();
@@ -152,6 +165,9 @@ bool decode_rm_operand(Reader& r, const Modrm& m, const Rex& rex, OperandSize si
         return false;
     }
 
+    if (r.truncated()) {
+        return false;
+    }
     out.kind = OperandKind::kMemory;
     out.size = size;
     out.mem = mem;
@@ -189,7 +205,7 @@ Opcode alu_group_opcode(std::uint8_t reg_field) {
     case 7:
         return Opcode::kCmp;
     default:
-        return static_cast<Opcode>(0xFF); // unsupported (ADC/SBB)
+        return Opcode::kAdd; // unreachable after is_supported_alu_group()
     }
 }
 
@@ -325,8 +341,9 @@ std::string operand_to_string(const Operand& op) {
             need_plus = true;
         }
         if (op.mem.has_index) {
-            if (need_plus)
+            if (need_plus) {
                 s += "+";
+            }
             s += to_string(op.mem.index);
             if (op.mem.scale != 1) {
                 std::snprintf(buf, sizeof(buf), "*%u", static_cast<unsigned>(op.mem.scale));
@@ -379,14 +396,20 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
     Reader r(code, size);
     Rex rex;
 
-    // --- Legacy prefixes ---------------------------------------------------
-    // Only REX (0x40..0x4F) is modelled. Everything else that changes meaning
-    // is rejected rather than ignored: ignoring 0x66 would decode a 16-bit
-    // instruction as 32-bit, which is silently wrong.
+    // --- Legacy & REX prefixes ---------------------------------------------
+    // Only REX (0x40..0x4F) is modelled. Per Intel SDM Vol. 2A §2.2.1:
+    //   - Multiple contiguous REX prefixes are legal up to the 15-byte total
+    //     instruction length limit; only the final REX preceding the opcode
+    //     takes effect.
+    //   - Any legacy prefix outside our subset (or following REX) is rejected.
     bool saw_rex = false;
     for (;;) {
         if (!r.has()) {
             result.error = DecodeError::kTruncated;
+            return result;
+        }
+        if (r.position() >= kMaxInstructionLength) {
+            result.error = DecodeError::kTooLong;
             return result;
         }
         const std::uint8_t b = code[r.position()];
@@ -398,8 +421,7 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
             rex.x = (b & 0x02) != 0;
             rex.b = (b & 0x01) != 0;
             saw_rex = true;
-            // REX must be the last prefix; only one is meaningful.
-            break;
+            continue;
         }
         if (b == 0xF0 || b == 0xF2 || b == 0xF3 || b == 0x66 || b == 0x67 || b == 0x2E ||
             b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 || b == 0x65) {
@@ -410,6 +432,10 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
     }
     (void)saw_rex;
 
+    if (r.position() >= kMaxInstructionLength) {
+        result.error = DecodeError::kTooLong;
+        return result;
+    }
     const std::uint8_t opcode = r.u8();
     if (r.truncated()) {
         result.error = DecodeError::kTruncated;
@@ -473,7 +499,7 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
     // --- Primary-map ALU: r/m,r (base+0), r,r/m (base+2), EAX/RAX,imm (base+5)
     // base: ADD 0x00, OR 0x08, AND 0x20, SUB 0x28, XOR 0x30, CMP 0x38
     {
-        Opcode alu = static_cast<Opcode>(0xFF);
+        Opcode alu = Opcode::kAdd;
         bool is_alu_modrm = false;
         bool is_alu_acc_imm = false;
         switch (opcode) {
@@ -607,8 +633,7 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
         imm.size = op_size;
         if (opcode == 0x83) {
             // imm8, sign-extended to the operand size.
-            const std::int8_t v = r.i8();
-            imm.imm = static_cast<std::uint64_t>(static_cast<std::int64_t>(v));
+            imm.imm = static_cast<std::uint64_t>(r.disp8());
         } else if (!read_alu_immediate(r, op_size, imm)) {
             result.error = DecodeError::kTruncated;
             return result;
@@ -676,9 +701,10 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
 
     // --- 0x90 NOP ----------------------------------------------------------
     if (opcode == 0x90) {
-        // 0x90 is XCHG eax,eax; with REX.B it is XCHG r8,rax. Only plain NOP
-        // is in the subset.
-        if (rex.present) {
+        // Per Intel SDM Vol. 2B ("NOP"), 0x90 is NOP unless REX.B == 1, which
+        // selects XCHG r8d/r8, eax/rax. Benign REX prefixes with REX.B == 0
+        // (e.g. compiler-emitted alignment padding `48 90` or `40 90`) remain NOP.
+        if (rex.b) {
             result.error = DecodeError::kUnknownOpcode;
             return result;
         }
@@ -721,7 +747,7 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
     // The rel32 form is 0xE9; the rel8 form is very common in real code and is
     // the natural companion to the 0x70..0x7F short Jcc below.
     if (opcode == 0xEB) {
-        const std::int8_t rel = r.i8();
+        const std::int64_t rel = r.disp8();
         Operand target;
         target.kind = OperandKind::kImmediate;
         target.size = OperandSize::k64;
@@ -751,7 +777,7 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
     // Note: these are SHORT jumps, 1-byte displacement. The rel32 forms are
     // 0x0F 0x80..0x8F and are not in the subset.
     if (opcode >= 0x70 && opcode <= 0x7F) {
-        const std::int8_t rel = r.i8();
+        const std::int64_t rel = r.disp8();
         Operand target;
         target.kind = OperandKind::kImmediate;
         target.size = OperandSize::k64;

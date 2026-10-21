@@ -67,7 +67,7 @@ private:
     std::vector<std::uint8_t> bytes_;
 };
 
-enum class StepStatus {
+enum class StepStatus : std::uint8_t {
     kOk,          // one instruction executed; state updated
     kHalted,      // HLT executed, or a syscall asked the guest to exit
     kFault,       // memory fault or invalid state
@@ -82,6 +82,8 @@ struct StepResult {
     // Number of guest syscalls in this step that the handler did not implement
     // (0 or 1). Non-zero means rax was set to -ENOSYS; execution continued.
     std::uint32_t unimplemented_syscalls = 0;
+    bool exited_via_syscall = false;
+    std::int64_t exit_code = 0;
 
     bool ok() const { return status == StepStatus::kOk; }
 };

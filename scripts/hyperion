@@ -6,8 +6,8 @@
 # <prefix>/share/hyperion/install.conf, which records the source checkout and
 # build tree chosen at install time.
 #
-# This is a thin, honest front end: every command either runs something that
-# really exists in the build tree, or says clearly that it does not exist yet.
+# This is a thin, honest front end: every command runs real functionality in
+# the build tree or reports clearly what is not implemented yet.
 set -euo pipefail
 
 SELF="${BASH_SOURCE[0]}"
@@ -82,8 +82,8 @@ paths
   build-dir     print the build tree path
 
 translator
-  run <exe>     execute a raw x86-64 code blob (tier 0/1)
-  info <exe>    describe an x86-64 executable [NOT IMPLEMENTED]
+  run <exe>     execute a static x86-64 ELF64 binary or raw code blob (tier 0/1)
+  info <exe>    inspect an x86-64 ELF64 executable
 
   help          show this message
 
@@ -93,9 +93,8 @@ EOF
 }
 
 cmd_version() {
-    if [ -x "${BUILD}/benchmarks/hyperion_bench" ]; then
-        "${BUILD}/benchmarks/hyperion_bench" --iterations 1 --repeats 2 --json 2>/dev/null \
-            | sed -n 's/.*"build": "\(.*\)",/build: \1/p'
+    if [ -x "${BUILD}/hyperion" ]; then
+        "${BUILD}/hyperion" --version
     fi
     say "source: ${SRC}"
     say "build:  ${BUILD}"
@@ -111,28 +110,27 @@ Phase 2  minimal instruction exec    IN PROGRESS (subset)
 Phase 3  first native code gen       IN PROGRESS
 Phase 4  basic dynamic translator    CORE DONE
 Phase 5  performance and opt         IN PROGRESS
-Phase 6  Linux ABI / syscalls        IN PROGRESS (seven slices)
+Phase 6  Linux ABI / syscalls        IN PROGRESS
 Phase 7+ advanced CPU compatibility  NOT STARTED
 
 IMPLEMENTED
   - CMake build, CI, unit tests, cross tests, sanitizers
   - host probe (arch, kernel, page size, cache line)
-  - benchmark harness with repeated-run statistics
+  - benchmark harness (`hyperion_bench` and `hyperion_tier_bench`)
   - AArch64 cross-build + test under qemu-user
   - x86-64 decoder + reference interpreter for a documented subset
-  - AArch64 code generator and a block translation cache (tier 1)
-  - per-block guest-register allocation
-  - a slice of Linux syscalls (see 'hyperion doctor' / STATUS.md)
+  - AArch64 code generator and block translation cache (tier 1)
+  - per-block guest-register allocation & W^X executable code cache
+  - static x86-64 ELF64 (`ET_EXEC` / `ET_DYN`) loader, System V initial stack,
+    `hyperion info`, and Linux syscall emulation slices
 
 NOT IMPLEMENTED
-  - loading a real ELF executable (only raw code blobs run)
-  - block chaining, cache invalidation, SIMD, signals, threads
-  - the `info` command
+  - dynamic linking (`PT_INTERP` / `ld-linux-x86-64.so.2`)
+  - SIMD/FPU, signals, threads (`clone`/`futex`), full Linux ABI
 
-A raw x86-64 code blob runs with 'hyperion run <file>' (tier 1 on an AArch64
-host, tier 0 otherwise). A real Linux ELF program cannot run yet. 'hyperion
-bench' measures the host machine, not any emulation. See STATUS.md and
-ROADMAP.md in the source checkout for the full picture.
+Static x86-64 Linux ELF64 binaries (within the modelled ISA/syscall subset) and
+raw x86-64 code blobs run with 'hyperion run <file>' (tier 1 on an AArch64 host,
+tier 0 fallback otherwise). See STATUS.md and COMPATIBILITY.md for full details.
 EOF
 }
 
@@ -174,7 +172,12 @@ cmd_doctor() {
     if [ ! -x "${BENCH_BIN}" ]; then
         say "  - benchmark harness not built: run 'hyperion build'."
     fi
-    say "  - the translator does not exist yet; see 'hyperion status'."
+    if [ "$(uname -m)" = "aarch64" ]; then
+        say "  - AArch64 host detected: Tier 1 native code generation is active."
+    else
+        say "  - non-AArch64 host: 'hyperion run' falls back to Tier 0 interpreter"
+        say "    (use 'hyperion cross-test' to exercise Tier 1 AArch64 codegen via qemu-user)."
+    fi
 }
 
 cmd_build() {
@@ -220,19 +223,18 @@ cmd_clean() {
     rm -rf "${BUILD}"
 }
 
-not_implemented() {
-    say "NOT IMPLEMENTED: $1"
-    say ""
-    say "A raw x86-64 code blob can be run with 'hyperion run <file>', but this"
-    say "command needs a real x86-64 ELF program. See ROADMAP.md."
-    exit 2
-}
-
 cmd_run() {
     need_build
     local bin="${BUILD}/hyperion"
     [ -x "${bin}" ] || die "hyperion binary not found at '${bin}' (run: hyperion build)"
     exec "${bin}" run "$@"
+}
+
+cmd_info() {
+    need_build
+    local bin="${BUILD}/hyperion"
+    [ -x "${bin}" ] || die "hyperion binary not found at '${bin}' (run: hyperion build)"
+    exec "${bin}" info "$@"
 }
 
 case "${1:-}" in
@@ -248,6 +250,6 @@ case "${1:-}" in
     src)                say "${SRC}" ;;
     build-dir)          say "${BUILD}" ;;
     run)                shift; cmd_run "$@" ;;
-    info)               not_implemented "inspecting x86-64 executables" ;;
+    info)               shift; cmd_info "$@" ;;
     *)                  printf 'error: unknown command %s\n\n' "$1" >&2; cmd_help >&2; exit 1 ;;
 esac

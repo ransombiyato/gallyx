@@ -1508,6 +1508,10 @@ HYPERION_TEST("syscall", "mmap_end_to_end_under_generated_code_stops_at_memory_o
     HYPERION_CHECK(as.read(0x50000000, &stored, 1));
     HYPERION_CHECK(stored == 0x00); // the store was never executed
 }
+#else
+HYPERION_TEST("syscall", "mmap_end_to_end_under_generated_code_stops_at_memory_operand") {
+    HYPERION_SKIP("host is not AArch64; cannot execute generated AArch64 code");
+}
 #endif // __aarch64__
 
 #if defined(__aarch64__)
@@ -1538,5 +1542,86 @@ HYPERION_TEST("translation_cache", "tier1_syscall_write_matches_interpreter") {
     HYPERION_CHECK(r.status == RunStatus::kOk);
     HYPERION_CHECK_EQ(cap.out, std::string("hyper"));
 }
-
+#else
+HYPERION_TEST("translation_cache", "tier1_syscall_write_matches_interpreter") {
+    HYPERION_SKIP("host is not AArch64; cannot execute generated AArch64 code");
+}
 #endif // __aarch64__
+
+HYPERION_TEST("syscall", "zero_extended_32bit_at_fdcwd_and_unbuffered_rdwr_file_io") {
+    char tmpl[] = "/tmp/hyperion_syscall_XXXXXX";
+    const int pre_fd = ::mkstemp(tmpl);
+    HYPERION_CHECK(pre_fd >= 0);
+    ::close(pre_fd);
+
+    FlatMemory memory(kBase, 8192);
+    const std::string p(tmpl);
+    HYPERION_CHECK(memory.write(kBase + 0x100, reinterpret_cast<const std::uint8_t*>(p.c_str()),
+                                p.size() + 1));
+    const char payload[] = "unbuffered-rdwr!";
+    HYPERION_CHECK(memory.write(kBase + 0x200, reinterpret_cast<const std::uint8_t*>(payload),
+                                sizeof(payload) - 1));
+
+    MinimalSyscallHandler handler;
+
+    // Crucial real-program ABI test: `mov edi, -100` sets RDI = 0x00000000ffffff9c
+    // (upper 32 bits zeroed!). Open with O_RDWR | O_TRUNC.
+    GuestState s;
+    s.reg(Gpr::kRax) = hyperion::sysno::kOpenat;
+    s.reg(Gpr::kRdi) = 0x00000000FFFFFF9CULL; // zero-extended AT_FDCWD (-100)
+    s.reg(Gpr::kRsi) = kBase + 0x100;
+    s.reg(Gpr::kRdx) = hyperion::open_flags::kORdwr | hyperion::open_flags::kOTrunc;
+    s.reg(Gpr::kR10) = 0600;
+    const auto open_res = handler.handle(s, memory);
+    HYPERION_CHECK(open_res.status == SyscallStatus::kHandled);
+    const auto guest_fd = static_cast<std::int64_t>(s.reg(Gpr::kRax));
+    HYPERION_CHECK(guest_fd >= 3);
+
+    // Write directly to the opened regular file via guest `write(fd, ...)`.
+    s = GuestState{};
+    s.reg(Gpr::kRax) = hyperion::sysno::kWrite;
+    s.reg(Gpr::kRdi) = static_cast<std::uint64_t>(guest_fd);
+    s.reg(Gpr::kRsi) = kBase + 0x200;
+    s.reg(Gpr::kRdx) = sizeof(payload) - 1;
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), sizeof(payload) - 1);
+
+    // Seek back to byte 0 and read back through guest `read(fd, ...)`.
+    s = GuestState{};
+    s.reg(Gpr::kRax) = hyperion::sysno::kLseek;
+    s.reg(Gpr::kRdi) = static_cast<std::uint64_t>(guest_fd);
+    s.reg(Gpr::kRsi) = 0;
+    s.reg(Gpr::kRdx) = hyperion::seek::kSet;
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), 0ULL);
+
+    s = GuestState{};
+    s.reg(Gpr::kRax) = hyperion::sysno::kRead;
+    s.reg(Gpr::kRdi) = static_cast<std::uint64_t>(guest_fd);
+    s.reg(Gpr::kRsi) = kBase + 0x300;
+    s.reg(Gpr::kRdx) = sizeof(payload) - 1;
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), sizeof(payload) - 1);
+
+    char readback[sizeof(payload)] = {};
+    HYPERION_CHECK(
+        memory.read(kBase + 0x300, reinterpret_cast<std::uint8_t*>(readback), sizeof(payload) - 1));
+    HYPERION_CHECK_EQ(std::string(readback), std::string(payload));
+
+    // Close stdout (fd 1) and verify subsequent write(1, ...) returns -EBADF.
+    s = GuestState{};
+    s.reg(Gpr::kRax) = hyperion::sysno::kClose;
+    s.reg(Gpr::kRdi) = 1;
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), 0ULL);
+
+    s = GuestState{};
+    s.reg(Gpr::kRax) = hyperion::sysno::kWrite;
+    s.reg(Gpr::kRdi) = 1;
+    s.reg(Gpr::kRsi) = kBase + 0x200;
+    s.reg(Gpr::kRdx) = 4;
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(static_cast<std::int64_t>(s.reg(Gpr::kRax)), -hyperion::kEbadf);
+
+    ::unlink(tmpl);
+}

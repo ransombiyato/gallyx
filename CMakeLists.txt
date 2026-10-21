@@ -67,7 +67,8 @@ add_library(hyperion_core
     src/core/syscall.cpp
     src/core/translator.cpp
     src/core/address_space.cpp
-    src/core/translation_cache.cpp)
+    src/core/translation_cache.cpp
+    src/core/elf_loader.cpp)
 add_library(hyperion::core ALIAS hyperion_core)
 
 target_include_directories(hyperion_core

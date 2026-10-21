@@ -33,7 +33,7 @@ namespace hyperion {
 
 // Why a decoded instruction could not be translated. Explicit so a caller can
 // distinguish "not in the translator's scope yet" from a real internal error.
-enum class TranslateError {
+enum class TranslateError : std::uint8_t {
     kNone = 0,
     kUnsupportedOpcode,  // control flow, stack: not in this increment
     kUnsupportedOperand, // memory operand, or an operand shape we do not emit
@@ -55,11 +55,11 @@ struct Translation {
 };
 
 // Value returned in x0 by a translated block.
-enum class BlockResult : std::uint64_t {
-    kOk = 0,      // block completed; guest state (including rip) is updated
-    kHalted = 1,  // HLT/RET: the program has stopped
-    kSyscall = 2, // a `syscall` instruction was reached; the dispatcher must
-                  // handle it. rip already points past the instruction.
+enum class BlockResult : std::uint64_t { // NOLINT(performance-enum-size)
+    kOk = 0,                             // block completed; guest state (including rip) is updated
+    kHalted = 1,                         // HLT/RET: the program has stopped
+    kSyscall = 2,                        // a `syscall` instruction was reached; the dispatcher must
+                                         // handle it. rip already points past the instruction.
 };
 
 // How a translated block left. Purely informational for callers: the

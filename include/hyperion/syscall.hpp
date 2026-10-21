@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include "hyperion/address_space.hpp"
@@ -211,7 +212,7 @@ inline constexpr std::int64_t kErange = 34;
 inline constexpr std::int64_t kEintr = 4;
 
 // What the handler did with a syscall.
-enum class SyscallStatus {
+enum class SyscallStatus : std::uint8_t {
     kHandled,       // emulated: rax holds the result (or a negative errno)
     kUnimplemented, // not implemented: rax = -ENOSYS, execution continues
     kExit,          // the guest asked to terminate
@@ -234,12 +235,31 @@ public:
     virtual SyscallResult handle(GuestState& state, Memory& memory) = 0;
 };
 
-// A guest descriptor table entry. `owned` distinguishes a stream the handler
-// opened (and closes on close) from one the embedder adopted (whose owner closes
-// it). Defined here because the table is a member of MinimalSyscallHandler.
-struct GuestDescriptor {
+// Shared POSIX open file description (shared across dup/dup2/dup3/fcntl F_DUPFD).
+// Regular files opened via openat(2) store an unbuffered kernel `host_fd` so
+// read/write/lseek/pread/pwrite/fstat/getdents64 never suffer C stdio buffer
+// desynchronisation; adopted `std::FILE*` streams (such as in-memory test
+// streams) keep `stream` and borrow ownership from the caller.
+struct OpenFileDescription {
+    int host_fd = -1;
+    bool owned_fd = false;
+    int sink_fd = -1; // 1 or 2 when routed through OutputSink
     std::FILE* stream = nullptr;
-    bool owned = false;
+    int status_flags = 0;
+
+    ~OpenFileDescription();
+    OpenFileDescription() = default;
+    OpenFileDescription(const OpenFileDescription&) = delete;
+    OpenFileDescription& operator=(const OpenFileDescription&) = delete;
+};
+
+// Per-descriptor slot in the guest process's file descriptor table. `cloexec`
+// is per-FD (FD_CLOEXEC), whereas file offset and status flags live on `desc`.
+struct GuestDescriptor {
+    std::shared_ptr<OpenFileDescription> desc;
+    bool cloexec = false;
+
+    bool is_open() const noexcept { return desc != nullptr; }
 };
 
 // A handler for the minimum needed to run a self-contained guest program that

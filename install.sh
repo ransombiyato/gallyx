@@ -287,5 +287,5 @@ esac
 say "To remove it again:"
 say "  bash install.sh --uninstall --prefix ${PREFIX}"
 say ""
-say "Reminder: this is an early research project. There is no translator yet;"
-say "'hyperion bench' measures the host, not any emulation. See STATUS.md."
+say "Note: 'hyperion bench' measures host calibration; 'hyperion_tier_bench'"
+say "measures Tier 0 vs Tier 1 guest execution. See STATUS.md and COMPATIBILITY.md."

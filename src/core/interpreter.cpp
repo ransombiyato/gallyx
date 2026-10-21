@@ -349,6 +349,8 @@ StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
         const SyscallResult sr = syscalls->handle(state, memory);
         if (sr.status == SyscallStatus::kExit) {
             result.status = StepStatus::kHalted;
+            result.exited_via_syscall = true;
+            result.exit_code = sr.exit_code;
             result.message = "guest exited via syscall";
             return result;
         }
@@ -516,6 +518,8 @@ RunResult run_program(Memory& memory, GuestState state, std::uint64_t max_steps,
         case StepStatus::kHalted:
             ++out.steps;
             out.status = RunStatus::kOk;
+            out.exited_via_syscall = r.exited_via_syscall;
+            out.exit_code = r.exit_code;
             out.message = r.message;
             return out;
         case StepStatus::kFault:

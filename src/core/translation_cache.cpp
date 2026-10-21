@@ -185,6 +185,8 @@ RunResult TranslationCache::run(Memory& memory, GuestState state, std::uint64_t 
             }
             if (sr.status == SyscallStatus::kExit) {
                 out.status = RunStatus::kOk;
+                out.exited_via_syscall = true;
+                out.exit_code = sr.exit_code;
                 out.message = "guest exited via syscall";
                 out.steps = steps;
                 return out;

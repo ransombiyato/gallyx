@@ -17,6 +17,9 @@ std::size_t page_size() {
 }
 
 std::size_t round_up(std::size_t value, std::size_t multiple) {
+    if (value > static_cast<std::size_t>(-1) - (multiple - 1)) {
+        throw std::out_of_range("ExecMem: requested size overflows address calculation");
+    }
     return ((value + multiple - 1) / multiple) * multiple;
 }
 
@@ -76,10 +79,12 @@ void ExecMem::write(std::size_t offset, const std::uint8_t* bytes, std::size_t c
     if (finalized_) {
         throw std::logic_error("ExecMem: cannot write after finalize()");
     }
-    if (offset + count > size_) {
+    if (offset > size_ || count > size_ - offset) {
         throw std::out_of_range("ExecMem: write past end of region");
     }
-    std::memcpy(writable() + offset, bytes, count);
+    if (count > 0) {
+        std::memcpy(writable() + offset, bytes, count);
+    }
 }
 
 void ExecMem::finalize() {
@@ -104,8 +109,20 @@ void* ExecMem::entry() const {
 
 bool ExecMem::executable_supported() {
 #if defined(__aarch64__)
-    // The generated code is AArch64. Only an AArch64 host can run it.
-    return true;
+    // Probe once whether this host process can actually obtain an RX mapping
+    // under the active kernel/SELinux/seccomp policy (e.g. Android untrusted
+    // app domains may deny PROT_EXEC on anonymous mappings).
+    static const bool supported = [] {
+        const std::size_t ps = page_size();
+        void* p = ::mmap(nullptr, ps, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) {
+            return false;
+        }
+        const bool ok = (::mprotect(p, ps, PROT_READ | PROT_EXEC) == 0);
+        ::munmap(p, ps);
+        return ok;
+    }();
+    return supported;
 #else
     return false;
 #endif

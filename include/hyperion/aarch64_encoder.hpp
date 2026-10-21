@@ -92,8 +92,11 @@ public:
     // AArch64 condition flags, and the translator reads them back with CSET.
     void adds(Width w, Reg rd, Reg rn, Reg rm);
     void subs(Width w, Reg rd, Reg rn, Reg rm);
-    void adds_imm(Width w, Reg rd, Reg rn, std::uint32_t imm12);
-    void subs_imm(Width w, Reg rd, Reg rn, std::uint32_t imm12);
+    void adds_imm(Width w, Reg rd, Reg rn, std::uint32_t imm12, bool shift12 = false);
+    void subs_imm(Width w, Reg rd, Reg rn, std::uint32_t imm12, bool shift12 = false);
+
+    // Bitwise NOT: MVN Rd, Rm (encoded as ORN Rd, XZR, Rm). Leaves NZCV intact.
+    void mvn(Width w, Reg rd, Reg rm);
 
     // --- conditional set (CSINC alias) -----------------------------------
     // CSET Rd, cond  ->  Rd = (cond ? 1 : 0). Used to materialise x86 flags.
@@ -137,11 +140,18 @@ public:
     void mov_imm64(Reg rd, std::uint64_t value);
 
     // --- branches --------------------------------------------------------
-    // Unconditional B and conditional B.cond to a label.
+    // Unconditional B, conditional B.cond, and test-bit-and-branch TBZ/TBNZ.
+    // Neither B nor TBZ/TBNZ reads or modifies NZCV.
     void b(Label target);
     void b_cond(Cond c, Label target);
+    void tbz(Reg rt, unsigned bit, Label target);
+    void tbnz(Reg rt, unsigned bit, Label target);
     void ret(Reg rn = kLr);
     void nop();
+
+    // Encode a PC-relative unconditional branch word (`B <delta_bytes>`).
+    // `delta_bytes` must be 4-byte aligned and within +/-128 MiB.
+    static std::uint32_t encode_b(std::int64_t delta_bytes);
 
     // --- labels ----------------------------------------------------------
     Label new_label();
@@ -155,18 +165,20 @@ public:
     std::vector<std::uint8_t> bytes() const;
 
 private:
+    enum class BranchKind : std::uint8_t { kUncond, kCond, kTestBit };
+
     void emit(std::uint32_t word);
     void check_label(Label label) const;
-    void resolve_patch(std::size_t at, std::size_t target, bool conditional);
+    void resolve_patch(std::size_t at, std::size_t target, BranchKind kind);
     bool has_unresolved_labels() const;
 
     std::vector<std::uint32_t> code_;
     // label id -> instruction index; kUnbound until bind() is called.
     std::vector<std::size_t> label_pos_;
     struct Fixup {
-        std::size_t at;   // instruction index of the branch (kUnbound once patched)
-        Label target;     // label it points at
-        bool conditional; // B vs B.cond (different immediate width)
+        std::size_t at;  // instruction index of the branch (kUnbound once patched)
+        Label target;    // label it points at
+        BranchKind kind; // B (imm26) vs B.cond (imm19) vs TBZ/TBNZ (imm14)
     };
     std::vector<Fixup> fixups_;
 };

@@ -467,7 +467,10 @@ StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
     }
 
     case Opcode::kPop: {
-        // pop r64: r = [rsp]; rsp += 8
+        // pop r64: value = [rsp]; rsp += 8; dst = value.
+        // Ordering matters for `pop rsp` (0x5C): on real x86-64 hardware the
+        // popped qword overwrites RSP after the increment, so RSP becomes
+        // [old_rsp] rather than old_rsp + 8.
         const std::uint64_t rsp = state.reg(Gpr::kRsp);
         std::uint8_t buffer[8] = {};
         if (!memory.read(rsp, buffer, 8)) {
@@ -477,8 +480,8 @@ StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
         for (std::size_t i = 0; i < 8; ++i) {
             value |= static_cast<std::uint64_t>(buffer[i]) << (8 * i);
         }
-        state.reg(insn.dst.reg) = value;
         state.reg(Gpr::kRsp) = rsp + 8;
+        state.reg(insn.dst.reg) = value;
         break;
     }
 

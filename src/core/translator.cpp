@@ -537,7 +537,10 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
         return TranslateError::kNone;
 
     case Opcode::kHlt:
-        emit_return(e, BlockResult::kHalted);
+        if (write_rip) {
+            emit_set_rip(e, insn.address);
+        }
+        emit_return(e, BlockResult::kHalted, ra);
         return TranslateError::kNone;
 
     case Opcode::kSyscall:
@@ -546,7 +549,7 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
         // resume. rip is advanced here so the handler, and any resume, sees the
         // instruction after `syscall`, matching a real CPU.
         emit_set_rip(e, insn.address + insn.length);
-        emit_return(e, BlockResult::kSyscall);
+        emit_return(e, BlockResult::kSyscall, ra);
         return TranslateError::kNone;
 
     case Opcode::kMov: {
@@ -609,20 +612,21 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
             static_cast<std::uint8_t>(flags_written(insn.opcode) & live_flags);
 
         // An immediate source that fits the AArch64 ADD/SUB immediate form is
-        // folded into the operation instead of being materialised into kB first
-        // (mov_imm64 is 1-4 instructions) - but only when AF is not live. AF is
-        // derived from (a ^ b ^ r), which needs b in a register, so when AF is
-        // needed we keep the register form and stay bit-exact rather than
-        // trading correctness for size.
+        // folded directly into the operation instead of materialising kB first.
+        // Even when AF is live, AF depends only on the low 4 bits of the two
+        // operands:
+        //   - ADD: AF = ((a & 0xF) + (imm & 0xF)) >= 16
+        //   - SUB/CMP: AF = (a & 0xF) < (imm & 0xF)
+        // Notably, when (imm & 0xF) == 0 (including all shift12 multiples of
+        // 0x1000), AF is identically 0 for every guest operand value.
         std::uint32_t imm12 = 0;
         bool shift12 = false;
-        const bool imm_foldable =
-            insn.has_src && insn.src.kind == OperandKind::kImmediate &&
-            (insn.opcode == Opcode::kAdd || insn.opcode == Opcode::kSub ||
-             insn.opcode == Opcode::kCmp) &&
-            encode_imm12((bits == 32) ? (insn.src.imm & 0xFFFFFFFFULL) : insn.src.imm, imm12,
-                         shift12);
-        const bool imm_folded = imm_foldable && (mask & kFbAf) == 0;
+        const std::uint64_t imm_value =
+            insn.has_src ? ((bits == 32) ? (insn.src.imm & 0xFFFFFFFFULL) : insn.src.imm) : 0ULL;
+        const bool imm_folded = insn.has_src && insn.src.kind == OperandKind::kImmediate &&
+                                (insn.opcode == Opcode::kAdd || insn.opcode == Opcode::kSub ||
+                                 insn.opcode == Opcode::kCmp) &&
+                                encode_imm12(imm_value, imm12, shift12);
 
         if (!imm_folded && B == kB) {
             const TranslateError err = load_source(e, insn.src, kB, bits, ra);
@@ -646,18 +650,36 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
             if (mask != 0) {
                 emit_flags_logical(e, w, mask, R);
             }
+        } else if (imm_folded) {
+            const auto imm_nibble = static_cast<std::uint32_t>(imm_value & 0xFULL);
+            if ((mask & kFbAf) != 0 && imm_nibble != 0) {
+                // Capture old (a & 0xF) before R may overwrite A in place.
+                e.ubfx(a64::Width::k32, kT2, A, 0, 4);
+            }
+            if (is_sub) {
+                e.subs_imm(w, R, A, imm12, shift12);
+            } else {
+                e.adds_imm(w, R, A, imm12, shift12);
+            }
+            const auto non_af_mask = static_cast<std::uint8_t>(mask & ~kFbAf);
+            if (non_af_mask != 0) {
+                emit_flags_from_nzcv(e, is_sub, non_af_mask, kT2, R);
+            }
+            if ((mask & kFbAf) != 0) {
+                if (imm_nibble == 0) {
+                    e.strb(a64::kXzr, kState, kAfOffset);
+                } else {
+                    e.cmp_imm(a64::Width::k32, kT2, is_sub ? imm_nibble : (16u - imm_nibble));
+                    e.cset(a64::Width::k32, kT2, is_sub ? a64::Cond::kCc : a64::Cond::kCs);
+                    e.strb(kT2, kState, kAfOffset);
+                }
+            }
         } else {
             if (mask & kFbAf) {
                 // t2 = a ^ b, completed to (a ^ b ^ r) after the op for AF.
                 e.eor(a64::Width::k64, kT2, A, B);
             }
-            if (imm_folded) {
-                if (is_sub) {
-                    e.subs_imm(w, R, A, imm12);
-                } else {
-                    e.adds_imm(w, R, A, imm12);
-                }
-            } else if (is_sub) {
+            if (is_sub) {
                 e.subs(w, R, A, B);
             } else {
                 e.adds(w, R, A, B);
@@ -801,7 +823,8 @@ Translation translate_instruction(const Instruction& insn) {
         return out;
     }
 
-    if (insn.opcode != Opcode::kNop && insn.opcode != Opcode::kHlt) {
+    if (insn.opcode != Opcode::kNop && insn.opcode != Opcode::kHlt &&
+        insn.opcode != Opcode::kSyscall) {
         const TranslateError err = validate_body(insn);
         if (err != TranslateError::kNone) {
             out.error = err;
@@ -815,7 +838,7 @@ Translation translate_instruction(const Instruction& insn) {
         return out;
     }
 
-    if (insn.opcode != Opcode::kHlt) {
+    if (insn.opcode != Opcode::kHlt && insn.opcode != Opcode::kSyscall) {
         emit_return(e, BlockResult::kOk);
     }
 

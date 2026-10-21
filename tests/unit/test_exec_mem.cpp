@@ -57,6 +57,25 @@ HYPERION_TEST("exec_mem", "write_past_end_is_rejected") {
         threw = true;
     }
     HYPERION_CHECK(threw);
+
+    // Regression: size_t addition overflow in offset + count must also throw
+    // out_of_range instead of wrapping around into a small in-bounds value.
+    bool overflow_threw = false;
+    try {
+        mem.write(static_cast<std::size_t>(-4), data, 8);
+    } catch (const std::out_of_range&) {
+        overflow_threw = true;
+    }
+    HYPERION_CHECK(overflow_threw);
+
+    bool ctor_overflow_threw = false;
+    try {
+        ExecMem huge(static_cast<std::size_t>(-1));
+        (void)huge;
+    } catch (const std::out_of_range&) {
+        ctor_overflow_threw = true;
+    }
+    HYPERION_CHECK(ctor_overflow_threw);
 }
 
 HYPERION_TEST("exec_mem", "runs_generated_aarch64_code") {

@@ -61,14 +61,16 @@ GuestState interp(const std::vector<std::uint8_t>& code, std::uint64_t a, std::u
     state.reg(Gpr::kRbx) = b;
     state.flags = hyperion::unpack_flags(f);
     state.rip = kBase;
-    for (int i = 0; i < 16; ++i) {
+    bool halted = false;
+    for (int i = 0; i < 64; ++i) {
         const auto r = hyperion::step(state, memory);
         if (r.status == StepStatus::kHalted) {
+            halted = true;
             break;
         }
         HYPERION_CHECK_EQ(static_cast<int>(r.status), static_cast<int>(StepStatus::kOk));
-        break;
     }
+    HYPERION_CHECK(halted);
     return state;
 }
 
@@ -364,6 +366,51 @@ HYPERION_TEST("differential", "alu_imm8_sign_extends") {
             HYPERION_CHECK_EQ(hyperion::pack_flags(actual.flags), model_flags(expected.flags));
         }
     }
+#else
+    HYPERION_SKIP("requires an x86-64 host to execute the reference instructions");
+#endif
+}
+
+// Multi-step sequence & `popq %rsp` hardware differential: verifies both that
+// `interp()` runs past step 1 to `hlt` AND that `popq %rsp` loads the target
+// stack pointer rather than overwriting it with old_rsp + 8.
+HYPERION_TEST("differential", "multi_step_and_pop_rsp_match_hardware") {
+#if defined(__x86_64__)
+    // Multi-step sequence: addq $0x1000, %rax ; addq %rbx, %rax ; hlt
+    const std::vector<std::uint8_t> seq = {
+        0x48, 0x05, 0x00, 0x10, 0x00, 0x00, // add rax, 0x1000
+        0x48, 0x01, 0xD8,                   // add rax, rbx
+        0xF4,                               // hlt
+    };
+    const NativeResult hw_seq = HYPERION_NATIVE_ALU("addq $0x1000, %%rax\n\taddq %%rbx, %%rax")(
+        0xFF8ULL, 0x20ULL, kRflagsBit1);
+    const GuestState interp_seq = interp(seq, 0xFF8ULL, 0x20ULL, kRflagsBit1);
+    HYPERION_CHECK_EQ(interp_seq.reg(Gpr::kRax), hw_seq.value);
+    HYPERION_CHECK_EQ(hyperion::pack_flags(interp_seq.flags), model_flags(hw_seq.flags));
+
+    // Hardware `popq %rsp` check: place `target_rsp` in a 2-qword scratch slot,
+    // point %rsp at it momentarily, execute `popq %rsp`, read %rsp out, restore.
+    alignas(16) std::uint64_t slot[2] = {0xCAFEBABE12345670ULL, 0};
+    std::uint64_t hw_rsp_after = 0;
+    asm volatile("movq %%rsp, %%r11\n\t"
+                 "leaq %[slot], %%rsp\n\t"
+                 "popq %%rsp\n\t"
+                 "movq %%rsp, %[out]\n\t"
+                 "movq %%r11, %%rsp\n\t"
+                 : [out] "=r"(hw_rsp_after)
+                 : [slot] "m"(slot[0])
+                 : "r11", "memory");
+
+    FlatMemory mem(kBase, 4096);
+    mem.data()[0] = 0x5C; // pop rsp
+    mem.data()[1] = 0xF4; // hlt
+    std::memcpy(mem.data() + 0x800, &slot[0], sizeof(slot[0]));
+    GuestState st;
+    st.rip = kBase;
+    st.reg(Gpr::kRsp) = kBase + 0x800;
+    const auto rr = hyperion::run_program(mem, st, 16);
+    HYPERION_CHECK(rr.status == hyperion::RunStatus::kOk);
+    HYPERION_CHECK_EQ(rr.state.reg(Gpr::kRsp), hw_rsp_after);
 #else
     HYPERION_SKIP("requires an x86-64 host to execute the reference instructions");
 #endif

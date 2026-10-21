@@ -638,6 +638,49 @@ HYPERION_TEST("translator", "dead_flags_are_not_computed") {
     HYPERION_CHECK(dead_add < live_add);
 }
 
+HYPERION_TEST("translator", "shifted_imm12_folded_alu_matches_interpreter") {
+    // Critical regression: immediates in 0x001000..0xFFF000 with low 12 bits
+    // zero set `shift12 = true` in encode_imm12(). Previously emit_one()
+    // dropped `shift12` on ADDS_IMM/SUBS_IMM, turning `add rax, 0x1000` into
+    // `add rax, 1` whenever AF was dead! Test both dead-flag and live-flag
+    // paths across ADD, SUB, and CMP for 32-bit and 64-bit operands.
+    //
+    //   add rax, 0x1000     48 05 00 10 00 00   (flags killed by next insn)
+    //   sub rbx, 0xABC000   48 81 EB 00 C0 AB 00 (flags killed by next insn)
+    //   cmp rax, 0x2000     48 3D 00 20 00 00   (all flags live at exit)
+    //   add ecx, 0x3000     81 C1 00 30 00 00   (all flags live if run alone)
+    //   hlt                 F4
+    const std::vector<std::uint8_t> program = {
+        0x48, 0x05, 0x00, 0x10, 0x00, 0x00,       // add rax, 0x1000
+        0x48, 0x81, 0xEB, 0x00, 0xC0, 0xAB, 0x00, // sub rbx, 0xABC000
+        0x81, 0xC1, 0x00, 0x30, 0x00, 0x00,       // add ecx, 0x3000
+        0x48, 0x3D, 0x00, 0x20, 0x00, 0x00,       // cmp rax, 0x2000
+        0xF4,                                     // hlt
+    };
+    const std::uint64_t seeds[] = {0ULL, 0xFF0ULL, 0x1000ULL, 0x2000ULL, 0xFFFFFFFFFFFFF000ULL};
+    for (const std::uint64_t s : seeds) {
+        GuestState initial;
+        initial.rip = kBase;
+        initial.reg(Gpr::kRax) = s;
+        initial.reg(Gpr::kRbx) = 0x1000000ULL + s;
+        initial.reg(Gpr::kRcx) = 0xFFFFF000ULL;
+        check_program_matches(program, initial);
+    }
+
+    GuestState check_st;
+    check_st.rip = kBase;
+    check_st.reg(Gpr::kRax) = 0x1000ULL;
+    check_st.reg(Gpr::kRbx) = 0x1000000ULL;
+    FlatMemory mem(kBase, 4096);
+    std::memcpy(mem.data(), program.data(), program.size());
+    hyperion::TranslationCache cache;
+    const hyperion::RunResult r = cache.run(mem, check_st);
+    HYPERION_CHECK(r.status == hyperion::RunStatus::kOk);
+    HYPERION_CHECK_EQ(r.state.reg(Gpr::kRax), 0x2000ULL);
+    HYPERION_CHECK_EQ(r.state.reg(Gpr::kRbx), 0x1000000ULL - 0xABC000ULL);
+    HYPERION_CHECK(r.state.flags.zf);
+}
+
 #else
 
 HYPERION_TEST("translator", "differential_mov_and_alu") {
@@ -664,6 +707,14 @@ HYPERION_TEST("translator", "differential_branch_inside_loop") {
     HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
 }
 
+HYPERION_TEST("translator", "differential_register_allocation_many_registers") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "differential_register_allocation_immediates") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
 HYPERION_TEST("translator", "dispatcher_stops_at_unsupported") {
     HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
 }
@@ -673,6 +724,18 @@ HYPERION_TEST("translator", "dispatcher_step_limit") {
 }
 
 HYPERION_TEST("translator", "translated_code_size_is_bounded") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "alu_immediate_is_folded") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "dead_flags_are_not_computed") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "shifted_imm12_folded_alu_matches_interpreter") {
     HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
 }
 

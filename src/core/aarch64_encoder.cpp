@@ -181,18 +181,27 @@ void Encoder::subs(Width w, Reg rd, Reg rn, Reg rm) {
     emit(sf_of(w) | kAddSubRegBase | (1u << 30) | (1u << 29) | (rm << 16) | (rn << 5) | rd);
 }
 
-void Encoder::adds_imm(Width w, Reg rd, Reg rn, std::uint32_t imm12) {
+void Encoder::adds_imm(Width w, Reg rd, Reg rn, std::uint32_t imm12, bool shift12) {
     validate_reg(rd);
     validate_reg(rn);
     validate_imm12(imm12);
-    emit(sf_of(w) | kAddSubImmBase | (1u << 29) | (imm12 << 10) | (rn << 5) | rd);
+    emit(sf_of(w) | kAddSubImmBase | (1u << 29) | (shift12 ? (1u << 22) : 0u) | (imm12 << 10) |
+         (rn << 5) | rd);
 }
 
-void Encoder::subs_imm(Width w, Reg rd, Reg rn, std::uint32_t imm12) {
+void Encoder::subs_imm(Width w, Reg rd, Reg rn, std::uint32_t imm12, bool shift12) {
     validate_reg(rd);
     validate_reg(rn);
     validate_imm12(imm12);
-    emit(sf_of(w) | kAddSubImmBase | (1u << 30) | (1u << 29) | (imm12 << 10) | (rn << 5) | rd);
+    emit(sf_of(w) | kAddSubImmBase | (1u << 30) | (1u << 29) | (shift12 ? (1u << 22) : 0u) |
+         (imm12 << 10) | (rn << 5) | rd);
+}
+
+void Encoder::mvn(Width w, Reg rd, Reg rm) {
+    validate_reg(rd);
+    validate_reg(rm);
+    // ORN Rd, XZR, Rm: sf 01 01010 00 1 Rm 000000 11111 Rd.
+    emit(sf_of(w) | kLogicalRegBase | (1u << 29) | (1u << 21) | (rm << 16) | (kXzr << 5) | rd);
 }
 
 void Encoder::cset(Width w, Reg rd, Cond c) {
@@ -381,9 +390,9 @@ void Encoder::b(Label target) {
     const std::size_t at = code_.size();
     emit(0x14000000u); // B, imm26 placeholder
     if (label_pos_[target] != kUnbound) {
-        resolve_patch(at, label_pos_[target], false);
+        resolve_patch(at, label_pos_[target], BranchKind::kUncond);
     } else {
-        fixups_.push_back({at, target, false});
+        fixups_.push_back({at, target, BranchKind::kUncond});
     }
 }
 
@@ -392,10 +401,55 @@ void Encoder::b_cond(Cond c, Label target) {
     const std::size_t at = code_.size();
     emit(0x54000000u | static_cast<std::uint32_t>(c)); // B.cond, imm19 placeholder
     if (label_pos_[target] != kUnbound) {
-        resolve_patch(at, label_pos_[target], true);
+        resolve_patch(at, label_pos_[target], BranchKind::kCond);
     } else {
-        fixups_.push_back({at, target, true});
+        fixups_.push_back({at, target, BranchKind::kCond});
     }
+}
+
+void Encoder::tbz(Reg rt, unsigned bit, Label target) {
+    validate_reg(rt);
+    if (bit >= 64) {
+        throw std::invalid_argument("a64::Encoder: tbz bit number out of range");
+    }
+    check_label(target);
+    const std::size_t at = code_.size();
+    const std::uint32_t b5 = (bit >> 5) & 1u;
+    const std::uint32_t b40 = bit & 0x1Fu;
+    emit(0x36000000u | (b5 << 31) | (b40 << 19) | rt);
+    if (label_pos_[target] != kUnbound) {
+        resolve_patch(at, label_pos_[target], BranchKind::kTestBit);
+    } else {
+        fixups_.push_back({at, target, BranchKind::kTestBit});
+    }
+}
+
+void Encoder::tbnz(Reg rt, unsigned bit, Label target) {
+    validate_reg(rt);
+    if (bit >= 64) {
+        throw std::invalid_argument("a64::Encoder: tbnz bit number out of range");
+    }
+    check_label(target);
+    const std::size_t at = code_.size();
+    const std::uint32_t b5 = (bit >> 5) & 1u;
+    const std::uint32_t b40 = bit & 0x1Fu;
+    emit(0x37000000u | (b5 << 31) | (b40 << 19) | rt);
+    if (label_pos_[target] != kUnbound) {
+        resolve_patch(at, label_pos_[target], BranchKind::kTestBit);
+    } else {
+        fixups_.push_back({at, target, BranchKind::kTestBit});
+    }
+}
+
+std::uint32_t Encoder::encode_b(std::int64_t delta_bytes) {
+    if (delta_bytes % 4 != 0) {
+        throw std::invalid_argument("a64::Encoder: B displacement must be 4-byte aligned");
+    }
+    const std::int64_t imm26 = delta_bytes / 4;
+    if (imm26 < -(1 << 25) || imm26 > (1 << 25) - 1) {
+        throw std::out_of_range("a64::Encoder: B target out of range");
+    }
+    return 0x14000000u | (static_cast<std::uint32_t>(imm26) & 0x03FFFFFFu);
 }
 
 void Encoder::ret(Reg rn) {
@@ -421,27 +475,35 @@ void Encoder::bind(Label label) {
     // Patch any forward branches that were waiting on this label.
     for (auto& f : fixups_) {
         if (f.target == label && f.at != kUnbound) {
-            resolve_patch(f.at, code_.size(), f.conditional);
+            resolve_patch(f.at, code_.size(), f.kind);
             f.at = kUnbound; // mark done
         }
     }
 }
 
-void Encoder::resolve_patch(std::size_t at, std::size_t target, bool conditional) {
+void Encoder::resolve_patch(std::size_t at, std::size_t target, BranchKind kind) {
     const auto delta_bytes =
         static_cast<std::int64_t>(target) * 4 - static_cast<std::int64_t>(at) * 4;
-    if (conditional) {
+    switch (kind) {
+    case BranchKind::kCond: {
         const std::int64_t imm19 = delta_bytes / 4;
         if (imm19 < -(1 << 18) || imm19 > (1 << 18) - 1) {
             throw std::out_of_range("a64::Encoder: B.cond target out of range");
         }
         code_[at] |= (static_cast<std::uint32_t>(imm19) & 0x7FFFFu) << 5;
-    } else {
-        const std::int64_t imm26 = delta_bytes / 4;
-        if (imm26 < -(1 << 25) || imm26 > (1 << 25) - 1) {
-            throw std::out_of_range("a64::Encoder: B target out of range");
+        return;
+    }
+    case BranchKind::kTestBit: {
+        const std::int64_t imm14 = delta_bytes / 4;
+        if (imm14 < -(1 << 13) || imm14 > (1 << 13) - 1) {
+            throw std::out_of_range("a64::Encoder: TBZ/TBNZ target out of range");
         }
-        code_[at] |= static_cast<std::uint32_t>(imm26) & 0x03FFFFFFu;
+        code_[at] |= (static_cast<std::uint32_t>(imm14) & 0x3FFFu) << 5;
+        return;
+    }
+    case BranchKind::kUncond:
+        code_[at] = encode_b(delta_bytes);
+        return;
     }
 }
 

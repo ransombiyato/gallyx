@@ -470,65 +470,88 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
         return result;
     }
 
-    // --- 0x01/0x03 and 0x29/0x2B, 0x21/0x23, 0x09/0x0B, 0x31/0x33: ALU -----
-    // Primary-map ALU pattern: (base + 0x00) = r/m, r ; (base + 0x02) = r, r/m
+    // --- Primary-map ALU: r/m,r (base+0), r,r/m (base+2), EAX/RAX,imm (base+5)
     // base: ADD 0x00, OR 0x08, AND 0x20, SUB 0x28, XOR 0x30, CMP 0x38
     {
         Opcode alu = static_cast<Opcode>(0xFF);
-        bool is_alu = false;
+        bool is_alu_modrm = false;
+        bool is_alu_acc_imm = false;
         switch (opcode) {
         case 0x01:
-            alu = Opcode::kAdd;
-            is_alu = true;
-            break;
         case 0x03:
             alu = Opcode::kAdd;
-            is_alu = true;
+            is_alu_modrm = true;
+            break;
+        case 0x05:
+            alu = Opcode::kAdd;
+            is_alu_acc_imm = true;
             break;
         case 0x09:
-            alu = Opcode::kOr;
-            is_alu = true;
-            break;
         case 0x0B:
             alu = Opcode::kOr;
-            is_alu = true;
+            is_alu_modrm = true;
+            break;
+        case 0x0D:
+            alu = Opcode::kOr;
+            is_alu_acc_imm = true;
             break;
         case 0x21:
-            alu = Opcode::kAnd;
-            is_alu = true;
-            break;
         case 0x23:
             alu = Opcode::kAnd;
-            is_alu = true;
+            is_alu_modrm = true;
+            break;
+        case 0x25:
+            alu = Opcode::kAnd;
+            is_alu_acc_imm = true;
             break;
         case 0x29:
-            alu = Opcode::kSub;
-            is_alu = true;
-            break;
         case 0x2B:
             alu = Opcode::kSub;
-            is_alu = true;
+            is_alu_modrm = true;
+            break;
+        case 0x2D:
+            alu = Opcode::kSub;
+            is_alu_acc_imm = true;
             break;
         case 0x31:
-            alu = Opcode::kXor;
-            is_alu = true;
-            break;
         case 0x33:
             alu = Opcode::kXor;
-            is_alu = true;
+            is_alu_modrm = true;
+            break;
+        case 0x35:
+            alu = Opcode::kXor;
+            is_alu_acc_imm = true;
             break;
         case 0x39:
-            alu = Opcode::kCmp;
-            is_alu = true;
-            break;
         case 0x3B:
             alu = Opcode::kCmp;
-            is_alu = true;
+            is_alu_modrm = true;
+            break;
+        case 0x3D:
+            alu = Opcode::kCmp;
+            is_alu_acc_imm = true;
             break;
         default:
             break;
         }
-        if (is_alu) {
+        if (is_alu_acc_imm) {
+            Operand dst;
+            dst.kind = OperandKind::kRegister;
+            dst.size = op_size;
+            dst.reg = Gpr::kRax; // Fixed accumulator (REX.B is ignored per SDM)
+
+            Operand imm;
+            if (!read_alu_immediate(r, op_size, imm)) {
+                result.error = DecodeError::kTruncated;
+                return result;
+            }
+            insn.dst = dst;
+            insn.src = imm;
+            insn.has_src = true;
+            finish(alu);
+            return result;
+        }
+        if (is_alu_modrm) {
             Modrm m;
             const std::uint8_t modrm = r.u8();
             m.mod = static_cast<std::uint8_t>(modrm >> 6);

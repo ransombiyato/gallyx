@@ -3,10 +3,10 @@
 # Project HYPERION - bootstrap installer.
 #
 # Usage (one line):
-#   curl -fsSL https://raw.githubusercontent.com/ransombiyato/hyperion-dbt/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ransombiyato/hyperion-dbt-v2/main/install.sh | bash
 #
 # Or, if you would rather read it before running it (recommended):
-#   curl -fsSLO https://raw.githubusercontent.com/ransombiyato/hyperion-dbt/main/install.sh
+#   curl -fsSLO https://raw.githubusercontent.com/ransombiyato/hyperion-dbt-v2/main/install.sh
 #   less install.sh
 #   bash install.sh
 #
@@ -22,13 +22,12 @@
 #   - it never touches anything outside the prefix (default ~/.local)
 #   - it does not modify your shell rc files
 #
-# Design note: this project is early. There is no ELF loader yet, so `hyperion`
-# currently builds, tests and benchmarks the foundation and can run raw x86-64
-# code blobs (`hyperion run <file>`). The command surface is real; running a
-# real Linux program is not. See STATUS.md.
+# Supports executing both raw x86-64 blobs and static x86-64 Linux ELF64
+# binaries (`hyperion run [--tier=0|1] <file> [-- args...]`) across Tier 0
+# (fast interpreter) and Tier 1 (AArch64 + ARMv8 NEON dynamic binary translator).
 set -euo pipefail
 
-REPO_SLUG="ransombiyato/hyperion-dbt"
+REPO_SLUG="ransombiyato/hyperion-dbt-v2"
 DEFAULT_REF="main"
 
 PREFIX="${HYPERION_PREFIX:-$HOME/.local}"

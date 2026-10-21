@@ -11,24 +11,24 @@ Android 10, 8 GB RAM, no root and no KVM**. Development and testing also happen
 on other Linux hosts, so target-device compatibility is *measured, not
 assumed* — see [`docs/target-environment.md`](docs/target-environment.md).
 
-> **Status: Phase 5 (performance measurement and optimization) and Phase 6
-> (Linux ABI, ELF64 loading, and syscall compatibility) active.** The repository
-> builds clean across GCC and Clang with `-Wall -Wextra -Wpedantic`, passes
-> ASan + UBSan and full `clang-tidy` static analysis, and executes both raw
-> x86-64 blobs and **static x86-64 Linux ELF64 executables** (`ET_EXEC` and
-> static-PIE `ET_DYN` with a System V AMD64 `argc/argv/envp/auxv` stack) across
-> **two execution tiers**: the reference interpreter with a 2048-slot epoch-keyed
-> decoded-instruction cache (Tier 0) and an AArch64 dynamic binary translator
-> (`ExecArena` W^X code cache, 2-way inline block chaining, hardware `NZCV`
-> branch fusion, native self-loop superblocks, and epoch-based invalidation on
-> code/permission changes — Tier 1). **42 Linux syscalls** across **eleven slices**
-> are implemented and CI-checked against `docs/syscalls/inventory.tsv` (including
-> unbuffered refcounted `OpenFileDescription` descriptors, `dup`/`dup2`/`dup3`/
-> `fcntl`, `pread64`/`pwrite64`/`readv`/`writev`, `uname` reporting `"x86_64"`,
-> `clock_gettime`/`gettimeofday`, `arch_prctl`, `set_tid_address`,
-> `set_robust_list`, and `prlimit64`). Every other syscall returns `-ENOSYS`.
-> See [`STATUS.md`](STATUS.md) for the exact current state and
-> [`ROADMAP.md`](ROADMAP.md) for the staged plan.
+> **Status: Phases 0–7 complete on single-threaded static x86-64 Linux ELF64
+> binaries.** The repository builds clean with **zero warnings** across GCC and
+> Clang (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion
+> -Werror`), passes ASan + UBSan, `clang-tidy`, `shellcheck`, and full AArch64
+> cross-execution tests, and executes **unmodified `gcc 14.2 -O2 -static`
+> (`glibc 2.41`) Linux C binaries end-to-end** across **two full execution
+> tiers**:
+> - **Tier 0 (Fast Reference Interpreter):** Full baseline x86-64 + 128-bit SSE2
+>   ISA, 512-entry direct-mapped `SoftTlb`, and 4096-entry decoded instruction
+>   cache (**56–61 MIPS** single-core x86-64 host throughput).
+> - **Tier 1 (Full-System AArch64 + 128-bit ARMv8 NEON JIT):** Shared trampoline
+>   ABI, 4096-slot in-JIT direct jump table, inline `SoftTlb` load/store fast
+>   path, 5-register block allocation, branchless `CSEL` exits, native self-loop
+>   superblocks, and hardware 128-bit ARMv8 NEON SIMD lowering — achieving
+>   **104.5× speedup** on `hyperion_tier_bench` (`2.54 ns/insn`) and **5.17× to
+>   20.12× end-to-end speedup (10.43× overall)** across `120,313,691` dynamic
+>   instructions in 5 real `glibc 2.41` C binaries with **zero step discrepancy**
+>   against Tier 0. See [`docs/real-world-evaluation.md`](docs/real-world-evaluation.md).
 >
 > **Scope note (2026-10-19).** Kernel/system-mode emulation is no longer ruled
 > out. A measured experiment showed a real Linux kernel running unprivileged
@@ -49,24 +49,21 @@ assumed* — see [`docs/target-environment.md`](docs/target-environment.md).
 | Host benchmark harness (JSON, repeated-run statistics) | Implemented (host-only) |
 | One-line installer + `hyperion` command | Implemented (`info <exe>`, `run <exe>`, `status`, `doctor`, `build`, `test`, `bench`, `cross-test`) |
 | Static ELF64 x86-64 loader + SysV stack | **Implemented** (`ET_EXEC` + static-PIE `ET_DYN`, `PT_LOAD` W^X + BSS zero-fill, `argc`/`argv`/`envp`/`auxv`) |
-| x86-64 decoder (documented subset) | Implemented, hardware-differential-tested (`MOV`, `LEA`, `ADD`, `SUB`, `CMP`, `TEST`, `AND`, `OR`, `XOR`, `INC`, `DEC`, `PUSH`, `POP`, `JMP`, `Jcc rel8/rel32`, `NOP`, `HLT`, `RET`, `SYSCALL`; `[rip+disp32]` & SIB addressing) |
-| Guest-state model + reference interpreter | Implemented, hardware-differential-tested; 2048-slot epoch-keyed decoded-instruction cache (**3.47×** narrow / **2.90×** wide speedup) |
-| AArch64 encoder (checked, binutils-verified) | Implemented (incl. shifted `imm12`, `add_shifted`, `mvn`, `tbz`/`tbnz`, forward/backward branch patching) |
-| W^X executable memory (`ExecMem` + `ExecArena`) | Implemented — single-block `ExecMem` plus multi-page W^X bump `ExecArena` |
-| x86-64 → AArch64 instruction translation | **Partial** — register/immediate ALU + `MOV` + `LEA` (`[rip+disp32]` & scaled SIB) + `TEST` + `JMP`/`Jcc rel8/rel32` + `SYSCALL`/`HLT` |
-| Multi-instruction program translation + code cache | Implemented — `TranslationCache` with `ExecArena`, hardware `NZCV` condition fusion, self-loop superblocks, 2-way inline chaining, and `code_epoch` invalidation (**11.19×** narrow / **11.16×** wide Tier 1 speedup) |
+| x86-64 decoder (baseline psABI + SSE2) | **Implemented** — 8/16/32/64-bit integer + shifts/rotates + mul/div + `SETcc`/`CMOVcc`/`BSWAP`/`BSF`/`BSR`/`BT*`/atomics + `FS:` TLS + `REP` string ops + 40+ 128-bit SSE2 ops (`27,835 / 27,835` unique `glibc 2.41` instructions verified) |
+| Guest-state model + reference interpreter | **Implemented** — 512-entry `SoftTlb` + 4096-slot decoded ICache (**56–61 MIPS** on x86-64 host; bit-exact across `120.3M` dynamic `glibc` instructions) |
+| AArch64 encoder (binutils-verified ARMv8 + NEON) | **Implemented** — scalar GPR loads/stores, shifts/rotates, bitfields, `mul`/`smulh`/`umulh`, `csel`, `rev`/`rbit`/`clz`, `adr`, `br`/`blr`, and 128-bit NEON SIMD |
+| W^X executable memory (`ExecMem` + `ExecArena`) | **Implemented** — single-block `ExecMem` plus 16-byte-aligned multi-page W^X `ExecArena` |
+| x86-64 → AArch64 instruction translation | **Implemented** — standalone `translate_block()` plus full-system `translate_cached_block()` covering memory, stack (`PUSH`/`POP`/`CALL`/`RET`/`LEAVE`), full integer ALU, and hardware 128-bit ARMv8 NEON SIMD |
+| Multi-instruction program translation + code cache | **Implemented** — shared trampoline ABI, in-JIT 4096-slot jump table, branchless `CSEL` exits, self-loop superblocks, inline `SoftTlb` fast path (**104.5×** microbench / **5.17×–20.12×** full `glibc` binary speedup) |
 | Linux syscall layer | **Partial** (Phase 6, eleven slices) — **42 numbers** implemented & CI-checked against `docs/syscalls/inventory.tsv`; `-ENOSYS` otherwise. See `STATUS.md` for the full list |
 | Guest address space (mmap/brk/NX) | **Implemented** (Phase 6) — page-granular `split_region_at()` `mprotect`/`munmap`, enforced `MemPerm::kExec` fetch permissions, reserved heap window, per-mapping size cap (D-029) |
 | Guest descriptor table (unbuffered POSIX `OpenFileDescription`) | **Implemented** (Phase 6) — refcounted `OpenFileDescription` supporting `dup`/`dup2`/`dup3`/`fcntl`, positional `pread64`/`pwrite64`, scatter/gather `readv`/`writev`, and `adopt()` |
-| Register allocation | **Implemented within a block** (Phase 5, D-021) — hottest guest registers kept in `x19..x28` across block bodies and self-loop superblocks |
-| Block chaining & cache invalidation | **Implemented** — 2-way inline C++ dispatch chaining + native self-loop superblocks + `Memory::code_epoch()` cache invalidation on executable writes / `mprotect` / `munmap` |
+| Register allocation | **Implemented within a block** (Phase 5, D-021) — hottest guest registers kept in `x19..x23` across block bodies, memory ops, SSE2 loops, and self-loop superblocks |
+| Block chaining & cache invalidation | **Implemented** — direct in-JIT 4096-slot jump table + native self-loop superblocks + `Memory::code_epoch()` invalidation exclusively on executable `kExec` changes |
 
-The translation row is deliberately narrow: the translator lowers a specific,
-listed set of instructions (`mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`,
-`inc`, `dec`, `nop`, `hlt` with register/immediate operands) and *refuses*
-everything else with an explicit error. Control flow is handled at the block
-level (`jmp`/`jcc`/`ret`); the stack and memory operands are not translated yet.
-See [`COMPATIBILITY.md`](COMPATIBILITY.md) §2.6.
+See [`docs/real-world-evaluation.md`](docs/real-world-evaluation.md) for the complete
+real-binary compatibility & multi-sample performance evaluation across five compiled
+`gcc 14.2 -O2 -static` (`glibc 2.41`) C workloads (`120,313,691` dynamic instructions).
 
 This table is the single source of truth for "what works". It is updated at
 every milestone. If a capability is not listed as implemented, assume it does
@@ -117,6 +114,7 @@ Documentation index:
 | [`docs/target-environment.md`](docs/target-environment.md) | Reference device and host matrix |
 | [`docs/glossary.md`](docs/glossary.md) | Terminology used in this project |
 | [`docs/architecture-feasibility.md`](docs/architecture-feasibility.md) | Scope analysis: user-mode vs system-mode vs hybrid, with measured evidence |
+| [`docs/real-world-evaluation.md`](docs/real-world-evaluation.md) | End-to-end usability & multi-sample performance evaluation on real static `glibc 2.41` binaries |
 
 ---
 
@@ -125,7 +123,7 @@ Documentation index:
 ### One-line install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ransombiyato/hyperion-dbt/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ransombiyato/hyperion-dbt-v2/main/install.sh | bash
 ```
 
 This needs no root, writes nothing outside `~/.local` (override with

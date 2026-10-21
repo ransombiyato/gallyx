@@ -5,7 +5,17 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
-## [Unreleased] — Audits, ISA/ELF64 expansion, Tier 0/1 optimizations, and 15 additional Phase 6 syscalls
+## [Unreleased] — Full-System Baseline x86-64 + 128-bit SSE2 ISA, ARMv8 + NEON Tier 1 JIT, and Real Static `glibc` Binary Support (`hyperion-dbt-v2`)
+
+### Added
+- **Full baseline x86-64 + 128-bit SSE2 ISA (`decoder.{hpp,cpp}`, `guest_state.hpp`, `interpreter.{hpp,cpp}`):** `FS:` TLS addressing, `DF` + `REP`/`REPZ`/`REPNZ` string ops (`MOVS*`/`STOS*`/`CMPS*`/`SCAS*`), 8/16/32/64-bit GPRs incl. `AH`–`DH`, shifts/rotates, 1/2/3-operand & widening `MUL`/`IMUL`, 8–64-bit `DIV`/`IDIV`, sign-extensions, `CMOVcc`, `SETcc`, `BSWAP`, `BSF`/`BSR`/`TZCNT`/`LZCNT`, `BT`/`BTS`/`BTR`/`BTC`, `XCHG`/`CMPXCHG`/`XADD`, `LEAVE`, `CPUID`/`RDTSC`, and 40+ 128-bit SSE2 packed-integer and scalar floating-point instructions (`27,835 / 27,835` unique `glibc 2.41` instructions decoded).
+- **512-entry software MMU `SoftTlb` + 4096-entry decoded ICache:** direct-mapped page addend cache (`56–61 MIPS` native Tier 0 throughput) with executable-only `code_epoch()` invalidation and unconditional syscall data-TLB flush across `brk`/`mmap`/`munmap`/`mprotect`.
+- **Full-system AArch64 + 128-bit ARMv8 NEON Tier 1 JIT (`aarch64_encoder.{hpp,cpp}`, `translator.{hpp,cpp}`, `translation_cache.{hpp,cpp}`):** shared trampoline ABI (`enter_jit`, 4096-slot in-JIT direct jump table, shared budget/exit epilogues), inline 8-instruction `SoftTlb` load/store fast path with out-of-line cold stubs and exact instruction-level fault exits, native `PUSH`/`POP`/`CALL`/`RET`/`LEAVE`, branchless `CSEL` conditional exits, self-loop superblocks, and hardware 128-bit ARMv8 NEON SIMD lowering (**104.5×** speedup on `hyperion_tier_bench`; **5.17×–20.12×** end-to-end speedup across 5 real `gcc 14.2 -O2 -static` `glibc 2.41` C workloads totaling `120,313,691` dynamic instructions with `0` step discrepancy).
+- **Real-world benchmark & evaluation suite (`benchmarks/workloads/*.c`, `scripts/run_real_benchmarks.sh`, `docs/real-world-evaluation.md`, static ELF CTest smoke gate).**
+
+---
+
+## [0.2.0-pre] — Audits, ISA/ELF64 foundation, initial Tier 0/1 optimizations, and 15 additional Phase 6 syscalls
 
 ### Fixed
 - **Critical codegen bug (`adds_imm`/`subs_imm` `shift12`):** `aarch64_encoder.cpp` hardcoded `sh = 0` (`bit 22`) on flag-setting shifted immediates and `translator.cpp` dropped `shift12`, miscompiling e.g. `add rax, 0x1000` into `add rax, 1` when `AF` was dead. Verified bit-for-bit against GNU binutils 2.44 and guarded by `translator.shifted_imm12_folded_alu_matches_interpreter`.

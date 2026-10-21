@@ -645,3 +645,34 @@ changing the ABI the guest sees. `fstat`(5) lands in the same increment and
 writes the **guest** (x86-64) `struct stat` layout field-by-field, because the
 host layout differs on AArch64 — a `memcpy` would silently misplace fields, the
 same class of bug the register-allocation sign-conversion fix targeted.
+
+---
+
+## D-026 — Process-identity getters report the host process; Hyperion is single-process, single-threaded
+
+**Context.** `getpid`/`gettid`/`getuid`/`geteuid`/`getgid`/`getegid`/`getppid`
+are among the most frequently called syscalls (the trace ranks them near the
+top), and a real program's startup calls them before almost anything else. The
+question is what identity to report. Hyperion runs the guest *in-process*: there
+is no separate guest kernel, no guest PID namespace, and no guest thread table.
+
+**Decision.** Report the host process's real values by forwarding to the host
+kernel. Do not synthesise a fake guest PID or namespace. `gettid` reports the
+host thread id and therefore assumes **single-threaded** execution; this is
+explicit and must be revisited when `clone`(56) lands.
+
+**Consequences.** For a single-process, single-threaded guest — which is the
+only kind Hyperion can run today — the host values are *indistinguishable from
+the truth*: the guest's own `getpid()` returns the same number the process would
+see natively. There is no lying and no emulated-namespace bookkeeping to keep
+consistent. The trade-off is that once threading exists, `gettid` must change
+(threads would all report the host's main-thread tid), and a future PID-namespace
+feature would have to override these. Both are recorded as limitations rather
+than papered over.
+
+**Related.** `getcwd`(79) likewise forwards to the host working directory, with
+the kernel's `-ERANGE`/`-EFAULT`/`-EINVAL` error semantics. `getrandom`(318)
+fills the guest buffer from the host CSPRNG in 4 KiB chunks and validates the
+`GRND_*` flag bits, returning `-EINVAL` for any undefined bit — matching the
+kernel rather than silently masking. None of these touch guest memory except
+through the validated address space (`-EFAULT`).

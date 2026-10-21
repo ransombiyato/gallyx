@@ -164,13 +164,13 @@ HYPERION_TEST("syscall", "unknown_number_is_enosys_not_silent") {
     FlatMemory memory = program({});
 
     GuestState s;
-    s.reg(Gpr::kRax) = 39; // getpid: not implemented in this increment
+    s.reg(Gpr::kRax) = 202; // futex: not implemented in this increment
 
     const hyperion::SyscallResult r = handler.handle(s, memory);
     HYPERION_CHECK(r.status == SyscallStatus::kUnimplemented);
-    HYPERION_CHECK_EQ(r.number, std::uint64_t{39});
+    HYPERION_CHECK_EQ(r.number, std::uint64_t{202});
     HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnosys));
-    HYPERION_CHECK(!hyperion::is_minimal_syscall(39));
+    HYPERION_CHECK(!hyperion::is_minimal_syscall(202));
 }
 
 // --- Interpreter integration ----------------------------------------------
@@ -217,10 +217,10 @@ HYPERION_TEST("interpreter", "syscall_without_handler_is_unsupported_not_ignored
 }
 
 HYPERION_TEST("interpreter", "unimplemented_syscall_returns_enosys_and_continues") {
-    // mov eax, 39 (getpid) ; syscall ; hlt. getpid is unimplemented, so rax must
+    // mov eax, 202 (futex) ; syscall ; hlt. futex is unimplemented, so rax must
     // end as -ENOSYS and the program must continue to the hlt and stop cleanly.
     const std::vector<std::uint8_t> code = {
-        0xB8, 0x27, 0x00, 0x00, 0x00, // mov eax, 39
+        0xB8, 0xCA, 0x00, 0x00, 0x00, // mov eax, 202
         0x0F, 0x05,                   // syscall
         0xF4,                         // hlt
     };
@@ -363,8 +363,8 @@ HYPERION_TEST("syscall", "is_minimal_syscall_reports_the_new_set") {
     HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kMprotect));
     HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kMunmap));
     HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kBrk));
-    HYPERION_CHECK(!hyperion::is_minimal_syscall(2));  // open, still unimplemented
-    HYPERION_CHECK(!hyperion::is_minimal_syscall(39)); // getpid, still unimplemented
+    HYPERION_CHECK(!hyperion::is_minimal_syscall(2));   // open, still unimplemented
+    HYPERION_CHECK(!hyperion::is_minimal_syscall(202)); // futex, still unimplemented
 }
 
 // --- File-descriptor syscalls (read/close/lseek) ---------------------------
@@ -748,6 +748,125 @@ HYPERION_TEST("syscall", "openat_is_advertised_as_minimal") {
     HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kOpenat));
     HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kFstat));
     HYPERION_CHECK(!hyperion::is_minimal_syscall(257 + 1000));
+}
+
+// --- Process-identity getters, getcwd, getrandom (fifth slice) -------------
+
+HYPERION_TEST("syscall", "identity_getters_forward_to_the_host") {
+    Captured cap;
+    MinimalSyscallHandler handler(sink_to(cap));
+    FlatMemory memory = program({});
+
+    struct Case {
+        std::uint64_t number;
+        long expected;
+    };
+    const Case cases[] = {
+        {hyperion::sysno::kGetpid, ::getpid()},   {hyperion::sysno::kGettid, ::gettid()},
+        {hyperion::sysno::kGetuid, ::getuid()},   {hyperion::sysno::kGeteuid, ::geteuid()},
+        {hyperion::sysno::kGetgid, ::getgid()},   {hyperion::sysno::kGetegid, ::getegid()},
+        {hyperion::sysno::kGetppid, ::getppid()},
+    };
+    for (const Case& c : cases) {
+        GuestState s = syscall_state(c.number, {});
+        const hyperion::SyscallResult r = handler.handle(s, memory);
+        HYPERION_CHECK(r.status == SyscallStatus::kHandled);
+        HYPERION_CHECK_EQ(static_cast<long>(s.reg(Gpr::kRax)), c.expected);
+    }
+}
+
+HYPERION_TEST("syscall", "getcwd_copies_the_host_working_directory") {
+    Captured cap;
+    MinimalSyscallHandler handler(sink_to(cap));
+    FlatMemory memory = program({});
+
+    char expected[4096];
+    HYPERION_CHECK(::getcwd(expected, sizeof(expected)) != nullptr);
+    const std::size_t len = std::strlen(expected);
+
+    GuestState s = syscall_state(hyperion::sysno::kGetcwd, {kBase + 0x100, 4096});
+    const hyperion::SyscallResult r = handler.handle(s, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(len + 1));
+
+    // The guest buffer holds the path plus its NUL terminator.
+    std::uint8_t got[4096] = {};
+    HYPERION_CHECK(memory.read(kBase + 0x100, got, len + 1));
+    HYPERION_CHECK_EQ(std::strcmp(reinterpret_cast<const char*>(got), expected), 0);
+}
+
+HYPERION_TEST("syscall", "getcwd_too_small_is_erange_and_bad_buffer_is_efault") {
+    Captured cap;
+    MinimalSyscallHandler handler(sink_to(cap));
+    FlatMemory memory = program({});
+
+    // size 1 cannot hold even a one-character path plus its NUL.
+    GuestState small = syscall_state(hyperion::sysno::kGetcwd, {kBase + 0x100, 1});
+    handler.handle(small, memory);
+    HYPERION_CHECK_EQ(small.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kErange));
+
+    // size 0 is EINVAL, as getcwd(2) documents.
+    GuestState zero = syscall_state(hyperion::sysno::kGetcwd, {kBase + 0x100, 0});
+    handler.handle(zero, memory);
+    HYPERION_CHECK_EQ(zero.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEinval));
+
+    // An unmapped destination is EFAULT, not a host write.
+    GuestState bad = syscall_state(hyperion::sysno::kGetcwd, {0xDEADBEEF0000ULL, 4096});
+    handler.handle(bad, memory);
+    HYPERION_CHECK_EQ(bad.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEfault));
+}
+
+HYPERION_TEST("syscall", "getrandom_fills_the_guest_buffer") {
+    Captured cap;
+    MinimalSyscallHandler handler(sink_to(cap));
+    FlatMemory memory = program({});
+
+    // Zero the destination first so a no-op cannot pass by accident.
+    const std::uint8_t zeros[16] = {};
+    HYPERION_CHECK(memory.write(kBase + 0x100, zeros, sizeof(zeros)));
+
+    GuestState s = syscall_state(hyperion::sysno::kGetrandom, {kBase + 0x100, 16, 0});
+    const hyperion::SyscallResult r = handler.handle(s, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), std::uint64_t{16});
+
+    std::uint8_t got[16] = {};
+    HYPERION_CHECK(memory.read(kBase + 0x100, got, sizeof(got)));
+    // 128 random bits being all zero has probability 2^-128; treat any nonzero
+    // byte as proof the buffer was filled.
+    bool any = false;
+    for (std::uint8_t b : got) {
+        any = any || (b != 0);
+    }
+    HYPERION_CHECK(any);
+}
+
+HYPERION_TEST("syscall", "getrandom_zero_length_is_zero_and_bad_flags_is_einval") {
+    Captured cap;
+    MinimalSyscallHandler handler(sink_to(cap));
+    FlatMemory memory = program({});
+
+    GuestState zero = syscall_state(hyperion::sysno::kGetrandom, {kBase + 0x100, 0, 0});
+    handler.handle(zero, memory);
+    HYPERION_CHECK_EQ(zero.reg(Gpr::kRax), std::uint64_t{0});
+
+    // Bit 0x4 is not a defined GRND_* flag.
+    GuestState bad = syscall_state(hyperion::sysno::kGetrandom, {kBase + 0x100, 8, 0x4});
+    handler.handle(bad, memory);
+    HYPERION_CHECK_EQ(bad.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEinval));
+
+    // An unmapped destination is EFAULT.
+    GuestState fault = syscall_state(hyperion::sysno::kGetrandom, {0xDEADBEEF0000ULL, 8, 0});
+    handler.handle(fault, memory);
+    HYPERION_CHECK_EQ(fault.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEfault));
+}
+
+HYPERION_TEST("syscall", "identity_getters_are_advertised_as_minimal") {
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kGetpid));
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kGettid));
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kGetcwd));
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kGetrandom));
+    HYPERION_CHECK(!hyperion::is_minimal_syscall(hyperion::sysno::kGetppid + 1000));
 }
 
 // A guest program that mmaps a page and stores a byte through the returned

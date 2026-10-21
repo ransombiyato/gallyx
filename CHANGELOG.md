@@ -5,6 +5,31 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 6 (identity getters + getcwd + getrandom)
+
+### Added — process-identity getters, `getcwd`(79), `getrandom`(318) (fifth syscall slice)
+- `getpid`(39), `gettid`(186), `getuid`(102), `geteuid`(107), `getgid`(104),
+  `getegid`(108), `getppid`(110): forward to the host process. Hyperion runs the
+  guest in-process, so the guest sees the host's ids; `gettid` reports the host
+  thread id and assumes single-threaded execution (revisited when `clone`
+  lands).
+- `getcwd`(79): copies the host working directory into a bounded guest buffer.
+  `-ERANGE` when the path plus its NUL does not fit, `-EFAULT` on a pointer the
+  memory model rejects, `-EINVAL` for size 0 — matching getcwd(2).
+- `getrandom`(318): fills a bounded guest buffer from the host in 4 KiB chunks.
+  Only the two defined flag bits (`GRND_NONBLOCK`, `GRND_RANDOM`) are accepted;
+  any other bit is `-EINVAL`, as the kernel does. A `count` of 0 returns 0
+  without touching the buffer; an unmapped destination is `-EFAULT`.
+- Five new unit tests (`syscall.identity_getters_*`, `syscall.getcwd_*`,
+  `syscall.getrandom_*`). Two existing tests that used `getpid`(39) as their
+  example of an *unimplemented* number were re-pointed at `futex`(202), since
+  39 is now implemented. Inventory: the nine numbers moved from `not-started` to
+  `implemented`; the implemented set is now 21 of 375. Docs regenerated
+  (`python3 tools/gen_syscall_inventory.py`, 0 errors/warnings).
+- Added `kErange`(34) and `kEintr`(4) to the errno constants.
+
+---
+
 ## [Unreleased] — Phase 6 (openat + fstat)
 
 ### Added — `openat`(257) and `fstat`(5) (fourth syscall slice)

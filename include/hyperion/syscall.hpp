@@ -11,11 +11,15 @@
 //
 // Scope of this increment is deliberately tiny and stated rather than implied:
 //   write(2), read(2), close(2), lseek(2), openat(2), fstat(2), exit(2),
-//   exit_group(2), and the memory syscalls mmap(2), mprotect(2), munmap(2),
-//   brk(2). Every other syscall number returns -ENOSYS explicitly. Nothing
-//   silently succeeds. openat() is limited to AT_FDCWD and a guest pathname;
-//   fstat() writes the *guest's* (x86-64) struct stat layout, not the host's.
-//   The full inventory and the implementation order live in docs/syscalls/.
+//   exit_group(2), the memory syscalls mmap(2), mprotect(2), munmap(2), brk(2),
+//   the process-identity getters getpid(2), gettid(2), getuid(2), geteuid(2),
+//   getgid(2), getegid(2), getppid(2), getcwd(2), and getrandom(2).
+// Every other syscall number returns -ENOSYS explicitly. Nothing silently
+// succeeds. openat() is limited to AT_FDCWD and a guest pathname; fstat()
+// writes the *guest's* (x86-64) struct stat layout, not the host's. The
+// identity getters forward to the host process (Hyperion runs the guest
+// in-process, so the guest sees the host's ids). The full inventory and the
+// implementation order live in docs/syscalls/.
 //
 // Isolation: this is not a sandbox. openat() forwards to the host kernel, so the
 // guest can open whatever the *host process* may open, exactly as SECURITY.md
@@ -52,9 +56,18 @@ inline constexpr std::uint64_t kMmap = 9;
 inline constexpr std::uint64_t kMprotect = 10;
 inline constexpr std::uint64_t kMunmap = 11;
 inline constexpr std::uint64_t kBrk = 12;
+inline constexpr std::uint64_t kGetpid = 39;
 inline constexpr std::uint64_t kExit = 60;
+inline constexpr std::uint64_t kGetcwd = 79;
+inline constexpr std::uint64_t kGetuid = 102;
+inline constexpr std::uint64_t kGetgid = 104;
+inline constexpr std::uint64_t kGeteuid = 107;
+inline constexpr std::uint64_t kGetegid = 108;
+inline constexpr std::uint64_t kGetppid = 110;
+inline constexpr std::uint64_t kGettid = 186;
 inline constexpr std::uint64_t kExitGroup = 231;
 inline constexpr std::uint64_t kOpenat = 257;
+inline constexpr std::uint64_t kGetrandom = 318;
 } // namespace sysno
 
 // openat(2) flags (the subset this increment maps to the host). The values match
@@ -135,6 +148,8 @@ inline constexpr std::int64_t kEnosys = 38;
 inline constexpr std::int64_t kEoverflow = 75;
 inline constexpr std::int64_t kEloop = 40;
 inline constexpr std::int64_t kEnametoolong = 36;
+inline constexpr std::int64_t kErange = 34;
+inline constexpr std::int64_t kEintr = 4;
 
 // What the handler did with a syscall.
 enum class SyscallStatus {

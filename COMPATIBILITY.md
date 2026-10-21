@@ -4,9 +4,10 @@ Tracks implemented versus missing instruction and ABI features.
 
 > **Status:** a small, documented instruction subset is implemented and tested
 > (§2). Everything else is explicitly rejected. AArch64 code generation, a
-> block-at-a-time translation cache, a guest address space, and four syscall
+> block-at-a-time translation cache, a guest address space, and five syscall
 > slices (`write`/`exit`/`exit_group`; `mmap`/`mprotect`/`munmap`/`brk`;
-> `read`/`close`/`lseek` over a guest descriptor table; `openat`/`fstat`) exist;
+> `read`/`close`/`lseek` over a guest descriptor table; `openat`/`fstat`; the
+> process-identity getters plus `getcwd`/`getrandom`) exist;
 > register allocation is implemented, while memory operands in the code
 > generator and block chaining do not (§5).
 
@@ -202,10 +203,12 @@ Phase 6/7.
 
 ## 5. Linux ABI / syscall coverage
 
-Phase 6, fourth slice. The `syscall` instruction is decoded and routed through
-`SyscallHandler` in both tiers. **Twelve syscalls are implemented** (`read`,
-`write`, `close`, `fstat`, `lseek`, `mmap`, `mprotect`, `munmap`, `brk`, `exit`,
-`exit_group`, `openat`); every other number returns `-ENOSYS` explicitly (never a
+Phase 6, fifth slice. The `syscall` instruction is decoded and routed through
+`SyscallHandler` in both tiers. **Twenty-one syscalls are implemented** (`read`,
+`write`, `close`, `fstat`, `lseek`, `mmap`, `mprotect`, `munmap`, `brk`,
+`getpid`, `exit`, `getcwd`, `getuid`, `getgid`, `geteuid`, `getegid`, `getppid`,
+`gettid`, `exit_group`, `openat`, `getrandom`); every other number returns
+`-ENOSYS` explicitly (never a
 silent success) and is counted in `RunResult::unimplemented_syscalls`. Guest
 pointers are validated against the mapped region (`-EFAULT`), so a guest can
 never read host memory. Per-syscall status lives in `docs/syscalls/inventory.tsv`
@@ -239,6 +242,17 @@ require a page-aligned, fully-mapped range. For `MAP_ANONYMOUS` the kernel
 ignores `fd`/`offset`; Hyperion matches that rather than inventing a stricter
 rule.
 
+The **process-identity getters** (`getpid`/`gettid`/`getuid`/`geteuid`/`getgid`/
+`getegid`/`getppid`) and `getcwd`/`getrandom` are pure forwards to the host
+process. Hyperion runs the guest in-process rather than as a separate guest
+kernel, so the guest sees the host's ids; for a single-process guest this is
+indistinguishable from the truth. `gettid` assumes single-threaded execution and
+must be revisited when `clone` lands. `getcwd` copies the host working directory
+into a bounded guest buffer (`-ERANGE` when the path plus NUL does not fit,
+`-EFAULT` on a bad pointer, `-EINVAL` for size 0). `getrandom` fills a bounded
+guest buffer from the host in 4 KiB chunks, accepting only the two defined
+`GRND_*` flag bits and rejecting any other bit with `-EINVAL`.
+
 | Area | Status | Phase | Covering test |
 | --- | --- | --- | --- |
 | Syscall number + argument marshalling (`rdi,rsi,rdx,r10,r8,r9` → `rax`) | ✅ | 6 | `syscall.*` |
@@ -249,6 +263,9 @@ rule.
 | `lseek`(8) | ✅ | 6 | `syscall.lseek_repositions_*`, `syscall.lseek_end_and_cur_whence_work`, `syscall.lseek_bad_whence_*` |
 | `openat`(257) (`AT_FDCWD`, bounded path, honoured flags) | ✅ (scoped) | 6 | `syscall.openat_opens_a_real_file_*`, `syscall.openat_missing_file_is_enoent`, `syscall.openat_bad_path_pointer_is_efault`, `syscall.openat_with_a_real_dirfd_is_unimplemented`, `syscall.openat_unhandled_flag_is_unimplemented`, `syscall.openat_writes_and_closes_release_the_guest_fd` |
 | `fstat`(5) in the guest `struct stat` layout | ✅ | 6 | `syscall.fstat_reports_size_in_the_guest_layout`, `syscall.fstat_bad_fd_is_ebadf_and_bad_buffer_is_efault` |
+| `getpid`(39)/`gettid`(186)/`getuid`(102)/`geteuid`(107)/`getgid`(104)/`getegid`(108)/`getppid`(110) | ✅ | 6 | `syscall.identity_getters_forward_to_the_host` |
+| `getcwd`(79) | ✅ | 6 | `syscall.getcwd_copies_the_host_working_directory`, `syscall.getcwd_too_small_is_erange_and_bad_buffer_is_efault` |
+| `getrandom`(318) | ✅ | 6 | `syscall.getrandom_fills_the_guest_buffer`, `syscall.getrandom_zero_length_is_zero_and_bad_flags_is_einval` |
 | Unknown number → `-ENOSYS` | ✅ | 6 | `syscall.unknown_number_is_enosys_not_silent` |
 | `brk`(12) over the guest heap | ✅ | 6 | `syscall.brk_returns_the_new_break` |
 | `mmap`(9) anonymous, `mprotect`(10), `munmap`(11) | ✅ (anonymous only) | 6 | `syscall.mmap_*`, `syscall.mprotect_*`, `syscall.munmap_*`, `syscall.mmap_end_to_end_*` |
@@ -256,7 +273,7 @@ rule.
 | `stat`(4)/`lstat`(6)/`newfstatat`(262)/`statx`(332) (path-based; reuse the `fstat` layout) | ⬜ | 6 | — |
 | `mmap` file-backed, `MAP_SHARED` | ⬜ | 6 | — |
 | `arch_prctl` (FS/GS base, TLS) | ⬜ | 6 | — |
-| `getdents64`, `access`, `readlink`/`readlinkat`, `getrandom` | ⬜ | 6 | — |
+| `getdents64`, `access`, `readlink`/`readlinkat`, `set_tid_address`, `rseq`, `prlimit64` | ⬜ | 6 | — |
 | `clone`, `futex`, threading | ⬜ | 6 | — |
 | Signals | ⬜ | 6 | — |
 | `epoll`, `poll`, `select` | ⬜ | 6 | — |

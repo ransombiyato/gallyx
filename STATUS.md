@@ -1,8 +1,8 @@
 # STATUS
 
-**Last updated:** 2026-10-20
+**Last updated:** 2026-10-19
 **Current phase:** Phase 5 (performance measurement and optimization) — active;
-Phase 6 (Linux ABI and syscall compatibility) — fourth slice implemented
+Phase 6 (Linux ABI and syscall compatibility) — fifth slice implemented
 **Repository state:** buildable, tested, documented, CI green. **Two execution
 tiers exist: the reference interpreter (Tier 0) and a translation cache that runs
 whole programs through generated AArch64 code (Tier 1).** Phase 4's exit criteria
@@ -13,11 +13,13 @@ accepted and measured** (parity fast path, dead-`rip` elimination, flag
 liveness, direct-mapped dispatch, ALU immediate folding, guest-register
 allocation — BENCHMARKS.md §4.2.1–4.2.6). Phase 6's syscall inventory is
 complete and validated
-(docs/syscalls/), and **four syscall slices are implemented in both tiers**: the
+(docs/syscalls/), and **five syscall slices are implemented in both tiers**: the
 first (`write`/`exit`/`exit_group`), the second, which added the guest
 address space and `mmap`/`mprotect`/`munmap`/`brk`, the third, which added a
-guest descriptor table with `read`/`close`/`lseek`, and the fourth, which added
-`openat`/`fstat`. Unimplemented numbers still
+guest descriptor table with `read`/`close`/`lseek`, the fourth, which added
+`openat`/`fstat`, and the fifth, which added the process-identity getters
+(`getpid`/`gettid`/`getuid`/`geteuid`/`getgid`/`getegid`/`getppid`), `getcwd`
+and `getrandom`. Unimplemented numbers still
 return `-ENOSYS` explicitly. The guest instruction subset remains small; see
 COMPATIBILITY.md.**
 
@@ -47,21 +49,28 @@ works, what was last verified, and what to do next.
 | 8. `mmap`/`mprotect`/`munmap`/`brk` over the address space (second slice) | **Implemented** — anonymous `mmap` only; file-backed requests return `-ENOSYS` and count as unimplemented |
 | 9. Guest descriptor table + `read`(0)/`close`(3)/`lseek`(8) (third slice) | **Implemented & tested** — `MinimalSyscallHandler::adopt()` attaches an already-open host stream under a guest fd |
 | 10. `openat`(257)/`fstat`(5) (fourth slice) | **Implemented & tested** — `openat` limited to `AT_FDCWD` and a bounded guest pathname; opens are handler-owned and closed on `close`; `fstat` builds the *guest* (x86-64) `struct stat` field-by-field, so the host layout (AArch64) cannot leak through |
-| 11. Broader syscall coverage (`stat`/`lstat`/`newfstatat`/`arch_prctl`/…) | **Not started** — next slice |
+| 11. Process-identity getters + `getcwd`/`getrandom` (fifth slice) | **Implemented & tested** — `getpid`(39)/`gettid`(186)/`getuid`(102)/`geteuid`(107)/`getgid`(104)/`getegid`(108)/`getppid`(110) forward to the host process (Hyperion runs the guest in-process, so the guest sees the host ids); `getcwd`(79) copies the host working directory into a bounded guest buffer (`-ERANGE` when it does not fit, `-EFAULT` on a bad pointer); `getrandom`(318) fills a guest buffer from the host in bounded chunks, validating the two defined `GRND_*` flag bits |
+| 12. Broader syscall coverage (`newfstatat`/`statx`/`arch_prctl`/`getdents64`/…) | **Not started** — next slice |
 
-**Implemented-syscall status (verified).** Twelve numbers are implemented today:
-`read`(0), `write`(1), `close`(3), `fstat`(5), `lseek`(8), `mmap`(9),
-`mprotect`(10), `munmap`(11), `brk`(12), `exit`(60), `exit_group`(231),
-`openat`(257). Everything else returns `-ENOSYS`. `mmap` is scoped: anonymous
+**Implemented-syscall status (verified).** Twenty-one numbers are implemented
+today: `read`(0), `write`(1), `close`(3), `fstat`(5), `lseek`(8), `mmap`(9),
+`mprotect`(10), `munmap`(11), `brk`(12), `getpid`(39), `exit`(60), `getcwd`(79),
+`getuid`(102), `getgid`(104), `geteuid`(107), `getegid`(108), `getppid`(110),
+`gettid`(186), `exit_group`(231), `openat`(257), `getrandom`(318). Everything
+else returns `-ENOSYS`. `mmap` is scoped: anonymous
 private mappings only. `mprotect`/`munmap` require a fully-mapped, page-aligned
 range. `read`/`close`/`lseek`/`openat`/`fstat` operate on a handler-owned guest
 descriptor table (guest fd → host stream); the handler never `fclose`s a borrowed
 stream, and it *does* close a stream it opened via `openat`. `openat` supports
 `AT_FDCWD` and a bounded guest pathname; any other `dirfd`, or an unhandled flag,
-returns `-ENOSYS` and is counted as unimplemented. This is **not a sandbox**:
-`openat` forwards to the host kernel, so the guest can open whatever the host
-process may open (SECURITY.md). The inventory marks these twelve `implemented`
-and all others `not-started`; the validator enforces the status vocabulary.
+returns `-ENOSYS` and is counted as unimplemented. The identity getters and
+`getcwd`/`getrandom` are pure forwards to the host with bounded guest buffers;
+`gettid` reports the host thread id because Hyperion is single-threaded today
+(a documented approximation, revisited when `clone` lands). This is **not a
+sandbox**: `openat` forwards to the host kernel, so the guest can open whatever
+the host process may open (SECURITY.md). The inventory marks these twenty-one
+`implemented` and all others `not-started`; the validator enforces the status
+vocabulary.
 
 **Address-space facts (verified).** `GuestAddressSpace` is the guest's virtual
 memory: a set of regions with `MemPerm` (read/write/exec) and page-granular
@@ -421,24 +430,27 @@ main path, and Phases 2-5 still build it.
 
 ## 2. Last successful verification
 
-Re-verified from a clean tree on **2026-10-20**, host: x86-64, Debian 13
+Re-verified from a clean tree on **2026-10-19**, host: x86-64, Debian 13
 (trixie), GCC 14.2.0, Clang 19.1.7, CMake 3.31.6, Ninja 1.12.1, qemu-aarch64
-10.0.13, aarch64-linux-gnu-g++ 14.2.0. This run followed the clang-build fix
-below and a container reset that removed `/usr`; the toolchain was restored from
-`tools/vendor/host-debs/` and `tools/cache/` before rebuilding:
+10.0.13, aarch64-linux-gnu-g++ 14.2.0. This run followed a container reset that
+removed `/usr`; the toolchain was restored from `tools/vendor/host-debs/` and
+`tools/cache/` (with an apt fallback for the cross compiler) before rebuilding:
 
 | Suite | Command | Result |
 | --- | --- | --- |
-| Native | `scripts/dev.sh test` | 9/9 ctest passed |
-| Cross (qemu-user) | `scripts/dev.sh cross-test` | 5/5 ctest passed (153 unit cases, 0 failed, 2 skipped) |
-| Clang | `scripts/dev.sh clang-build` | 9/9 passed |
-| ASan/UBSan | `scripts/dev.sh sanitize` | 9/9 passed |
+| Native | `scripts/dev.sh test` | 9/9 ctest passed (151 unit cases, 0 failed, 13 skipped) |
+| Cross (qemu-user) | `scripts/dev.sh cross-test` | 5/5 ctest passed (168 unit cases, 0 failed, 2 skipped) |
+| Clang | `scripts/dev.sh clang-build` | 9/9 passed (151 unit cases, 0 failed) |
+| ASan/UBSan | `scripts/dev.sh sanitize` | 9/9 passed (151 unit cases, 0 failed) |
 | Formatting | `scripts/dev.sh format` | clean (clang-format 19.1.7) |
 | Lint | `shellcheck scripts/*.sh` | clean |
-| Syscall inventory | `python3 tools/gen_syscall_inventory.py --check` | OK |
+| Syscall inventory | `python3 tools/gen_syscall_inventory.py --check` | OK (0 errors, 0 warnings) |
 
-Re-verified again after the Phase 6 increment 4
-commit (openat + fstat): native 145/0, cross 153/0 under `qemu-user`,
+Re-verified after the Phase 6 increment 5
+commit (identity getters + `getcwd` + `getrandom`): native 151/0, cross 168/0
+under `qemu-user`, ASan/UBSan 151/0, clang-build 151/0, format clean, shellcheck
+clean, syscall inventory valid. Previously, after increment 4
+(openat + fstat): native 145/0, cross 153/0 under `qemu-user`,
 ASan/UBSan 9/9, clang-build 9/9, format clean, shellcheck clean,
 syscall inventory valid. Previously, after increment 3
 (guest descriptor table + `read`/`close`/`lseek`): native 136/0,
@@ -626,21 +638,28 @@ stable-vs-noisy discrimination case).
     `mmap`, which is unbounded up to the allocator cursor.
   - There is no demand-zero fault delivery to the guest: the address space is
     fully backed in host memory when mapped, not lazily.
-- **Known limitations of the guest descriptor table (`read`/`close`/`lseek`):**
-  - **`open`/`openat` are not implemented.** The guest can read only descriptors
-    the embedder adopted with `adopt()` (plus fd 0/1/2). It cannot open a host
-    file itself. This is the deliberate boundary that keeps guest file access
-    under host control; the next slice adds `openat`.
+- **Known limitations of the guest descriptor table (`read`/`close`/`lseek`/`openat`):**
+  - **`openat` exists but is `AT_FDCWD`-only.** A guest can open a host file by
+    name through `openat(AT_FDCWD, path, …)`; a real directory descriptor is
+    `-ENOSYS`. Legacy `open`(2) is deliberately *not* implemented (glibc calls
+    `openat`), and the embedder can still grant a stream with `adopt()`.
   - The table maps guest fd → `FILE*` (a `stdio` stream), not a raw host fd, so
     the handler cannot express `O_NONBLOCK`, `O_APPEND`, `pread`/`pwrite`,
-    `fcntl`, or `dup`. Those arrive with `openat`.
+    `fcntl`, or `dup`. `openat` honours the `O_*` subset it documents; any other
+    flag is `-ENOSYS` (counted, never silently dropped).
   - `close` drops the guest descriptor but does **not** `fclose` the borrowed
-    host stream: the handler does not own it, the embedder does. A guest that
-    closes fd 3 cannot thereby close a host resource.
+    host stream: the handler does not own it, the embedder does. It *does*
+    `fclose` a stream it opened itself via `openat`. A guest that closes fd 3
+    cannot thereby close a host resource it was only lent.
   - `read` copies in 4 KiB chunks and, if the guest destination faults mid-way,
     returns `-EFAULT` after the bytes already read are consumed from the stream
     (documented in `do_read`); a real kernel faults before reading.
   - A guest fd that is not in the table is `-EBADF`, never a host descriptor.
+- **Known limitation of the identity getters:** `getpid`/`gettid`/`getuid`/…
+  return the *host* process's values, because Hyperion runs the guest in-process
+  rather than as a separate guest kernel. For a single-process guest this is
+  indistinguishable from the truth; `gettid` in particular assumes single-threaded
+  execution and must be revisited when `clone` lands.
 - **Known limitation of Tier 1 (the code generator):** it is **register-only**.
   Any instruction with a memory operand is rejected (`translator.cpp
   validate_body`) and the block stops with `kUnsupported` rather than emitting
@@ -668,20 +687,21 @@ stable-vs-noisy discrimination case).
 
 ## 4. Immediate next task
 
-**Phase 6's fourth syscall slice (`openat` + `fstat`) is implemented and tested
-in both tiers. Phase 5 has six accepted, measured optimizations (BENCHMARKS.md
-§4.2.1–4.2.6), all deterministic-evidence based.**
+**Phase 6's fifth syscall slice (identity getters + `getcwd` + `getrandom`) is
+implemented and tested in both tiers. Phase 5 has six accepted, measured
+optimizations (BENCHMARKS.md §4.2.1–4.2.6), all deterministic-evidence based.**
 
 The single best next action (Phase 6, extend coverage in U4 order):
 
-- **Add the remaining U4 syscalls a real program needs to start and run**:
+- **Add the remaining U4/E1 syscalls a real program needs to start and run**:
   `arch_prctl`(158) (set up the thread-local/FS base — required before glibc
-  startup), `getdents64`(217) (read a directory), `access`(21),
-  `readlink`(89)/`readlinkat`(267), `getrandom`(318), `set_tid_address`(218),
-  `rseq`(334), `prlimit64`(302), `newfstatat`(262) and `statx`(332). `openat`
-  and `fstat` now exist and share the handler-owned descriptor table; `fstat`
-  builds the guest `struct stat` layout field-by-field rather than copying the
-  host's (the ABI-sensitive part, and the pattern to reuse for `stat`/`lstat`/
+  startup, and the one that needs a new `GuestState.fs_base` field),
+  `newfstatat`(262) (glibc's `stat`/`lstat` entry point — reuse the guest
+  `struct stat` builder already written for `fstat`), `getdents64`(217) (read a
+  directory), `access`(21), `readlink`(89)/`readlinkat`(267), `set_tid_address`
+  (218), `rseq`(334), `prlimit64`(302) and `statx`(332). `fstat` already builds
+  the guest `struct stat` layout field-by-field rather than copying the host's
+  (the ABI-sensitive part, and the pattern to reuse for `stat`/`lstat`/
   `newfstatat`/`statx`). Validate every guest buffer pointer against the address
   space before use; return `-EBADF`/`-EFAULT`/`-ENOENT`/`-ENOSYS` exactly as the
   kernel does, and keep the "unimplemented is counted, never silent" rule. Move

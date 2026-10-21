@@ -69,7 +69,7 @@
 36	getitimer	U1	not-started	Query an interval timer (legacy).	provisional
 37	alarm	U1	not-started	Set an alarm clock (legacy).	provisional
 38	setitimer	U1	not-started	Set an interval timer (legacy).	provisional
-39	getpid	U4	not-started	Return the process ID.	trace:6
+39	getpid	U4	implemented	Return the process ID.	trace:6
 40	sendfile	U3	not-started	Copy data between descriptors in the kernel.	provisional
 41	socket	U3	not-started	Create a socket.	trace:14
 42	connect	U3	not-started	Initiate a connection on a socket.	trace:14
@@ -109,7 +109,7 @@
 76	truncate	U2	not-started	Set a path's length.	provisional
 77	ftruncate	U3	not-started	Set a descriptor's length.	provisional
 78	getdents	U1	not-started	Read directory entries (legacy struct layout).	provisional
-79	getcwd	U4	not-started	Return the current working directory.	trace:1
+79	getcwd	U4	implemented	Return the current working directory.	trace:1
 80	chdir	U3	not-started	Change the current working directory.	provisional
 81	fchdir	U2	not-started	Change directory to a descriptor.	trace:1
 82	rename	U3	not-started	Rename a file.	provisional
@@ -132,15 +132,15 @@
 99	sysinfo	U2	not-started	Query system statistics.	trace:2
 100	times	U1	not-started	Query process times (legacy).	provisional
 101	ptrace	E3	not-started	Trace another process (privileged/needs care).	provisional
-102	getuid	U4	not-started	Return the real user ID.	trace:11
+102	getuid	U4	implemented	Return the real user ID.	trace:11
 103	syslog	E3	not-started	Read or control the kernel log (privileged).	provisional
-104	getgid	U4	not-started	Return the real group ID.	trace:11
+104	getgid	U4	implemented	Return the real group ID.	trace:11
 105	setuid	U3	not-started	Set the user ID.	provisional
 106	setgid	U3	not-started	Set the group ID.	provisional
-107	geteuid	U4	not-started	Return the effective user ID.	trace:13
-108	getegid	U4	not-started	Return the effective group ID.	trace:11
+107	geteuid	U4	implemented	Return the effective user ID.	trace:13
+108	getegid	U4	implemented	Return the effective group ID.	trace:11
 109	setpgid	U3	not-started	Set the process group ID.	provisional
-110	getppid	U4	not-started	Return the parent process ID.	trace:4
+110	getppid	U4	implemented	Return the parent process ID.	trace:4
 111	getpgrp	U3	not-started	Return the process group ID.	trace:1
 112	setsid	U2	not-started	Create a session and set the process group.	provisional
 113	setreuid	E3	not-started	Set real and effective user IDs.	provisional
@@ -216,7 +216,7 @@
 183	afs_syscall	E3	not-started	Reserved for AFS (unused).	provisional
 184	tuxcall	E3	not-started	Reserved for TUX (unused).	provisional
 185	security	E3	not-started	Reserved for security modules (unused).	provisional
-186	gettid	U4	not-started	Return the calling thread ID.	trace:1
+186	gettid	U4	implemented	Return the calling thread ID.	trace:1
 187	readahead	U2	not-started	Prefetch a file into the page cache.	provisional
 188	setxattr	E2	not-started	Set an extended attribute.	provisional
 189	lsetxattr	E2	not-started	Set an xattr without following symlinks.	provisional
@@ -348,7 +348,7 @@
 315	sched_getattr	E2	not-started	Query scheduling attributes (modern).	provisional
 316	renameat2	U2	not-started	Rename with flags relative to descriptors.	provisional
 317	seccomp	E2	not-started	Restrict syscalls with a filter.	provisional
-318	getrandom	U4	not-started	Obtain random bytes.	trace:19
+318	getrandom	U4	implemented	Obtain random bytes.	trace:19
 319	memfd_create	E2	not-started	Create an anonymous memory-backed file.	provisional
 320	kexec_file_load	E3	not-started	Load a kernel from a file (privileged).	provisional
 321	bpf	E2	not-started	Run a BPF program (privileged for most uses).	provisional

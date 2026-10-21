@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <string>
+#include <sys/random.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -479,6 +480,73 @@ MemResult do_brk(GuestState& s, GuestAddressSpace& as) {
     return {static_cast<std::int64_t>(as.set_brk(requested)), true};
 }
 
+// getrandom(buf, buflen, flags): fill a guest buffer with random bytes from the
+// host. Only the two defined flag bits (GRND_NONBLOCK, GRND_RANDOM) are
+// accepted; any other bit is -EINVAL, as the kernel does. Hyperion cannot block,
+// so the flags are validated and otherwise ignored: the host call blocks, which
+// is what a guest that did not pass GRND_NONBLOCK asked for.
+std::int64_t do_getrandom(GuestState& s, Memory& memory) {
+    const std::uint64_t buf = arg(s, 0);
+    const std::uint64_t count = arg(s, 1);
+    const std::uint64_t flags = arg(s, 2);
+
+    constexpr std::uint64_t kHonoured = 0x1 | 0x2; // GRND_NONBLOCK | GRND_RANDOM
+    if ((flags & ~kHonoured) != 0) {
+        return -kEinval;
+    }
+    if (count == 0) {
+        return 0;
+    }
+
+    // `count` is guest-controlled, so copy in bounded chunks rather than
+    // allocating it in one go.
+    constexpr std::size_t kChunk = 4096;
+    std::array<std::uint8_t, kChunk> chunk{};
+    std::uint64_t done = 0;
+    while (done < count) {
+        const std::size_t n =
+            static_cast<std::size_t>((count - done) < kChunk ? (count - done) : kChunk);
+        const ssize_t got = ::getrandom(chunk.data(), n, 0);
+        if (got < 0) {
+            return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+        }
+        if (got == 0) {
+            break;
+        }
+        if (!memory.write(buf + done, chunk.data(), static_cast<std::size_t>(got))) {
+            return -kEfault;
+        }
+        done += static_cast<std::uint64_t>(got);
+        if (static_cast<std::size_t>(got) < n) {
+            break; // a short fill is the result, as with getrandom(2)
+        }
+    }
+    return static_cast<std::int64_t>(done);
+}
+
+// getcwd(buf, size): copy the host working directory into the guest buffer.
+// Follows getcwd(2): a buffer too small for the path plus its NUL is -ERANGE,
+// and a guest pointer the memory model rejects is -EFAULT.
+std::int64_t do_getcwd(GuestState& s, Memory& memory) {
+    const std::uint64_t buf = arg(s, 0);
+    const std::uint64_t size = arg(s, 1);
+    if (size == 0) {
+        return -kEinval;
+    }
+    std::array<char, 4096> path{};
+    if (::getcwd(path.data(), path.size()) == nullptr) {
+        return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+    }
+    const std::size_t len = std::strlen(path.data());
+    if (len + 1 > size) {
+        return -kErange; // path plus NUL does not fit
+    }
+    if (!memory.write(buf, reinterpret_cast<const std::uint8_t*>(path.data()), len + 1)) {
+        return -kEfault;
+    }
+    return static_cast<std::int64_t>(len + 1);
+}
+
 } // namespace
 
 MinimalSyscallHandler::MinimalSyscallHandler(OutputSink sink, GuestAddressSpace* address_space)
@@ -550,6 +618,47 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
         result.status = SyscallStatus::kHandled;
         return result;
     }
+    case sysno::kGetpid:
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(::getpid());
+        result.status = SyscallStatus::kHandled;
+        return result;
+    case sysno::kGettid:
+        // Single-threaded today: the guest thread id equals the host thread id.
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(::gettid());
+        result.status = SyscallStatus::kHandled;
+        return result;
+    case sysno::kGetuid:
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(::getuid());
+        result.status = SyscallStatus::kHandled;
+        return result;
+    case sysno::kGeteuid:
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(::geteuid());
+        result.status = SyscallStatus::kHandled;
+        return result;
+    case sysno::kGetgid:
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(::getgid());
+        result.status = SyscallStatus::kHandled;
+        return result;
+    case sysno::kGetegid:
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(::getegid());
+        result.status = SyscallStatus::kHandled;
+        return result;
+    case sysno::kGetppid:
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(::getppid());
+        result.status = SyscallStatus::kHandled;
+        return result;
+    case sysno::kGetcwd: {
+        const std::int64_t r = do_getcwd(state, memory);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kGetrandom: {
+        const std::int64_t r = do_getrandom(state, memory);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
     case sysno::kExit:
     case sysno::kExitGroup:
         result.status = SyscallStatus::kExit;
@@ -603,7 +712,10 @@ bool is_minimal_syscall(std::uint64_t number) {
     return number == sysno::kRead || number == sysno::kWrite || number == sysno::kClose ||
            number == sysno::kFstat || number == sysno::kLseek || number == sysno::kExit ||
            number == sysno::kExitGroup || number == sysno::kMmap || number == sysno::kMprotect ||
-           number == sysno::kMunmap || number == sysno::kBrk || number == sysno::kOpenat;
+           number == sysno::kMunmap || number == sysno::kBrk || number == sysno::kOpenat ||
+           number == sysno::kGetpid || number == sysno::kGettid || number == sysno::kGetuid ||
+           number == sysno::kGeteuid || number == sysno::kGetgid || number == sysno::kGetegid ||
+           number == sysno::kGetppid || number == sysno::kGetcwd || number == sysno::kGetrandom;
 }
 
 } // namespace hyperion

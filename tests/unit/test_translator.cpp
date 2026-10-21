@@ -496,10 +496,9 @@ HYPERION_TEST("translator", "differential_register_allocation_immediates") {
 }
 
 HYPERION_TEST("translator", "dispatcher_stops_at_unsupported") {
-    // mov eax, 1 ; push rax ; hlt. The dispatcher translates `mov`, then stops
-    // at `push` with kUnsupported and leaves rip on the push, never running the
-    // untranslatable instruction.
-    const std::vector<std::uint8_t> program = {0xB8, 0x01, 0x00, 0x00, 0x00, 0x50, 0xF4};
+    // mov eax, 1 ; ud2 ; hlt. The dispatcher translates `mov`, cuts before `ud2`,
+    // and stops at `ud2` with kUnsupported leaving rip on the offending PC.
+    const std::vector<std::uint8_t> program = {0xB8, 0x01, 0x00, 0x00, 0x00, 0x0F, 0x0B, 0xF4};
     FlatMemory mem(kBase, 4096);
     std::memcpy(mem.data(), program.data(), program.size());
     GuestState initial;
@@ -507,7 +506,7 @@ HYPERION_TEST("translator", "dispatcher_stops_at_unsupported") {
     hyperion::TranslationCache cache;
     const hyperion::RunResult r = cache.run(mem, initial);
     HYPERION_CHECK(r.status == hyperion::RunStatus::kUnsupported);
-    HYPERION_CHECK_EQ(r.state.rip, kBase + 5); // the push
+    HYPERION_CHECK_EQ(r.state.rip, kBase + 5); // the ud2
     HYPERION_CHECK_EQ(r.state.reg(Gpr::kRax), std::uint64_t{1});
 }
 
@@ -707,6 +706,80 @@ HYPERION_TEST("translator", "lea_test_and_near_jcc_match_interpreter") {
     check_program_matches(program, initial);
 }
 
+HYPERION_TEST("translator", "rmw_memory_alu_followed_by_jcc_preserves_flags") {
+    // Regression test for RMW memory ALU + immediate Jcc (`sub dword [rdi+4], 1 ; jne`):
+    // inline SoftTlb store check inside `sub [rdi+4], 1` clobbers hardware NZCV, so
+    // `Jcc` must read the guest flags saved before the store rather than stale NZCV.
+    const std::vector<std::uint8_t> program = {
+        0xC7, 0x47, 0x04, 0x03, 0x00, 0x00, 0x00, // [0..6]   mov dword [rdi+4], 3
+        // loop at [7]:
+        0x48, 0x83, 0xC0, 0x07, // [7..10]  add rax, 7
+        0x83, 0x6F, 0x04, 0x01, // [11..14] sub dword [rdi+4], 1
+        0x75, 0xF6,             // [15..16] jne loop (-10 -> [7])
+        0xF4,                   // [17]     hlt
+    };
+    GuestState initial;
+    initial.rip = kBase;
+    initial.reg(Gpr::kRdi) = kBase + 0x800;
+    check_program_matches(program, initial);
+}
+
+HYPERION_TEST("translator", "cached_block_memory_stack_call_ret_and_sse2_match_interpreter") {
+    // Exercises full Phase C Tier 1 features against Tier 0:
+    //   - `call rel32` / `push rbp` / `mov rbp, rsp` / `pop rbp` / `ret`
+    //   - inline SoftTlb 64-bit / 32-bit / 8-bit loads & stores
+    //   - `bswap`, `ror`, `imul`, `setcc`, `cmovcc`
+    //   - 128-bit ARMv8 NEON SSE2 `movdqu`, `psrlw`, `pslld`, `pxor`, `paddd`, `movdqu store`
+    const std::vector<std::uint8_t> program = {
+        // entry at +0:
+        0xE8, 0x29, 0x00, 0x00, 0x00, // [0..4]   call fn (+41 -> [46])
+        0xF3, 0x0F, 0x6F, 0x06,       // [5..8]   movdqu xmm0, [rsi]
+        0xF3, 0x0F, 0x6F, 0x4E, 0x10, // [9..13]  movdqu xmm1, [rsi+16]
+        0x66, 0x0F, 0x71, 0xD0, 0x08, // [14..18] psrlw xmm0, 8
+        0x66, 0x0F, 0x72, 0xF1, 0x05, // [19..23] pslld xmm1, 5
+        0x66, 0x0F, 0xFE, 0xC1,       // [24..27] paddd xmm0, xmm1
+        0x66, 0x0F, 0xEF, 0xC1,       // [28..31] pxor xmm0, xmm1
+        0xF3, 0x0F, 0x7F, 0x46, 0x20, // [32..36] movdqu [rsi+32], xmm0
+        0x48, 0x8B, 0x56, 0x20,       // [37..40] mov rdx, [rsi+32]
+        0x48, 0x8B, 0x4E, 0x28,       // [41..44] mov rcx, [rsi+40]
+        0xF4,                         // [45]     hlt
+        // fn at [46]:
+        0x55,                   // [46]     push rbp
+        0x48, 0x89, 0xE5,       // [47..49] mov rbp, rsp
+        0x48, 0x0F, 0xC8,       // [50..52] bswap rax
+        0x48, 0xC1, 0xC8, 0x0D, // [53..56] ror rax, 13
+        0x48, 0x6B, 0xC0, 0x1F, // [57..60] imul rax, rax, 31
+        0x5D,                   // [61]     pop rbp
+        0xC3,                   // [62]     ret
+    };
+
+    FlatMemory mem1(kBase, 8192);
+    FlatMemory mem2(kBase, 8192);
+    std::memcpy(mem1.data(), program.data(), program.size());
+    for (std::size_t i = 0; i < 32; ++i) {
+        mem1.data()[0x400 + i] = static_cast<std::uint8_t>(0xA5u ^ (i * 13u));
+    }
+    std::memcpy(mem2.data(), mem1.data(), 8192);
+
+    GuestState init;
+    init.rip = kBase;
+    init.reg(Gpr::kRsp) = kBase + 0x1FB0;
+    init.reg(Gpr::kRax) = 0x0123456789ABCDEFULL;
+    init.reg(Gpr::kRsi) = kBase + 0x400;
+
+    const hyperion::RunResult ref = hyperion::run_program(mem1, init);
+    hyperion::TranslationCache cache;
+    const hyperion::RunResult got = cache.run(mem2, init);
+    HYPERION_CHECK(ref.status == hyperion::RunStatus::kOk);
+    HYPERION_CHECK(got.status == hyperion::RunStatus::kOk);
+    HYPERION_CHECK_EQ(got.steps, ref.steps);
+    for (std::size_t r = 0; r < hyperion::kGprCount; ++r) {
+        HYPERION_CHECK_EQ(got.state.gpr[r], ref.state.gpr[r]);
+    }
+    HYPERION_CHECK(got.state.xmm[0] == ref.state.xmm[0]);
+    HYPERION_CHECK(got.state.xmm[1] == ref.state.xmm[1]);
+}
+
 #else
 
 HYPERION_TEST("translator", "differential_mov_and_alu") {
@@ -766,6 +839,14 @@ HYPERION_TEST("translator", "shifted_imm12_folded_alu_matches_interpreter") {
 }
 
 HYPERION_TEST("translator", "lea_test_and_near_jcc_match_interpreter") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "rmw_memory_alu_followed_by_jcc_preserves_flags") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "cached_block_memory_stack_call_ret_and_sse2_match_interpreter") {
     HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
 }
 

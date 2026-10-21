@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-10-21
 **Current phase:** Phase 5 (performance measurement and optimization) — active;
-Phase 6 (Linux ABI and syscall compatibility) — ninth slice implemented
+Phase 6 (Linux ABI and syscall compatibility) — tenth slice implemented
 **Repository state:** buildable, tested, documented, CI green. **Two execution
 tiers exist: the reference interpreter (Tier 0) and a translation cache that runs
 whole programs through generated AArch64 code (Tier 1).** Phase 4's exit criteria
@@ -13,7 +13,7 @@ accepted and measured** (parity fast path, dead-`rip` elimination, flag
 liveness, direct-mapped dispatch, ALU immediate folding, guest-register
 allocation — BENCHMARKS.md §4.2.1–4.2.6). Phase 6's syscall inventory is
 complete and validated
-(docs/syscalls/), and **nine syscall slices are implemented in both tiers**: the
+(docs/syscalls/), and **ten syscall slices are implemented in both tiers**: the
 first (`write`/`exit`/`exit_group`), the second, which added the guest
 address space and `mmap`/`mprotect`/`munmap`/`brk`, the third, which added a
 guest descriptor table with `read`/`close`/`lseek`, the fourth, which added
@@ -23,7 +23,8 @@ and `getrandom`, the sixth, which added `newfstatat` (glibc's
 `stat`/`lstat` entry point), the seventh, which added `access` and
 `readlink`, the eighth, which added `readlinkat`, and the ninth, which added
 `getdents64` (directory listing, via `openat` now honouring
-`O_DIRECTORY`/`O_NONBLOCK`/`O_CLOEXEC`). Unimplemented numbers still
+`O_DIRECTORY`/`O_NONBLOCK`/`O_CLOEXEC`), and the tenth, which added `statx`.
+Unimplemented numbers still
 return `-ENOSYS` explicitly. The guest instruction subset remains small; see
 COMPATIBILITY.md.**
 
@@ -58,7 +59,8 @@ works, what was last verified, and what to do next.
 | 13. `access`(21) + `readlink`(89) (seventh slice) | **Implemented & tested** — `access` forwards to the host with mode restricted to `F_OK`/`R_OK`/`W_OK`/`X_OK` (any other bit is `-EINVAL`); `readlink` copies a symlink target without a NUL terminator, truncating to `bufsiz` (not an error) and rejecting `bufsiz == 0` with `-EINVAL`. Both read the path with the shared bounded `read_guest_cstr` |
 | 14. `readlinkat`(267) (eighth slice) | **Implemented & tested** — glibc's modern `readlink` entry point. Shares the `readlink` body (no NUL terminator, silent truncation, `bufsiz == 0` is `-EINVAL`); `AT_FDCWD` only, any other `dirfd` is `-ENOSYS` and counted as unimplemented |
 | 15. `getdents64`(217) (ninth slice) | **Implemented & tested** — directory listing, the highest-frequency implementable syscall in the trace sample (3941 calls). The `linux_dirent64` record is a fixed UAPI layout identical on x86-64 and AArch64, so host entries are forwarded verbatim (D-030); the kernel's own `-EBADF`/`-ENOTDIR`/`-EINVAL` come through unchanged. `openat` now honours `O_DIRECTORY`/`O_NONBLOCK`/`O_CLOEXEC` (glibc's `opendir` flags) |
-| 16. Broader syscall coverage (`arch_prctl`/`statx`/`set_tid_address`/…) | **Not started** — next slice |
+| 16. `statx`(332) (tenth slice) | **Implemented & tested** — the modern, extensible stat (950 calls). `struct statx` is built only from fixed-width `__u32`/`__u64` fields, so its layout is identical on x86-64 and AArch64 and the host's bytes are copied into the guest verbatim (the `linux_dirent64` reasoning, D-030); `AT_FDCWD` only, `AT_SYMLINK_NOFOLLOW` the sole honoured flag |
+| 17. Broader syscall coverage (`arch_prctl`/`set_tid_address`/`rseq`/…) | **Not started** — next slice |
 
 **Implemented-syscall status (verified).** Twenty-four numbers are implemented
 today: `read`(0), `write`(1), `close`(3), `fstat`(5), `lseek`(8), `mmap`(9),
@@ -82,7 +84,7 @@ buffers; `gettid` reports the host thread id because Hyperion is single-threaded
 today (a documented approximation, revisited when `clone` lands). This is **not a
 sandbox**: `openat`/`newfstatat`/`access`/`readlink`/`readlinkat`/`getdents64`
 forward to the host kernel, so the guest can touch whatever the host process may
-(SECURITY.md). The inventory marks these twenty-six `implemented` and all others
+(SECURITY.md). The inventory marks these twenty-seven `implemented` and all others
 `not-started`; the validator enforces the status vocabulary.
 
 **Address-space facts (verified).** `GuestAddressSpace` is the guest's virtual
@@ -405,13 +407,13 @@ elimination, flag liveness, direct-mapped dispatch, ALU immediate folding,
 guest-register allocation), each judged on deterministic evidence as well as
 timing (BENCHMARKS.md §4.2).
 
-Phase 6 has nine syscall slices implemented in both tiers over a
+Phase 6 has ten syscall slices implemented in both tiers over a
 `GuestAddressSpace`: `write`/`exit`/`exit_group`; `mmap`/`mprotect`/`munmap`/`brk`
 (anonymous `mmap` only); a handler-owned guest descriptor table with
 `read`/`openat`/`close`/`lseek`/`fstat`; `getcwd`/`getrandom`; the identity
 getters (`getpid`/`gettid`/`getuid`/`geteuid`/`getgid`/`getegid`/`getppid`);
-`newfstatat`; `access`/`readlink`; `readlinkat`; and `getdents64` — twenty-six
-numbers in total.
+`newfstatat`; `access`/`readlink`; `readlinkat`; `getdents64`; and `statx` —
+twenty-seven numbers in total.
 `openat` is limited to `AT_FDCWD`; every other number returns `-ENOSYS` and is
 counted, never silently ignored.
 
@@ -454,13 +456,18 @@ removed `/usr`; the toolchain was restored from `tools/vendor/host-debs/` and
 
 | Suite | Command | Result |
 | --- | --- | --- |
-| Native | `scripts/dev.sh test` | 10/10 ctest passed (181 unit cases, 0 failed, 13 skipped) |
+| Native | `scripts/dev.sh test` | 10/10 ctest passed (187 unit cases, 0 failed, 13 skipped) |
 | Cross (qemu-user) | `scripts/dev.sh cross-test` | 6/6 ctest passed (198 unit cases, 0 failed, 2 skipped) |
 | Clang | `scripts/dev.sh clang-build` | 10/10 passed (181 unit cases, 0 failed) |
 | ASan/UBSan | `scripts/dev.sh sanitize` | 10/10 passed (181 unit cases, 0 failed) |
 | Formatting | `scripts/dev.sh format` | clean (clang-format 19.1.7) |
 | Lint | `shellcheck scripts/*.sh tests/cli/*.sh` | clean |
 | Syscall inventory | `python3 tools/gen_syscall_inventory.py --check` | OK (0 errors, 0 warnings) |
+
+Re-verified after the Phase 6 tenth slice (`statx`): native **187/0**, 13
+skipped (of 200); cross **204/0**, 2 skipped (of 206) under `qemu-user`;
+ASan/UBSan **187/0**; clang-build **187/0**; format clean; shellcheck clean;
+syscall inventory valid (`statx` now `implemented`).
 
 Re-verified after the Phase 6 ninth slice (`getdents64`): native **181/0**,
 13 skipped (of 194); cross **198/0**, 2 skipped (of 200) under `qemu-user`;
@@ -709,9 +716,10 @@ stable-vs-noisy discrimination case).
     NUL-terminates, matching the kernel; `access` forwards the host process's
     permissions, so it is not a security boundary.
   - The table maps guest fd → `FILE*` (a `stdio` stream), not a raw host fd, so
-    the handler cannot express `O_NONBLOCK`, `O_APPEND`, `pread`/`pwrite`,
-    `fcntl`, or `dup`. `openat` honours the `O_*` subset it documents; any other
-    flag is `-ENOSYS` (counted, never silently dropped).
+    the handler cannot express `O_APPEND`, `pread`/`pwrite`, `fcntl`, or `dup`.
+    `O_NONBLOCK` is honoured as an `open` flag, but the stream still blocks on
+    `read`. `openat` honours the `O_*` subset it documents; any other flag is
+    `-ENOSYS` (counted, never silently dropped).
   - `close` drops the guest descriptor but does **not** `fclose` the borrowed
     host stream: the handler does not own it, the embedder does. It *does*
     `fclose` a stream it opened itself via `openat`. A guest that closes fd 3
@@ -752,8 +760,8 @@ stable-vs-noisy discrimination case).
 
 ## 4. Immediate next task
 
-**Phase 6's ninth syscall slice (`getdents64`) is implemented and tested in
-both tiers. Phase 5 has six accepted, measured optimizations
+**Phase 6's tenth syscall slice (`statx`) is implemented and tested in both
+tiers. Phase 5 has six accepted, measured optimizations
 (BENCHMARKS.md §4.2.1–4.2.6), all deterministic-evidence based.**
 
 The single best next action (Phase 6, extend coverage in U4 order):
@@ -761,11 +769,10 @@ The single best next action (Phase 6, extend coverage in U4 order):
 - **Add the remaining U4/E1 syscalls a real program needs to start and run**:
   `arch_prctl`(158) (set up the thread-local/FS base — required before glibc
   startup, and the one that needs a new `GuestState.fs_base` field),
-  `set_tid_address`(218), `rseq`(334), `prlimit64`(302) and `statx`(332).
-  `newfstatat` now covers glibc's `stat`/`lstat` entry point through the shared
-  guest-`struct stat` builder, and `access`/`readlink`/`readlinkat` cover the
-  common path queries; `statx` needs the same field-by-field discipline for its
-  own layout.
+  `set_tid_address`(218), `rseq`(334) and `prlimit64`(302).
+  `newfstatat` covers glibc's `stat`/`lstat` entry point and `statx` now covers
+  the modern entry point (both over the shared guest layouts); `access`/
+  `readlink`/`readlinkat` cover the common path queries.
   Validate
   every guest buffer pointer against the address
   space before use; return `-EBADF`/`-EFAULT`/`-ENOENT`/`-ENOSYS` exactly as the

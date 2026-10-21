@@ -362,7 +362,7 @@
 329	pkey_mprotect	E3	not-started	mprotect with a protection key (x86).	provisional
 330	pkey_alloc	E3	not-started	Allocate a protection key (x86).	provisional
 331	pkey_free	E3	not-started	Free a protection key (x86).	provisional
-332	statx	U4	not-started	Stat with an extensible structure.	trace:950
+332	statx	U4	implemented	Stat with an extensible structure.	trace:950
 333	io_pgetevents	E3	not-started	Query AIO events with a signal mask.	provisional
 334	rseq	U4	not-started	Register restartable sequences.	trace:17
 335	uretprobe	E3	not-started	User-space return probe control (uprobe extension).	provisional

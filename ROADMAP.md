@@ -282,7 +282,7 @@ optimization decisions.
 
 ---
 
-## Phase 6 — Linux ABI and syscall compatibility 🟡 (nine slices implemented)
+## Phase 6 — Linux ABI and syscall compatibility 🟡 (ten slices implemented)
 
 **Objective.** Run real Linux guest programs.
 
@@ -355,6 +355,10 @@ file descriptors, signals, threading, futexes. Feature matrix + integration test
   record is a shared UAPI layout, so host entries are forwarded verbatim (D-030);
   `openat` now honours `O_DIRECTORY`/`O_NONBLOCK`/`O_CLOEXEC`, glibc's `opendir`
   flags.
+- ✅ **`statx`(332) (tenth slice).** The modern, extensible stat (950 calls).
+  `struct statx` is all fixed-width fields, so the layout is shared and the host's
+  bytes are forwarded verbatim (D-030); `AT_FDCWD` only, `AT_SYMLINK_NOFOLLOW`
+  the sole honoured flag.
 - ⬜ The remaining U4 syscalls a program needs to start (`arch_prctl`,
   `set_tid_address`, `set_robust_list`, …) — **next**.
 - ⬜ Signals, threads, futexes.

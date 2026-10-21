@@ -75,6 +75,7 @@ inline constexpr std::uint64_t kOpenat = 257;
 inline constexpr std::uint64_t kNewfstatat = 262;
 inline constexpr std::uint64_t kReadlinkat = 267;
 inline constexpr std::uint64_t kGetrandom = 318;
+inline constexpr std::uint64_t kStatx = 332;
 } // namespace sysno
 
 // openat(2) flags (the subset this increment maps to the host). The values match
@@ -107,6 +108,44 @@ inline constexpr std::uint64_t kAtFdcwd = static_cast<std::uint64_t>(-100);
 
 // AT_SYMLINK_NOFOLLOW: do not dereference the final path component (lstat).
 inline constexpr std::uint64_t kAtSymlinkNofollow = 0x100;
+
+// statx(2) flags and the request/return mask. The values are the same on x86-64
+// and AArch64 (a fixed UAPI), so they are translated as-is. Only
+// AT_SYMLINK_NOFOLLOW is honoured among the flags; the mask is honoured by the
+// host, which fills exactly the fields the guest asked for.
+namespace statx {
+inline constexpr std::uint64_t kAtEmptyPath = 0x1000;
+inline constexpr std::uint64_t kBasicStats = 0x7ff; // STATX_BASIC_STATS
+} // namespace statx
+
+// Guest (x86-64) `struct statx` field offsets. Unlike `struct stat`, this
+// structure is built entirely from fixed-width `__u32`/`__u64` fields (the
+// kernel's UAPI forbids padding differences), so the layout is *identical* on
+// x86-64 and AArch64 and the host's bytes can be forwarded verbatim. The
+// offsets are recorded here so a test can assert them against the UAPI, and so
+// the writer is explicit rather than an unchecked struct copy.
+namespace guest_statx {
+inline constexpr std::size_t kSize = 256;         // sizeof(struct statx)
+inline constexpr std::size_t kOffMask = 0;        // __u32 stx_mask
+inline constexpr std::size_t kOffBlksize = 4;     // __u32 stx_blksize
+inline constexpr std::size_t kOffAttributes = 8;  // __u64 stx_attributes
+inline constexpr std::size_t kOffNlink = 16;      // __u32 stx_nlink
+inline constexpr std::size_t kOffUid = 20;        // __u32 stx_uid
+inline constexpr std::size_t kOffGid = 24;        // __u32 stx_gid
+inline constexpr std::size_t kOffMode = 28;       // __u16 stx_mode (+1 pad)
+inline constexpr std::size_t kOffIno = 32;        // __u64 stx_ino
+inline constexpr std::size_t kOffSize = 40;       // __u64 stx_size
+inline constexpr std::size_t kOffBlocks = 48;     // __u64 stx_blocks
+inline constexpr std::size_t kOffAttrmask = 56;   // __u64 stx_attributes_mask
+inline constexpr std::size_t kOffAtime = 64;      // struct statx_timestamp
+inline constexpr std::size_t kOffBtime = 80;      // struct statx_timestamp
+inline constexpr std::size_t kOffCtime = 96;      // struct statx_timestamp
+inline constexpr std::size_t kOffMtime = 112;     // struct statx_timestamp
+inline constexpr std::size_t kOffRdevMajor = 128; // __u32 stx_rdev_major
+inline constexpr std::size_t kOffRdevMinor = 132; // __u32 stx_rdev_minor
+inline constexpr std::size_t kOffDevMajor = 136;  // __u32 stx_dev_major
+inline constexpr std::size_t kOffDevMinor = 140;  // __u32 stx_dev_minor
+} // namespace guest_statx
 
 // Guest (x86-64) `struct stat` field offsets. The host layout differs on
 // AArch64, so fstat() builds the guest layout field by field rather than

@@ -5,6 +5,32 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 6, tenth syscall slice: `statx`(332)
+
+### Added
+- `statx(332)` in both tiers: the modern, extensible stat (950 calls in the
+  trace sample). `struct statx` is built only from fixed-width `__u32`/`__u64`
+  fields, so its layout is identical on x86-64 and AArch64 and the host's bytes
+  are copied into the guest verbatim (D-031); the handler issues `SYS_statx`
+  into a raw 256-byte buffer, so it depends on no host struct declaration.
+  `AT_FDCWD` only; `AT_SYMLINK_NOFOLLOW` the sole honoured flag, anything else
+  reported unimplemented.
+- Tests `statx_reports_a_real_file_in_the_guest_layout`,
+  `statx_missing_path_is_enoent`,
+  `statx_bad_buffer_is_efault_and_bad_pointer_is_efault`,
+  `statx_with_a_real_dirfd_is_unimplemented`,
+  `statx_unhandled_flag_is_unimplemented`, `statx_is_advertised_as_minimal`.
+- `docs/syscalls/inventory.tsv`: `statx` moved from `not-started` to
+  `implemented`; regenerated `docs/syscalls/U4.md`.
+
+### Changed
+- `DECISIONS.md` D-031 states the rule for forwarding a UAPI structure verbatim:
+  rebuild field by field only when the host and guest layouts differ (D-027);
+  when the UAPI fixes the widths, forward the bytes.
+- The syscall layer now implements 27 numbers across ten slices.
+
+---
+
 ## [Unreleased] — Phase 6, ninth syscall slice: `getdents64`(217)
 
 ### Added

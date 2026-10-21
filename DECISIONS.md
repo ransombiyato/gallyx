@@ -787,3 +787,30 @@ and `O_CLOEXEC`. glibc's `opendir` opens with `O_RDONLY|O_NONBLOCK|O_DIRECTORY|
 O_CLOEXEC`, so without this a directory could never be opened and `getdents64`
 would be unreachable. Flags still outside the set (`O_NOFOLLOW`, `O_PATH`, …)
 remain `-ENOSYS`.
+
+---
+
+## D-031 — `statx` forwards the host structure verbatim
+
+**Context.** `statx`(332) is the next-highest-frequency implementable syscall in
+the trace sample (950 calls) after `getdents64`. `struct stat` had to be rebuilt
+field by field because its layout differs between x86-64 and AArch64 (D-027).
+The question is whether `struct statx` has the same problem.
+
+**Decision.** It does not. `struct statx` is defined by the kernel's UAPI using
+only fixed-width `__u32`/`__u64` fields and `struct statx_timestamp` (`__s64`
+seconds, `__u32` nanoseconds), with explicit padding to a fixed 256-byte layout.
+There is no `long`/`time_t`-width difference to accommodate, so the layout is
+**identical on x86-64 and AArch64** and the host's bytes are copied into the
+guest verbatim — the same reasoning as `linux_dirent64` (D-030). The handler
+issues `SYS_statx` into a raw 256-byte buffer rather than declaring its own
+`struct statx`, so it does not depend on the host's headers either, and the guest
+offsets in `guest_statx` are asserted against the UAPI by the tests.
+
+**Consequences.** The guest sees exactly what the host kernel reports, including
+`stx_mask` (the host fills only the fields the guest requested). `AT_FDCWD` only,
+as with `openat`/`newfstatat`; `AT_SYMLINK_NOFOLLOW` is the sole honoured flag,
+and anything else (`AT_EMPTY_PATH`, …) is reported unimplemented rather than
+silently dropped. The rule this establishes: rebuild a structure field by field
+only when the host and guest layouts *differ*; when the UAPI fixes the width,
+forward the bytes and let the kernel supply the semantics.

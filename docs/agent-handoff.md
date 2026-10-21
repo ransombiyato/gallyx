@@ -66,7 +66,7 @@ held in callee-saved host registers, with a profitability guard that declines
 allocation on tiny blocks), but there is no cross-block allocation or spilling.
 The syscall layer exists and is a **partial slice**: `read`/`write`/`close`/
 `fstat`/`lseek`/`exit`/`exit_group`, `mmap`/`mprotect`/`munmap`/`brk`,
-`openat`, `newfstatat`, `access`, `readlink`, `readlinkat`, `getdents64`, and the process-identity getters
+`openat`, `newfstatat`, `access`, `readlink`, `readlinkat`, `getdents64`, `statx`, and the process-identity getters
 plus `getcwd`/`getrandom` are implemented, everything else returns `-ENOSYS`. `openat` is limited
 to `AT_FDCWD` and a bounded guest pathname, and it forwards to the host kernel —
 Hyperion is **not a sandbox** (SECURITY.md, DECISIONS.md D-025). The identity
@@ -188,10 +188,10 @@ the second (the guest address space plus `mmap`/`mprotect`/`munmap`/`brk`),
 the third (a guest descriptor table plus `read`/`close`/`lseek`),
 the fourth (`openat`/`fstat`), the fifth (the process-identity getters plus
 `getcwd`/`getrandom`), the sixth (`newfstatat`, glibc's stat entry point), and
-the seventh (`access`/`readlink`), the eighth (`readlinkat`), and the ninth
-(`getdents64`).
+the seventh (`access`/`readlink`), the eighth (`readlinkat`), the ninth
+(`getdents64`), and the tenth (`statx`).
 The next concrete step is the remaining U4/E1 syscalls a real program needs to
-start (`arch_prctl`, `statx`, `set_tid_address`),
+start (`arch_prctl`, `set_tid_address`, `rseq`),
 then memory operands in the code generator.** Guest state, the
 decoder, the reference interpreter, the subset contract (`COMPATIBILITY.md` §2),
 the hardware differential, the AArch64 encoder, executable memory,
@@ -298,11 +298,13 @@ and pass.
     forwarded verbatim (shared `linux_dirent64` layout, D-030); `openat` now
     honours `O_DIRECTORY`/`O_NONBLOCK`/`O_CLOEXEC` so `opendir` can open a
     directory. Six new tests (26 of 375 implemented).
-16. **Next (Phase 6): the remaining U4/E1 syscalls a real program needs to
+16. ~~Implement `statx`(332).~~ **Done & tested.** `struct statx` is all
+    fixed-width fields, so the host bytes are forwarded verbatim (D-030);
+    `AT_FDCWD` only. Six new tests (27 of 375 implemented).
+17. **Next (Phase 6): the remaining U4/E1 syscalls a real program needs to
     start.** `arch_prctl`(158) (FS/GS base — needed before glibc startup, and the
     one that needs a new `GuestState.fs_base` field), `set_tid_address`(218),
-    `rseq`(334), `prlimit64`(302) and `statx`(332) (its own field-by-field
-    layout). Reuse the `newfstatat`/`fstat` shared guest-`struct stat` builder
+    `rseq`(334) and `prlimit64`(302). Reuse the `newfstatat`/`fstat` shared guest-`struct stat` builder
     where applicable. Validate every guest buffer against the address space
     (`-EFAULT`), return `-EBADF`/`-ENOENT`/`-ENOSYS` as the kernel does, move each
     number's `status` in `docs/syscalls/inventory.tsv` to `implemented`,

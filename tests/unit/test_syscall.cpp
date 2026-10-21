@@ -1203,6 +1203,102 @@ HYPERION_TEST("syscall", "openat_accepts_the_directory_flags") {
     HYPERION_CHECK(static_cast<std::int64_t>(s.reg(Gpr::kRax)) >= 3);
 }
 
+// --- statx(332) (tenth slice) ----------------------------------------------
+
+// Read a 16-bit little-endian field from guest memory.
+std::uint16_t read_u16(FlatMemory& memory, std::uint64_t addr) {
+    std::uint8_t b[2];
+    HYPERION_CHECK(memory.read(addr, b, 2));
+    return static_cast<std::uint16_t>(b[0] | (static_cast<std::uint16_t>(b[1]) << 8));
+}
+
+HYPERION_TEST("syscall", "statx_reports_a_real_file_in_the_guest_layout") {
+    TempFile tf;
+    HYPERION_CHECK(tf.fd >= 0);
+    HYPERION_CHECK(::write(tf.fd, "hyperion\n", 9) == 9);
+
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, tf.path.c_str());
+
+    GuestState s =
+        syscall_state(hyperion::sysno::kStatx, {hyperion::kAtFdcwd, kBase + 0x400, 0,
+                                                hyperion::statx::kBasicStats, kBase + 0x800});
+    const hyperion::SyscallResult r = handler.handle(s, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), std::uint64_t{0});
+
+    // The size is the field a test can assert without a second stat source.
+    HYPERION_CHECK_EQ(read_u64(memory, kBase + 0x800 + hyperion::guest_statx::kOffSize),
+                      std::uint64_t{9});
+    // stx_mode is S_IFREG | 0600; the file-type bits must be S_IFREG.
+    HYPERION_CHECK_EQ(read_u16(memory, kBase + 0x800 + hyperion::guest_statx::kOffMode) & 0xF000,
+                      static_cast<std::uint16_t>(0x8000));
+}
+
+HYPERION_TEST("syscall", "statx_missing_path_is_enoent") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, "/no/such/hyperion/path");
+
+    GuestState s =
+        syscall_state(hyperion::sysno::kStatx, {hyperion::kAtFdcwd, kBase + 0x400, 0,
+                                                hyperion::statx::kBasicStats, kBase + 0x800});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnoent));
+}
+
+HYPERION_TEST("syscall", "statx_bad_buffer_is_efault_and_bad_pointer_is_efault") {
+    TempFile tf;
+    HYPERION_CHECK(tf.fd >= 0);
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, tf.path.c_str());
+
+    // A valid path but an unmapped destination buffer.
+    GuestState badbuf = syscall_state(hyperion::sysno::kStatx,
+                                      {hyperion::kAtFdcwd, kBase + 0x400, 0,
+                                       hyperion::statx::kBasicStats, kBase + kMemSize + 4096});
+    handler.handle(badbuf, memory);
+    HYPERION_CHECK_EQ(badbuf.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEfault));
+
+    // An unmapped pathname pointer.
+    GuestState badpath =
+        syscall_state(hyperion::sysno::kStatx, {hyperion::kAtFdcwd, 0xDEADBEEF0000ULL, 0,
+                                                hyperion::statx::kBasicStats, kBase + 0x800});
+    handler.handle(badpath, memory);
+    HYPERION_CHECK_EQ(badpath.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEfault));
+}
+
+HYPERION_TEST("syscall", "statx_with_a_real_dirfd_is_unimplemented") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, "/tmp");
+
+    GuestState s =
+        syscall_state(hyperion::sysno::kStatx,
+                      {3, kBase + 0x400, 0, hyperion::statx::kBasicStats, kBase + 0x800});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kUnimplemented);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnosys));
+}
+
+HYPERION_TEST("syscall", "statx_unhandled_flag_is_unimplemented") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, "/tmp");
+
+    // AT_EMPTY_PATH (0x1000) is outside the honoured set.
+    GuestState s = syscall_state(hyperion::sysno::kStatx,
+                                 {hyperion::kAtFdcwd, kBase + 0x400, hyperion::statx::kAtEmptyPath,
+                                  hyperion::statx::kBasicStats, kBase + 0x800});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kUnimplemented);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnosys));
+}
+
+HYPERION_TEST("syscall", "statx_is_advertised_as_minimal") {
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kStatx));
+}
+
 // --- Process-identity getters, getcwd, getrandom (fifth slice) -------------
 
 HYPERION_TEST("syscall", "identity_getters_forward_to_the_host") {

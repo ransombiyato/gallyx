@@ -484,6 +484,49 @@ std::int64_t do_newfstatat(GuestState& s, Memory& memory) {
     return write_guest_stat(memory, buf, st);
 }
 
+// statx(dirfd, pathname, flags, mask, statxbuf): the modern, extensible stat.
+// It reports a superset of `struct stat` in `struct statx`.
+//
+// Unlike `struct stat`, `struct statx` is built only from fixed-width
+// `__u32`/`__u64` fields (the kernel's UAPI forbids padding differences), so its
+// layout is identical on x86-64 and AArch64 and the host's bytes can be copied
+// into the guest verbatim — the same reasoning as `linux_dirent64` (D-030),
+// and the opposite of `struct stat` (D-027). `AT_FDCWD` only, as with
+// `openat`/`newfstatat`; an absolute pathname is resolved by the host
+// regardless of dirfd, which matches the kernel.
+std::int64_t do_statx(GuestState& s, Memory& memory) {
+    const std::int64_t dirfd = static_cast<std::int64_t>(arg(s, 0));
+    const std::uint64_t path_addr = arg(s, 1);
+    const std::uint64_t flags = arg(s, 2);
+    const std::uint64_t mask = arg(s, 3);
+    const std::uint64_t buf = arg(s, 4);
+
+    if (static_cast<std::uint64_t>(dirfd) != kAtFdcwd) {
+        return -kEnosys; // only AT_FDCWD is implemented
+    }
+    if ((flags & ~kAtSymlinkNofollow) != 0) {
+        return -kEnosys; // AT_EMPTY_PATH and friends are not implemented
+    }
+    std::string path;
+    const std::int64_t rc = read_guest_cstr(memory, path_addr, path);
+    if (rc != 0) {
+        return rc;
+    }
+    // The structure is 256 bytes of fixed-width fields; read it as raw bytes so
+    // the handler does not depend on the host's `struct statx` declaration, and
+    // the guest layout is exactly the offsets in guest_statx.
+    std::array<std::uint8_t, guest_statx::kSize> out{};
+    const long host_rc = ::syscall(SYS_statx, dirfd, path.c_str(), static_cast<int>(flags),
+                                   static_cast<unsigned>(mask), out.data());
+    if (host_rc != 0) {
+        return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+    }
+    if (!memory.write(buf, out.data(), out.size())) {
+        return -kEfault;
+    }
+    return 0;
+}
+
 // readlink(pathname, buf, bufsiz): copy a symlink's target into the guest
 // buffer. As readlink(2): the result is *not* NUL-terminated, a target longer
 // than bufsiz is silently truncated (not an error), and a zero bufsiz is
@@ -783,6 +826,14 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
         result.status = (r == -kEnosys) ? SyscallStatus::kUnimplemented : SyscallStatus::kHandled;
         return result;
     }
+    case sysno::kStatx: {
+        const std::int64_t r = do_statx(state, memory);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        // As newfstatat: a non-AT_FDCWD dirfd or an unhandled flag is reported
+        // unimplemented rather than as a handled call that happens to error.
+        result.status = (r == -kEnosys) ? SyscallStatus::kUnimplemented : SyscallStatus::kHandled;
+        return result;
+    }
     case sysno::kReadlink: {
         const std::int64_t r = do_readlink(state, memory);
         state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
@@ -908,7 +959,7 @@ bool is_minimal_syscall(std::uint64_t number) {
            number == sysno::kGetuid || number == sysno::kGeteuid || number == sysno::kGetgid ||
            number == sysno::kGetegid || number == sysno::kGetppid || number == sysno::kGetcwd ||
            number == sysno::kGetrandom || number == sysno::kReadlink || number == sysno::kAccess ||
-           number == sysno::kReadlinkat || number == sysno::kGetdents64;
+           number == sysno::kReadlinkat || number == sysno::kGetdents64 || number == sysno::kStatx;
 }
 
 } // namespace hyperion

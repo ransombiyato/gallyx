@@ -5,6 +5,24 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — guest address space resource bound
+
+### Fixed — guest-controlled `mmap` length could terminate the host process
+- `GuestAddressSpace` backed each mapping with host memory sized by the guest's
+  `mmap` `length`. An enormous request (`mmap(0, 1<<60, ...)`) reached
+  `std::vector::assign` with no handler on the path, so it either threw
+  `std::bad_alloc` (terminating the host process) or committed gigabytes —
+  both host failures driven by guest input (P0).
+- Added a per-mapping cap (`kDefaultMaxMapBytes`, 1 GiB, constructor-tunable)
+  checked before any allocation; an oversized request now returns `-ENOMEM`.
+  Every region backing allocation (image, anonymous, `brk` growth) is wrapped so
+  a genuine allocation failure also becomes a clean `-ENOMEM` instead of an
+  uncaught exception. Two new tests (`address_space.an_oversized_*`,
+  `syscall.mmap_oversized_request_is_enomem_not_a_host_termination`).
+  Documented in SECURITY.md R5 and DECISIONS.md D-029.
+
+---
+
 ## [Unreleased] — interpreter fetch-truncation fix
 
 ### Fixed — truncated instruction near a region end was silently mis-decoded

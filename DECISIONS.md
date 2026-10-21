@@ -724,3 +724,31 @@ inherits the `AT_FDCWD`-only boundary of D-025 and the "unimplemented is
 counted, never silent" rule. A dangling symlink is the test that pins the
 follow/no-follow distinction: `stat` returns `-ENOENT`, `AT_SYMLINK_NOFOLLOW`
 reports `S_IFLNK`.
+
+---
+
+## D-029 — The guest address space bounds and survives host allocations
+
+**Context.** Each guest mapping is backed by host memory sized by a
+guest-controlled value (`mmap`'s `length`). Two problems follow. First, an
+enormous request (`mmap(0, 1<<60, ...)`) either throws `std::bad_alloc` out of
+`std::vector::assign` — which, with no handler anywhere on the path, terminates
+the whole host process — or, if it happens to fit, commits gigabytes of host
+memory. Both are host-process failures driven by guest input, and neither is
+acceptable for a translator that must survive arbitrary guest code.
+
+**Decision.** (1) Add a per-mapping cap, `kDefaultMaxMapBytes` (1 GiB), checked
+in `map_anonymous` *before* allocating; an oversized request returns `nullopt`,
+which `do_mmap` reports as `-ENOMEM`. The cap is a constructor parameter so a
+test can lower it and a future configuration file can tune it. (2) Wrap every
+region backing allocation in a helper that catches `std::exception` and returns
+`nullopt`, so even an allocation that fails below the cap (host genuinely out of
+memory) becomes `-ENOMEM` rather than an uncaught exception. `map_image`,
+`map_anonymous` and the `brk` heap growth all use it.
+
+**Consequences.** A guest cannot terminate the host by asking for too much
+memory; it sees the same `-ENOMEM` a real kernel would return. The cap is
+per-mapping, not a total-address-space limit: many mappings under the cap can
+still sum large, and a total-commit limit remains open (Phase 10, SECURITY.md
+R5). `map_image` (the program loader) is not capped, because the image is
+supplied by the host harness, not the guest.

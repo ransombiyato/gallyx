@@ -219,3 +219,14 @@ HYPERION_TEST("address_space", "a_read_spanning_a_region_without_permission_fail
     std::uint8_t out[2] = {};
     HYPERION_CHECK(!as.read(*a + kPage - 1, out, 2)); // crosses into PROT_NONE
 }
+
+HYPERION_TEST("address_space", "an_oversized_anonymous_mapping_is_refused") {
+    // The backing store is host memory. A single mapping larger than the cap
+    // must be refused (nullopt -> ENOMEM) rather than driving an unbounded host
+    // allocation. Uses a tiny cap so the test never allocates anything large.
+    GuestAddressSpace as(/*mmap_base=*/0x7f0000000000ULL, /*heap_base=*/0x200000ULL,
+                         /*heap_capacity=*/1ULL << 20, /*max_map_bytes=*/64 * 1024);
+    HYPERION_CHECK(!as.map_anonymous(1024 * 1024, MemPerm::kRead | MemPerm::kWrite).has_value());
+    // A request at or below the cap still succeeds.
+    HYPERION_CHECK(as.map_anonymous(64 * 1024, MemPerm::kRead | MemPerm::kWrite).has_value());
+}

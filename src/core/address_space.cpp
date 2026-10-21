@@ -7,12 +7,25 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <limits>
 
 namespace hyperion {
 
 namespace {
 constexpr std::uint64_t kAlign = GuestAddressSpace::kPageSize;
+
+// Allocate a region's backing bytes. A guest-controlled size can be large
+// enough that the host allocation throws (std::bad_alloc / std::length_error);
+// the caller turns that into a clean "no memory" outcome rather than letting an
+// exception escape into the dispatcher and terminate the host process.
+std::optional<std::vector<std::uint8_t>> try_allocate_bytes(std::size_t count) {
+    try {
+        return std::vector<std::uint8_t>(count, 0);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
 } // namespace
 
 std::optional<std::uint64_t> GuestAddressSpace::page_align_up(std::uint64_t value) {
@@ -23,7 +36,8 @@ std::optional<std::uint64_t> GuestAddressSpace::page_align_up(std::uint64_t valu
 }
 
 GuestAddressSpace::GuestAddressSpace(std::uint64_t mmap_base, std::uint64_t heap_base,
-                                     std::uint64_t heap_capacity) {
+                                     std::uint64_t heap_capacity, std::size_t max_map_bytes)
+    : max_map_bytes_(max_map_bytes == 0 ? kDefaultMaxMapBytes : max_map_bytes) {
     mmap_cursor_ = mmap_base;
     heap_base_ = heap_base;
     heap_end_ = heap_base + heap_capacity;
@@ -74,7 +88,11 @@ bool GuestAddressSpace::map_image(std::uint64_t base, const void* data, std::siz
     region.base = base;
     region.size = *mapped_size;
     region.perm = perm;
-    region.bytes.assign(static_cast<std::size_t>(*mapped_size), 0);
+    auto bytes = try_allocate_bytes(static_cast<std::size_t>(*mapped_size));
+    if (!bytes) {
+        return false;
+    }
+    region.bytes = std::move(*bytes);
     if (data != nullptr && size > 0) {
         std::memcpy(region.bytes.data(), data, size);
     }
@@ -88,6 +106,13 @@ bool GuestAddressSpace::map_image(std::uint64_t base, const void* data, std::siz
 std::optional<std::uint64_t> GuestAddressSpace::map_anonymous(std::size_t size, MemPerm perm,
                                                               std::uint64_t hint) {
     if (size == 0) {
+        return std::nullopt;
+    }
+    // Refuse an oversized request up front. Without this, the backing
+    // allocation below would be sized by a guest-controlled value: a huge mmap
+    // would either throw and terminate the host process or commit gigabytes of
+    // host memory (see SECURITY.md).
+    if (size > max_map_bytes_) {
         return std::nullopt;
     }
     const auto mapped_size = page_align_up(size);
@@ -122,7 +147,11 @@ std::optional<std::uint64_t> GuestAddressSpace::map_anonymous(std::size_t size, 
     region.base = base;
     region.size = *mapped_size;
     region.perm = perm;
-    region.bytes.assign(static_cast<std::size_t>(*mapped_size), 0);
+    auto bytes = try_allocate_bytes(static_cast<std::size_t>(*mapped_size));
+    if (!bytes) {
+        return std::nullopt; // allocation failed: report "no memory", do not throw
+    }
+    region.bytes = std::move(*bytes);
     regions_.push_back(std::move(region));
     std::sort(regions_.begin(), regions_.end(),
               [](const Region& a, const Region& b) { return a.base < b.base; });
@@ -226,16 +255,24 @@ void GuestAddressSpace::ensure_heap_mapped(std::uint64_t upto) {
     if (idx >= 0) {
         Region& heap = regions_[static_cast<std::size_t>(idx)];
         if (heap.base == heap_base_ && heap.end() < *aligned) {
-            heap.bytes.resize(static_cast<std::size_t>(*aligned - heap.base), 0);
+            auto bytes = try_allocate_bytes(static_cast<std::size_t>(*aligned - heap.base));
+            if (!bytes) {
+                return; // growth failed: leave the break where it was
+            }
+            heap.bytes = std::move(*bytes);
             heap.size = *aligned - heap.base;
         }
+        return;
+    }
+    auto bytes = try_allocate_bytes(static_cast<std::size_t>(*aligned - heap_base_));
+    if (!bytes) {
         return;
     }
     Region heap;
     heap.base = heap_base_;
     heap.size = *aligned - heap_base_;
     heap.perm = MemPerm::kRead | MemPerm::kWrite;
-    heap.bytes.assign(static_cast<std::size_t>(heap.size), 0);
+    heap.bytes = std::move(*bytes);
     regions_.push_back(std::move(heap));
     std::sort(regions_.begin(), regions_.end(),
               [](const Region& a, const Region& b) { return a.base < b.base; });

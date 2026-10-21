@@ -58,9 +58,17 @@ public:
     // `mmap_base` is the first address the anonymous-mapping allocator will
     // consider; `heap_base`/`heap_capacity` reserve the brk area. These are
     // abstract guest addresses, chosen to be disjoint from typical image bases.
+    //
+    // `max_map_bytes` bounds a single mapping's size. It exists because the
+    // backing store is host memory: a guest that asks for an enormous
+    // anonymous mapping must be refused with ENOMEM rather than driving a
+    // host-side allocation (see SECURITY.md). The default is generous for
+    // ordinary programs but far below what would exhaust a small device.
+    static constexpr std::size_t kDefaultMaxMapBytes = 1ULL << 30; // 1 GiB
     explicit GuestAddressSpace(std::uint64_t mmap_base = 0x7f0000000000ULL,
                                std::uint64_t heap_base = 0x200000ULL,
-                               std::uint64_t heap_capacity = 1ULL << 20);
+                               std::uint64_t heap_capacity = 1ULL << 20,
+                               std::size_t max_map_bytes = kDefaultMaxMapBytes);
 
     // Map the program image at `base` (page-aligned) with the given
     // permissions and copy `size` bytes of `data` into it. Returns false if the
@@ -133,6 +141,7 @@ private:
     std::uint64_t heap_base_ = 0;
     std::uint64_t heap_end_ = 0; // exclusive end of the reserved heap area
     std::uint64_t brk_ = 0;
+    std::size_t max_map_bytes_ = kDefaultMaxMapBytes;
 };
 
 } // namespace hyperion

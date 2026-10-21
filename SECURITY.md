@@ -67,7 +67,18 @@ executable at once (D-010).
 ### R5 — Bounded resources
 Code caches, translation tables and decoded-block storage have explicit bounds
 or eviction policies, so a hostile guest cannot force unbounded host memory
-growth. Resource limits are tested in Phase 10.
+growth.
+
+The guest address space is the other place where a guest-controlled size reaches
+a host allocation: `mmap`'s length is chosen by the guest, and each mapping is
+backed by host memory. A per-mapping cap (`GuestAddressSpace::kDefaultMaxMapBytes`,
+1 GiB by default, configurable) refuses an oversized request with `-ENOMEM`
+*before* any allocation is attempted, and every backing allocation is wrapped so
+that a failed `std::bad_alloc` becomes a clean `-ENOMEM` rather than an
+uncaught exception that terminates the host process (D-029). The per-mapping cap
+bounds a single request but not the *total* address-space size (many mappings
+could still sum large); a total-commit limit is tracked as Phase 10 work.
+Resource limits are tested in Phase 10.
 
 ### R6 — No secrets in the repository
 No tokens, keys or credentials are committed. `.gitignore` excludes local

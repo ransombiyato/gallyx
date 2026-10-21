@@ -289,6 +289,24 @@ HYPERION_TEST("syscall", "mmap_zero_length_is_einval") {
     HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEinval));
 }
 
+HYPERION_TEST("syscall", "mmap_oversized_request_is_enomem_not_a_host_termination") {
+    // Security regression: the mapping's backing store is host memory sized by
+    // a guest-controlled value. An enormous anonymous mmap must be refused with
+    // -ENOMEM, not allowed to throw std::bad_alloc (which would terminate the
+    // host process) or commit gigabytes.
+    GuestAddressSpace as;
+    MinimalSyscallHandler handler({}, &as);
+    FlatMemory memory(kBase, kMemSize);
+    const std::uint64_t huge = 1ULL << 60; // far beyond the per-mapping cap
+    GuestState s = syscall_state(
+        hyperion::sysno::kMmap,
+        {0, huge, hyperion::mmap_flags::kProtRead | hyperion::mmap_flags::kProtWrite,
+         hyperion::mmap_flags::kMapPrivate | hyperion::mmap_flags::kMapAnonymous, 0, 0});
+    const auto r = handler.handle(s, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kHandled); // handled, with a negative errno
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnomem));
+}
+
 HYPERION_TEST("syscall", "mmap_file_backed_is_enosys_not_a_wrong_mapping") {
     GuestAddressSpace as;
     MinimalSyscallHandler handler({}, &as);

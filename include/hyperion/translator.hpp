@@ -94,22 +94,29 @@ struct BlockTranslation {
     bool ok() const { return error == TranslateError::kNone; }
 };
 
+// Two-register return payload (`x0` = BlockResult, `x1` = executions retired)
+// used when `translate_block(..., /*enable_self_loop=*/true)` runs inside
+// `TranslationCache`. In AAPCS64 §6.8.2 a 16-byte struct of two `uint64_t`s is
+// returned directly in `(x0, x1)`, remaining ABI-compatible with single-run
+// blocks while avoiding memory indirection on loop return.
+struct RawBlockReturn {
+    std::uint64_t status;
+    std::uint64_t runs;
+};
+
 // Translate a basic block starting at `instruction.address` in `code`, whose
 // first instruction has already been decoded. Decoding continues until a
 // terminator (JMP/Jcc/HLT/RET), an instruction outside the translated subset
 // (the block is cut *before* it), or the end of `size` bytes.
 //
-// A block that hits an unsupported instruction still returns ok() with a valid
-// block: the block covers only the supported prefix and its exit is
-// kFallThrough, so the dispatcher can detect the unsupported PC on the next
-// lookup and stop cleanly. This is what makes "do not silently execute
-// incorrect code" true at the program level.
-//
-// For kJcc the block evaluates the x86 condition from the modelled flags and
-// writes the correct next rip itself, so `BlockResult` alone is enough to know
-// whether the program halted.
+// When `enable_self_loop` is true, generated code accepts `(GuestState* state,
+// uint64_t max_runs)` in `(x0, x1)` and returns `RawBlockReturn` in `(x0, x1)`,
+// keeping tight single-block backedges (`Jcc` targeting `first.address`) inside
+// host registers for up to `max_runs` iterations with cold-path exit flag
+// materialisation. When `enable_self_loop` is false (default), generated code
+// uses the standalone `BlockResult (*)(GuestState*)` 1-argument signature.
 BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
-                                 const Instruction& first);
+                                 const Instruction& first, bool enable_self_loop = false);
 
 // Translate one decoded x86-64 instruction into a self-contained AArch64 block
 // with the signature `BlockResult block(GuestState*)`. The block reads and

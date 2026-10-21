@@ -47,6 +47,14 @@ GuestAddressSpace::GuestAddressSpace(std::uint64_t mmap_base, std::uint64_t heap
 }
 
 long GuestAddressSpace::find_region(std::uint64_t address) const {
+    // Fast path: guest stack/code/data accesses demonstrate strong spatial and
+    // temporal locality, so check the most recently matched region first.
+    if (mru_index_ < regions_.size()) {
+        const Region& cached = regions_[mru_index_];
+        if (address >= cached.base && address < cached.end()) {
+            return static_cast<long>(mru_index_);
+        }
+    }
     // Regions are sorted by base and non-overlapping; binary search for the last
     // region whose base is <= address.
     const auto it =
@@ -57,7 +65,11 @@ long GuestAddressSpace::find_region(std::uint64_t address) const {
     }
     const long index = static_cast<long>(std::distance(regions_.begin(), it)) - 1;
     const Region& r = regions_[static_cast<std::size_t>(index)];
-    return (address < r.end()) ? index : -1;
+    if (address < r.end()) {
+        mru_index_ = static_cast<std::size_t>(index);
+        return index;
+    }
+    return -1;
 }
 
 bool GuestAddressSpace::split_region_at(std::uint64_t boundary) {
@@ -411,6 +423,9 @@ bool GuestAddressSpace::access(std::uint64_t address, std::uint8_t* buf, std::si
         const std::size_t n = static_cast<std::size_t>(stop - cursor);
         if (is_write) {
             std::memcpy(r.bytes.data() + offset, buf + (cursor - address), n);
+            if (has_perm(r.perm, MemPerm::kExec)) {
+                ++code_epoch_;
+            }
         } else {
             std::memcpy(buf + (cursor - address), r.bytes.data() + offset, n);
         }

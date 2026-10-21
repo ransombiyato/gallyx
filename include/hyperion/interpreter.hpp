@@ -52,6 +52,7 @@ public:
 
     bool read(std::uint64_t address, std::uint8_t* out, std::size_t count) override;
     bool write(std::uint64_t address, const std::uint8_t* in, std::size_t count) override;
+    std::uint64_t code_epoch() const noexcept override { return epoch_; }
 
     std::uint64_t base() const { return base_; }
     std::size_t size() const { return bytes_.size(); }
@@ -65,6 +66,7 @@ private:
 
     std::uint64_t base_;
     std::vector<std::uint8_t> bytes_;
+    std::uint64_t epoch_ = 1;
 };
 
 enum class StepStatus : std::uint8_t {

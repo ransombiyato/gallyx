@@ -128,4 +128,93 @@ bool ExecMem::executable_supported() {
 #endif
 }
 
+ExecArena::ExecArena(std::size_t slab_bytes)
+    : slab_bytes_(round_up(slab_bytes == 0 ? 4096 : slab_bytes, page_size())) {}
+
+ExecArena::~ExecArena() {
+    for (std::size_t i = 0; i < slab_count_; ++i) {
+        if (slabs_[i].base != nullptr) {
+            ::munmap(slabs_[i].base, slabs_[i].capacity);
+        }
+    }
+    delete[] slabs_;
+}
+
+void ExecArena::reset() noexcept {
+    for (std::size_t i = 1; i < slab_count_; ++i) {
+        if (slabs_[i].base != nullptr) {
+            ::munmap(slabs_[i].base, slabs_[i].capacity);
+            slabs_[i] = Slab{};
+        }
+    }
+    if (slab_count_ > 0) {
+        slabs_[0].used = 0;
+        slab_count_ = 1;
+    }
+}
+
+void* ExecArena::allocate(const std::uint8_t* code, std::size_t size) {
+    if (size == 0) {
+        throw std::invalid_argument("ExecArena: zero-sized allocation");
+    }
+    const std::size_t aligned_size = round_up(size, 4);
+    const std::size_t ps = page_size();
+
+    Slab* target = nullptr;
+    if (slab_count_ > 0) {
+        Slab& cur = slabs_[slab_count_ - 1];
+        if (aligned_size <= cur.capacity - cur.used) {
+            target = &cur;
+        }
+    }
+
+    if (target == nullptr) {
+        const std::size_t cap =
+            round_up(aligned_size > slab_bytes_ ? aligned_size : slab_bytes_, ps);
+        void* p = ::mmap(nullptr, cap, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) {
+            // Systems with strict PaX/SELinux policies allow RW -> RX via mprotect.
+            p = ::mmap(nullptr, cap, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED) {
+                throw std::runtime_error("ExecArena: mmap failed");
+            }
+            if (::mprotect(p, cap, PROT_READ | PROT_EXEC) != 0) {
+                ::munmap(p, cap);
+                throw std::runtime_error("ExecArena: mprotect(RX) failed");
+            }
+        }
+        if (slab_count_ == slab_cap_) {
+            const std::size_t next_cap = slab_cap_ == 0 ? 4 : slab_cap_ * 2;
+            auto* grown = new Slab[next_cap];
+            for (std::size_t i = 0; i < slab_count_; ++i) {
+                grown[i] = slabs_[i];
+            }
+            delete[] slabs_;
+            slabs_ = grown;
+            slab_cap_ = next_cap;
+        }
+        slabs_[slab_count_] = Slab{static_cast<std::uint8_t*>(p), cap, 0};
+        target = &slabs_[slab_count_++];
+    }
+
+    const std::size_t start_off = target->used;
+    const std::size_t end_off = start_off + aligned_size;
+    const std::size_t page_lo = (start_off / ps) * ps;
+    const std::size_t page_hi = round_up(end_off, ps);
+    const std::size_t span = page_hi - page_lo;
+
+    // Enforce strict W^X: toggle touched page(s) RW while copying, then RX.
+    if (::mprotect(target->base + page_lo, span, PROT_READ | PROT_WRITE) != 0) {
+        throw std::runtime_error("ExecArena: mprotect(RW) failed");
+    }
+    std::uint8_t* dst = target->base + start_off;
+    std::memcpy(dst, code, size);
+    if (::mprotect(target->base + page_lo, span, PROT_READ | PROT_EXEC) != 0) {
+        throw std::runtime_error("ExecArena: mprotect(RX) failed");
+    }
+    __builtin___clear_cache(reinterpret_cast<char*>(dst), reinterpret_cast<char*>(dst + size));
+    target->used = end_off;
+    return dst;
+}
+
 } // namespace hyperion

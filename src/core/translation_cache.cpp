@@ -12,7 +12,7 @@ namespace hyperion {
 
 namespace {
 
-using BlockFn = BlockResult (*)(GuestState*);
+using CachedBlockFn = RawBlockReturn (*)(GuestState*, std::uint64_t);
 
 // Guest code is fetched in bounded windows. A block longer than the window is
 // simply cut at the window boundary (a fall-through), which is correct: the
@@ -46,7 +46,11 @@ const CachedBlock* TranslationCache::lookup(std::uint64_t pc) {
     }
     ++dispatch_misses_;
     const auto it = blocks_.find(pc);
-    return it == blocks_.end() ? nullptr : it->second.get();
+    if (it == blocks_.end()) {
+        return nullptr;
+    }
+    direct_[pc & kDirectMask] = it->second.get();
+    return it->second.get();
 }
 
 void TranslationCache::install(const CachedBlock* block) {
@@ -56,6 +60,7 @@ void TranslationCache::install(const CachedBlock* block) {
 void TranslationCache::invalidate_all() {
     blocks_.clear();
     std::fill(direct_.begin(), direct_.end(), nullptr);
+    arena_.reset();
 }
 
 const CachedBlock* TranslationCache::translate_at(Memory& memory, std::uint64_t pc,
@@ -82,16 +87,14 @@ const CachedBlock* TranslationCache::translate_at(Memory& memory, std::uint64_t 
     }
 
     const BlockTranslation translated =
-        translate_block(fetch_.data(), available, decoded.instruction);
+        translate_block(fetch_.data(), available, decoded.instruction, /*enable_self_loop=*/true);
     if (!translated.ok() || translated.code.empty()) {
         failure = TranslateFailure::kUnsupported;
         return nullptr;
     }
 
     auto block = std::make_unique<CachedBlock>();
-    block->memory = std::make_unique<ExecMem>(translated.code.size());
-    block->memory->write(0, translated.code.data(), translated.code.size());
-    block->memory->finalize();
+    block->entry = arena_.allocate(translated.code.data(), translated.code.size());
     block->exit = translated.exit;
     block->start = pc;
     block->target = translated.target;
@@ -130,47 +133,72 @@ RunResult TranslationCache::run(Memory& memory, GuestState state, std::uint64_t 
     cached_epoch_ = entry_epoch;
 
     std::uint64_t steps = 0;
+    const CachedBlock* prev_block = nullptr;
     while (true) {
         const std::uint64_t pc = out.state.rip;
-        TranslateFailure failure = TranslateFailure::kNone;
-        const CachedBlock* block = translate_at(memory, pc, failure);
-        if (block == nullptr) {
-            if (failure == TranslateFailure::kFault) {
-                out.status = RunStatus::kFault;
-                out.message = "instruction fetch fault at rip";
-            } else {
-                out.status = RunStatus::kUnsupported;
-                out.message = "unsupported instruction at pc=0x" + std::to_string(pc);
+        const CachedBlock* block = nullptr;
+
+        // Direct 2-way block chaining fast path across multi-block control flow.
+        if (prev_block != nullptr) {
+            if (prev_block->chain_block0 != nullptr && prev_block->chain_pc0 == pc) {
+                block = prev_block->chain_block0;
+                ++dispatch_hits_;
+            } else if (prev_block->chain_block1 != nullptr && prev_block->chain_pc1 == pc) {
+                block = prev_block->chain_block1;
+                ++dispatch_hits_;
             }
-            out.steps = steps;
-            return out;
         }
 
-        // max_steps is a hard bound on guest instructions executed. A block is
-        // indivisible, so a block that cannot fit in the remaining budget is not
-        // started at all. This means a step-limited run may stop a little short
-        // of the limit and can report fewer steps than the interpreter (which
-        // steps one instruction at a time), but it never exceeds the bound.
-        if (block->guest_instruction_count > max_steps - steps) {
+        if (block == nullptr) {
+            TranslateFailure failure = TranslateFailure::kNone;
+            block = translate_at(memory, pc, failure);
+            if (block == nullptr) {
+                if (failure == TranslateFailure::kFault) {
+                    out.status = RunStatus::kFault;
+                    out.message = "instruction fetch fault at rip";
+                } else {
+                    out.status = RunStatus::kUnsupported;
+                    out.message = "unsupported instruction at pc=0x" + std::to_string(pc);
+                }
+                out.steps = steps;
+                return out;
+            }
+            if (prev_block != nullptr) {
+                if (prev_block->chain_block0 == nullptr) {
+                    prev_block->chain_pc0 = pc;
+                    prev_block->chain_block0 = block;
+                } else if (prev_block->chain_block1 == nullptr) {
+                    prev_block->chain_pc1 = pc;
+                    prev_block->chain_block1 = block;
+                }
+            }
+        }
+
+        const std::uint64_t remaining = max_steps - steps;
+        if (block->guest_instruction_count > remaining) {
             out.status = RunStatus::kStepLimit;
             out.message = "step limit reached without halting";
             out.steps = steps;
             return out;
         }
 
-        const BlockFn fn = reinterpret_cast<BlockFn>(block->memory->entry());
-        const BlockResult result = fn(&out.state);
-        steps += block->guest_instruction_count;
+        const std::uint64_t max_runs = remaining / block->guest_instruction_count;
+        const auto fn = reinterpret_cast<CachedBlockFn>(block->entry);
+        const RawBlockReturn ret = fn(&out.state, max_runs);
+        const auto status = static_cast<BlockResult>(ret.status);
+        const std::uint64_t runs = ret.runs;
+        steps += runs * block->guest_instruction_count;
+        if (runs > 1) {
+            dispatch_hits_ += (runs - 1);
+        }
 
-        if (result == BlockResult::kHalted) {
+        if (status == BlockResult::kHalted) {
             out.status = RunStatus::kOk;
             out.steps = steps;
             return out;
         }
-        if (result == BlockResult::kSyscall) {
-            // The block advanced rip past the instruction and stopped. Run the
-            // handler here, in the dispatcher, where the Memory object and the
-            // handler are available; generated code cannot call back into C++.
+        if (status == BlockResult::kSyscall) {
+            prev_block = nullptr;
             if (syscalls == nullptr) {
                 out.status = RunStatus::kUnsupported;
                 out.message = "syscall encountered with no handler";
@@ -194,9 +222,9 @@ RunResult TranslationCache::run(Memory& memory, GuestState state, std::uint64_t 
             if (sr.status == SyscallStatus::kUnimplemented) {
                 ++out.unimplemented_syscalls;
             }
-            continue; // resume at the (already advanced) rip
+            continue;
         }
-        // Otherwise the block wrote the next PC into out.state.rip; loop.
+        prev_block = block;
     }
 }
 

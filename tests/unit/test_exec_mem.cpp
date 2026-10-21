@@ -143,3 +143,15 @@ HYPERION_TEST("exec_mem", "runs_generated_loop") {
     HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
 #endif
 }
+
+HYPERION_TEST("exec_mem", "arena_allocates_multiple_wx_blocks_and_reuses_on_reset") {
+    hyperion::ExecArena arena(4096);
+    const std::uint8_t dummy[8] = {0x1F, 0x20, 0x03, 0xD5, 0xC0, 0x03, 0x5F, 0xD6}; // nop; ret
+    void* a = arena.allocate(dummy, sizeof(dummy));
+    void* b = arena.allocate(dummy, sizeof(dummy));
+    HYPERION_CHECK(a != nullptr && b != nullptr);
+    HYPERION_CHECK(a != b);
+    arena.reset();
+    void* c = arena.allocate(dummy, sizeof(dummy));
+    HYPERION_CHECK(c == a);
+}

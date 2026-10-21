@@ -142,9 +142,8 @@ void emit_parity(a64::Encoder& e, a64::Reg dst, a64::Reg src) {
     e.eor_shifted(a64::Width::k32, dst, src, src, a64::Shift::kLsr, 4); // b7..b4 ^ b3..b0
     e.eor_shifted(a64::Width::k32, dst, dst, dst, a64::Shift::kLsr, 2);
     e.eor_shifted(a64::Width::k32, dst, dst, dst, a64::Shift::kLsr, 1);
-    e.ubfx(a64::Width::k32, dst, dst, 0, 1); // low bit = XOR of the eight bits
-    e.movz(a64::Width::k32, kT3, 1);
-    e.eor(a64::Width::k32, dst, dst, kT3); // PF = 1 - parity_bit
+    e.mvn(a64::Width::k32, dst, dst);        // ~parity_bit (leaves NZCV untouched)
+    e.ubfx(a64::Width::k32, dst, dst, 0, 1); // PF = (~parity_bit) & 1
 }
 
 // --- Flag liveness ----------------------------------------------------------
@@ -320,15 +319,14 @@ void emit_flags_logical(a64::Encoder& e, a64::Width w, std::uint8_t mask, a64::R
         e.strb(kT1, kState, kSfOffset);
     }
     if (mask & (kFbCf | kFbOf | kFbAf)) {
-        e.movz(a64::Width::k32, kT1, 0);
         if (mask & kFbCf) {
-            e.strb(kT1, kState, kCfOffset);
+            e.strb(a64::kXzr, kState, kCfOffset);
         }
         if (mask & kFbOf) {
-            e.strb(kT1, kState, kOfOffset);
+            e.strb(a64::kXzr, kState, kOfOffset);
         }
         if (mask & kFbAf) {
-            e.strb(kT1, kState, kAfOffset);
+            e.strb(a64::kXzr, kState, kAfOffset);
         }
     }
     if (mask & kFbPf) {
@@ -377,7 +375,8 @@ TranslateError load_source(a64::Encoder& e, const Operand& src, a64::Reg dst, in
     return TranslateError::kInternal;
 }
 
-void emit_return(a64::Encoder& e, BlockResult result, const RegAlloc* ra = nullptr) {
+void emit_return(a64::Encoder& e, BlockResult result, const RegAlloc* ra = nullptr,
+                 bool set_single_run = false) {
     if (ra != nullptr) {
         // Spill every allocated guest register back to its GuestState slot.
         // Spills are individual stores: two allocated host registers are not
@@ -396,6 +395,9 @@ void emit_return(a64::Encoder& e, BlockResult result, const RegAlloc* ra = nullp
         for (std::size_t i = npairs; i > 0; --i) {
             e.ldp_post(ra->allocated[2 * i - 2], ra->allocated[2 * i - 1], 31, 16);
         }
+    }
+    if (set_single_run) {
+        e.movz(a64::Width::k64, 1, 1);
     }
     e.movz(a64::Width::k64, 0, static_cast<std::uint16_t>(result));
     e.ret();
@@ -426,6 +428,82 @@ void emit_set_rip(a64::Encoder& e, std::uint64_t value) {
 // Emit `rip = instruction.address + instruction.length`.
 void emit_advance_rip(a64::Encoder& e, const Instruction& insn) {
     emit_set_rip(e, insn.address + insn.length);
+}
+
+constexpr a64::Cond invert_cond(a64::Cond c) noexcept {
+    return static_cast<a64::Cond>(static_cast<std::uint8_t>(c) ^ 1u);
+}
+
+// Map an x86-64 Jcc condition directly to an AArch64 hardware NZCV condition
+// code set by an immediately preceding flag-setting arithmetic instruction
+// (`ADDS` for ADD/INC; `SUBS` for SUB/CMP/DEC). Returns false when no direct
+// hardware condition holds (e.g. PF, or CF read after INC/DEC, or BE/A after
+// ADD where `C || Z` is not a single ARMv8 condition).
+bool try_nzcv_cond(Opcode prev_op, Condition cond, a64::Cond& out) noexcept {
+    if (prev_op != Opcode::kAdd && prev_op != Opcode::kSub && prev_op != Opcode::kCmp &&
+        prev_op != Opcode::kInc && prev_op != Opcode::kDec) {
+        return false;
+    }
+    const std::uint8_t req = condition_flags(cond);
+    if ((flags_written(prev_op) & req) != req) {
+        return false; // e.g. JB/JBE after INC/DEC where CF comes from earlier
+    }
+    const bool is_sub =
+        (prev_op == Opcode::kSub || prev_op == Opcode::kCmp || prev_op == Opcode::kDec);
+    switch (cond) {
+    case Condition::kO:
+        out = a64::Cond::kVs;
+        return true;
+    case Condition::kNo:
+        out = a64::Cond::kVc;
+        return true;
+    case Condition::kE:
+        out = a64::Cond::kEq;
+        return true;
+    case Condition::kNe:
+        out = a64::Cond::kNe;
+        return true;
+    case Condition::kS:
+        out = a64::Cond::kMi;
+        return true;
+    case Condition::kNs:
+        out = a64::Cond::kPl;
+        return true;
+    case Condition::kL:
+        out = a64::Cond::kLt;
+        return true;
+    case Condition::kGe:
+        out = a64::Cond::kGe;
+        return true;
+    case Condition::kLe:
+        out = a64::Cond::kLe;
+        return true;
+    case Condition::kG:
+        out = a64::Cond::kGt;
+        return true;
+    case Condition::kB:
+        out = is_sub ? a64::Cond::kCc : a64::Cond::kCs;
+        return true;
+    case Condition::kAe:
+        out = is_sub ? a64::Cond::kCs : a64::Cond::kCc;
+        return true;
+    case Condition::kBe:
+        if (!is_sub) {
+            return false;
+        }
+        out = a64::Cond::kLs;
+        return true;
+    case Condition::kA:
+        if (!is_sub) {
+            return false;
+        }
+        out = a64::Cond::kHi;
+        return true;
+    case Condition::kP:
+    case Condition::kNp:
+        return false;
+    }
+    return false;
 }
 
 // Branch to `taken` if the x86 condition `c` holds for the modelled flags in
@@ -652,27 +730,32 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
             }
         } else if (imm_folded) {
             const auto imm_nibble = static_cast<std::uint32_t>(imm_value & 0xFULL);
-            if ((mask & kFbAf) != 0 && imm_nibble != 0) {
-                // Capture old (a & 0xF) before R may overwrite A in place.
-                e.ubfx(a64::Width::k32, kT2, A, 0, 4);
+            a64::Reg prev_a = A;
+            if ((mask & kFbAf) != 0 && imm_nibble != 0 && R == A) {
+                e.mov_reg(a64::Width::k64, kT2, A);
+                prev_a = kT2;
             }
             if (is_sub) {
                 e.subs_imm(w, R, A, imm12, shift12);
             } else {
                 e.adds_imm(w, R, A, imm12, shift12);
             }
-            const auto non_af_mask = static_cast<std::uint8_t>(mask & ~kFbAf);
-            if (non_af_mask != 0) {
-                emit_flags_from_nzcv(e, is_sub, non_af_mask, kT2, R);
-            }
             if ((mask & kFbAf) != 0) {
                 if (imm_nibble == 0) {
                     e.strb(a64::kXzr, kState, kAfOffset);
                 } else {
-                    e.cmp_imm(a64::Width::k32, kT2, is_sub ? imm_nibble : (16u - imm_nibble));
-                    e.cset(a64::Width::k32, kT2, is_sub ? a64::Cond::kCc : a64::Cond::kCs);
+                    // AF == ((a ^ imm ^ r) >> 4) & 1; EOR/MVN/UBFX preserve NZCV!
+                    e.eor(a64::Width::k64, kT2, prev_a, R);
+                    if ((imm_value & 0x10ULL) != 0) {
+                        e.mvn(a64::Width::k32, kT2, kT2);
+                    }
+                    e.ubfx(a64::Width::k32, kT2, kT2, 4, 1);
                     e.strb(kT2, kState, kAfOffset);
                 }
+            }
+            const auto non_af_mask = static_cast<std::uint8_t>(mask & ~kFbAf);
+            if (non_af_mask != 0) {
+                emit_flags_from_nzcv(e, is_sub, non_af_mask, kT2, R);
             }
         } else {
             if (mask & kFbAf) {
@@ -706,32 +789,32 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
 
     case Opcode::kInc:
     case Opcode::kDec: {
-        // INC/DEC are ADD/SUB of 1, except that CF is preserved. flags_written()
-        // excludes CF for these, so CF is never stored and its old value stands;
-        // no explicit save/restore is needed. As with the ALU ops, operate
-        // directly on the allocated host register when there is one.
+        // INC/DEC are ADD/SUB of immediate #1 with CF preserved. Using
+        // ADDS_IMM/SUBS_IMM #1 avoids materialising 1 in a register and leaves
+        // hardware NZCV valid for direct fusion with a following Jcc.
         const a64::Reg A =
             (ra != nullptr && ra->mapped(insn.dst.reg)) ? ra->host(insn.dst.reg) : kA;
         if (A == kA) {
             load_gpr(e, insn.dst.reg, kA);
         }
-        e.movz(a64::Width::k32, kB, 1);
         const bool is_sub = insn.opcode == Opcode::kDec;
         const std::uint8_t mask =
             static_cast<std::uint8_t>(flags_written(insn.opcode) & live_flags);
         const a64::Reg R =
             (ra != nullptr && ra->mapped(insn.dst.reg)) ? ra->host(insn.dst.reg) : kR;
-        if (mask & kFbAf) {
-            e.eor(a64::Width::k64, kT2, A, kB);
+        a64::Reg prev_a = A;
+        if ((mask & kFbAf) != 0 && R == A) {
+            e.mov_reg(a64::Width::k64, kT2, A);
+            prev_a = kT2;
         }
         if (is_sub) {
-            e.subs(w, R, A, kB);
+            e.subs_imm(w, R, A, 1);
         } else {
-            e.adds(w, R, A, kB);
+            e.adds_imm(w, R, A, 1);
         }
         if (mask != 0) {
             if (mask & kFbAf) {
-                e.eor(a64::Width::k64, kT2, kT2, R);
+                e.eor(a64::Width::k64, kT2, prev_a, R);
             }
             emit_flags_from_nzcv(e, is_sub, mask, kT2, R);
         }
@@ -848,7 +931,7 @@ Translation translate_instruction(const Instruction& insn) {
 }
 
 BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
-                                 const Instruction& first) {
+                                 const Instruction& first, bool enable_self_loop) {
     BlockTranslation out;
 
     // Pass 1: decode the block into a straight-line list of instructions. This
@@ -1010,52 +1093,214 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
     // at its exit. See BENCHMARKS.md §4.2.2.
     a64::Encoder e;
     e.mov_reg(a64::Width::k64, kState, 0); // x8 = GuestState*
-    // Save the callee-saved host registers this block borrows and load the
-    // allocated guest registers into them. Empty (no code) when nothing is
-    // allocated, which keeps the previous lowering byte-for-byte.
+
+    // Detect tight single-block loops (`steps[0..m-2]` followed by `Jcc` back to
+    // `first.address`) where `steps[m-2]` directly drives hardware NZCV. When
+    // `enable_self_loop` is set by `TranslationCache`, the entire loop executes
+    // natively inside AArch64 registers for up to `max_runs` (`x1`) iterations
+    // and materialises all architectural exit flags once on the cold exit path.
+    a64::Cond self_loop_taken_cond = a64::Cond::kAl;
+    const bool use_self_loop = enable_self_loop && steps.size() >= 2 && exit == BlockExit::kJcc &&
+                               steps.back().insn.dst.imm == first.address &&
+                               try_nzcv_cond(steps[steps.size() - 2].insn.opcode,
+                                             steps.back().insn.condition, self_loop_taken_cond);
+
+    if (use_self_loop) {
+        constexpr a64::Reg kLoopA = 2;
+        constexpr a64::Reg kLoopB = 3;
+        constexpr a64::Reg kLoopRes = 4;
+        constexpr a64::Reg kLoopRem = 7;
+
+        // `x1` holds `max_runs` (>= 1) untouched across the loop; `x7` counts down.
+        e.mov_reg(a64::Width::k64, kLoopRem, 1);
+        emit_prologue(e, ra);
+
+        const a64::Label loop_top = e.new_label();
+        const a64::Label exit_fallthrough = e.new_label();
+        const a64::Label emit_exit_flags = e.new_label();
+
+        e.bind(loop_top);
+        for (std::size_t i = 0; i + 2 < steps.size(); ++i) {
+            const TranslateError emit_err =
+                emit_one(e, steps[i].insn, /*write_rip=*/false, steps[i].live_flags, &ra);
+            if (emit_err != TranslateError::kNone) {
+                out.error = emit_err;
+                return out;
+            }
+        }
+
+        // Emit `steps[m - 2]` directly into its destination register `R` while
+        // keeping pre-operation operand(s) in `kLoopA` (and `kLoopB` only when
+        // non-immediate) so both cold exit paths produce bit-for-bit identical
+        // CF/PF/AF/ZF/SF/OF in GuestState with minimal loop instructions.
+        const Instruction& cmp_or_alu = steps[steps.size() - 2].insn;
+        const bool is32 = cmp_or_alu.dst.size == OperandSize::k32;
+        const a64::Width w = is32 ? a64::Width::k32 : a64::Width::k64;
+        const int bits = is32 ? 32 : 64;
+        const bool is_sub = cmp_or_alu.opcode == Opcode::kSub ||
+                            cmp_or_alu.opcode == Opcode::kCmp || cmp_or_alu.opcode == Opcode::kDec;
+        const bool is_inc_dec =
+            cmp_or_alu.opcode == Opcode::kInc || cmp_or_alu.opcode == Opcode::kDec;
+        const bool writes_dst = cmp_or_alu.opcode != Opcode::kCmp;
+        const a64::Reg R =
+            (writes_dst && ra.mapped(cmp_or_alu.dst.reg)) ? ra.host(cmp_or_alu.dst.reg) : kLoopRes;
+
+        std::uint32_t loop_imm12 = 0;
+        bool loop_shift12 = false;
+        const std::uint64_t loop_imm_val =
+            cmp_or_alu.has_src
+                ? ((bits == 32) ? (cmp_or_alu.src.imm & 0xFFFFFFFFULL) : cmp_or_alu.src.imm)
+                : 0ULL;
+        const bool loop_imm_folded = !is_inc_dec && cmp_or_alu.has_src &&
+                                     cmp_or_alu.src.kind == OperandKind::kImmediate &&
+                                     encode_imm12(loop_imm_val, loop_imm12, loop_shift12);
+
+        load_gpr_rb(e, &ra, cmp_or_alu.dst.reg, kLoopA);
+        if (is_inc_dec) {
+            if (is_sub) {
+                e.subs_imm(w, R, kLoopA, 1);
+            } else {
+                e.adds_imm(w, R, kLoopA, 1);
+            }
+        } else if (loop_imm_folded) {
+            if (is_sub) {
+                e.subs_imm(w, R, kLoopA, loop_imm12, loop_shift12);
+            } else {
+                e.adds_imm(w, R, kLoopA, loop_imm12, loop_shift12);
+            }
+        } else {
+            const TranslateError err = load_source(e, cmp_or_alu.src, kLoopB, bits, &ra);
+            if (err != TranslateError::kNone) {
+                out.error = err;
+                return out;
+            }
+            if (is_sub) {
+                e.subs(w, R, kLoopA, kLoopB);
+            } else {
+                e.adds(w, R, kLoopA, kLoopB);
+            }
+        }
+        if (writes_dst && R == kLoopRes) {
+            store_gpr(e, kLoopRes, cmp_or_alu.dst.reg);
+        }
+
+        // Hot backedge: exit immediately if Jcc condition is false; otherwise
+        // decrement `x7` and jump straight back to `loop_top`.
+        e.b_cond(invert_cond(self_loop_taken_cond), exit_fallthrough);
+        e.subs_imm(a64::Width::k64, kLoopRem, kLoopRem, 1);
+        e.b_cond(a64::Cond::kNe, loop_top);
+
+        // Cold exit A: step budget (`x1 == max_runs`) exhausted on taken backedge.
+        if (is_inc_dec) {
+            if (is_sub) {
+                e.subs_imm(w, a64::kXzr, kLoopA, 1);
+            } else {
+                e.adds_imm(w, a64::kXzr, kLoopA, 1);
+            }
+        } else if (loop_imm_folded) {
+            if (is_sub) {
+                e.subs_imm(w, a64::kXzr, kLoopA, loop_imm12, loop_shift12);
+            } else {
+                e.adds_imm(w, a64::kXzr, kLoopA, loop_imm12, loop_shift12);
+            }
+        } else {
+            if (is_sub) {
+                e.subs(w, a64::kXzr, kLoopA, kLoopB);
+            } else {
+                e.adds(w, a64::kXzr, kLoopA, kLoopB);
+            }
+        }
+        e.mov_imm64(kT0, steps.back().insn.dst.imm);
+        e.b(emit_exit_flags);
+
+        // Cold exit B: loop terminated naturally (`Jcc` not taken -> fallthrough).
+        // Hardware NZCV is still untouched from `subs/adds R, ...` above!
+        e.bind(exit_fallthrough);
+        e.sub(a64::Width::k64, 1, 1, kLoopRem);
+        e.add_imm(a64::Width::k64, 1, 1, 1); // x1 = runs = max_runs - rem + 1
+        e.mov_imm64(kT0, steps.back().insn.address + steps.back().insn.length);
+
+        // Shared cold epilogue: write `rip`, materialise exit flags into
+        // GuestState, spill allocated GPRs, and return `(x0, x1)`.
+        e.bind(emit_exit_flags);
+        e.str(a64::Width::k64, kT0, kState, kRipOffset);
+        const std::uint8_t exit_mask = flags_written(cmp_or_alu.opcode);
+        const std::uint64_t af_imm = is_inc_dec ? 1ULL : loop_imm_val;
+        if (is_inc_dec || loop_imm_folded) {
+            if ((exit_mask & kFbAf) != 0) {
+                if ((af_imm & 0xFULL) == 0) {
+                    e.strb(a64::kXzr, kState, kAfOffset);
+                } else {
+                    e.eor(a64::Width::k64, kT2, kLoopA, R);
+                    if ((af_imm & 0x10ULL) != 0) {
+                        e.mvn(a64::Width::k32, kT2, kT2);
+                    }
+                    e.ubfx(a64::Width::k32, kT2, kT2, 4, 1);
+                    e.strb(kT2, kState, kAfOffset);
+                }
+            }
+            emit_flags_from_nzcv(e, is_sub, static_cast<std::uint8_t>(exit_mask & ~kFbAf), kT2, R);
+        } else {
+            if ((exit_mask & kFbAf) != 0) {
+                e.eor(a64::Width::k64, kT2, kLoopA, kLoopB);
+                e.eor(a64::Width::k64, kT2, kT2, R);
+            }
+            emit_flags_from_nzcv(e, is_sub, exit_mask, kT2, R);
+        }
+        emit_return(e, BlockResult::kOk, &ra, /*set_single_run=*/false);
+
+        out.exit = exit;
+        out.target = target;
+        out.guest_instruction_count = steps.size();
+        out.code = e.bytes();
+        out.instruction_count = e.count();
+        return out;
+    }
+
+    // Standard single-execution block emission (with direct hardware NZCV fusion
+    // on `ALU/CMP/INC/DEC -> Jcc`).
     emit_prologue(e, ra);
 
-    for (const Step& step : steps) {
+    for (std::size_t idx = 0; idx < steps.size(); ++idx) {
+        const Step& step = steps[idx];
         const Opcode op = step.insn.opcode;
         if (op == Opcode::kHlt || op == Opcode::kRet) {
-            // The interpreter leaves rip on the HLT/RET instruction (a real CPU
-            // faults on HLT with rip at the instruction). Body instructions do
-            // not write rip, so it must be set explicitly here or the block's
-            // start address would leak out as the halted rip.
             emit_set_rip(e, step.insn.address);
-            emit_return(e, BlockResult::kHalted, &ra);
+            emit_return(e, BlockResult::kHalted, &ra, enable_self_loop);
             break;
         }
         if (op == Opcode::kSyscall) {
             emit_set_rip(e, step.insn.address + step.insn.length);
-            emit_return(e, BlockResult::kSyscall, &ra);
+            emit_return(e, BlockResult::kSyscall, &ra, enable_self_loop);
             break;
         }
         if (op == Opcode::kJmp) {
             emit_set_rip(e, step.insn.dst.imm);
-            emit_return(e, BlockResult::kOk, &ra);
+            emit_return(e, BlockResult::kOk, &ra, enable_self_loop);
             break;
         }
         if (op == Opcode::kJcc) {
-            // Evaluate the x86 condition and write the correct next rip on both
-            // paths, so the dispatcher only has to read rip back.
             const std::uint64_t fallthrough = step.insn.address + step.insn.length;
             const a64::Label taken = e.new_label();
             const a64::Label done = e.new_label();
-            emit_cond_branch(e, step.insn.condition, taken);
-            emit_set_rip(e, fallthrough);
+            a64::Cond fused = a64::Cond::kAl;
+            if (idx > 0 && try_nzcv_cond(steps[idx - 1].insn.opcode, step.insn.condition, fused)) {
+                e.b_cond(fused, taken);
+            } else {
+                emit_cond_branch(e, step.insn.condition, taken);
+            }
+            e.mov_imm64(kT0, fallthrough);
             e.b(done);
             e.bind(taken);
-            emit_set_rip(e, step.insn.dst.imm);
+            e.mov_imm64(kT0, step.insn.dst.imm);
             e.bind(done);
-            emit_return(e, BlockResult::kOk, &ra);
+            e.str(a64::Width::k64, kT0, kState, kRipOffset);
+            emit_return(e, BlockResult::kOk, &ra, enable_self_loop);
             break;
         }
         const TranslateError emit_err =
             emit_one(e, step.insn, /*write_rip=*/false, step.live_flags, &ra);
         if (emit_err != TranslateError::kNone) {
-            // validate_body() already rejected every operand shape emit_one()
-            // cannot handle, so reaching here is an internal inconsistency.
             out.error = emit_err;
             return out;
         }
@@ -1063,7 +1308,7 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
 
     if (exit == BlockExit::kFallThrough) {
         emit_set_rip(e, target);
-        emit_return(e, BlockResult::kOk, &ra);
+        emit_return(e, BlockResult::kOk, &ra, enable_self_loop);
     }
 
     out.exit = exit;

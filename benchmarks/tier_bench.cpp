@@ -350,11 +350,11 @@ int main(int argc, char** argv) {
             std::printf("    \"reason\": \"%s\"\n", tier1_reason.c_str());
         }
         std::printf("  },\n");
-        std::printf("  \"notes\": \"Tier 1 has register allocation within a block (4.2.6) but no "
-                    "block chaining yet. On a "
-                    "host that can execute AArch64 directly these numbers reflect that; under "
-                    "qemu-user both tiers are additionally translated by qemu, so the ratio is a "
-                    "relative sanity signal, not a hardware performance claim.\"\n");
+        std::printf(
+            "  \"notes\": \"Tier 1 includes block register allocation, hardware NZCV "
+            "branch fusion, native self-loop superblocks, ExecArena code caching, and "
+            "2-way block chaining. Under qemu-user both tiers are additionally translated "
+            "by qemu, so the ratio is a relative sanity signal rather than silicon timing.\"\n");
         std::printf("}\n");
     } else {
         std::printf("hyperion tier 0 vs tier 1 benchmark\n");

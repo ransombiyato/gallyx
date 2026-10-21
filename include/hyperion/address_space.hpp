@@ -155,6 +155,7 @@ private:
     std::uint64_t brk_ = 0;
     std::size_t max_map_bytes_ = kDefaultMaxMapBytes;
     std::uint64_t code_epoch_ = 1;
+    mutable std::size_t mru_index_ = 0;
 };
 
 } // namespace hyperion

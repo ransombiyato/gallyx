@@ -52,6 +52,7 @@ bool FlatMemory::write(std::uint64_t address, const std::uint8_t* in, std::size_
         return false;
     }
     std::memcpy(bytes_.data() + (address - base_), in, count);
+    ++epoch_;
     return true;
 }
 
@@ -279,43 +280,17 @@ bool write_operand(const Operand& op, GuestState& state, Memory& memory, std::ui
     return false;
 }
 
-} // namespace
+struct FastStepOutcome {
+    StepStatus status = StepStatus::kOk;
+    std::uint32_t unimplemented_syscalls = 0;
+    bool exited_via_syscall = false;
+    std::int64_t exit_code = 0;
+    const char* message = nullptr;
+};
 
-StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
-    StepResult result;
-
-    // Fetch. The subset has no instruction longer than 15 bytes, so a 15-byte
-    // window is always sufficient. `available` is the number of bytes actually
-    // read: near the end of a mapped region a full window may not be readable,
-    // and the decoder must be given the *true* byte count so it can report a
-    // genuinely truncated instruction rather than decoding zero padding as a
-    // valid instruction (a silent mis-execution). We shrink the request until a
-    // read succeeds; only a complete failure to read even one byte is a fetch
-    // fault.
-    std::uint8_t code[15] = {};
-    std::size_t available = 0;
-    for (std::size_t n = sizeof(code); n >= 1; --n) {
-        if (memory.fetch(state.rip, code, n)) {
-            available = n;
-            break;
-        }
-    }
-    if (available == 0) {
-        result.status = StepStatus::kFault;
-        result.message = "instruction fetch fault at rip";
-        return result;
-    }
-
-    const DecodeResult decoded = decode(code, available, state.rip);
-    result.instruction = decoded.instruction;
-    if (!decoded.ok()) {
-        result.status = StepStatus::kUnsupported;
-        result.decode_error = decoded.error;
-        result.message = to_string(decoded.error);
-        return result;
-    }
-
-    const Instruction& insn = decoded.instruction;
+FastStepOutcome execute_decoded(GuestState& state, Memory& memory, const Instruction& insn,
+                                SyscallHandler* syscalls) {
+    FastStepOutcome result;
     const int width = width_of(insn.dst.size);
     const std::uint64_t next_rip = state.rip + insn.length;
 
@@ -331,15 +306,9 @@ StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
 
     case Opcode::kHlt:
         result.status = StepStatus::kHalted;
-        // HLT does not advance rip; a real CPU would #GP, but for a user-mode
-        // test program "stop here" is the useful, explicit behaviour.
         return result;
 
     case Opcode::kSyscall: {
-        // The `syscall` instruction transfers control to the kernel. Hyperion
-        // emulates that in userspace through a handler. rip must already point
-        // past the instruction when the handler runs, matching a real CPU that
-        // returns to the next instruction; the handler writes the result to rax.
         if (syscalls == nullptr) {
             result.status = StepStatus::kUnsupported;
             result.message = "syscall encountered with no handler";
@@ -354,10 +323,6 @@ StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
             result.message = "guest exited via syscall";
             return result;
         }
-        // kHandled and kUnimplemented both continue: for an unimplemented call
-        // the handler wrote -ENOSYS to rax, exactly as Linux would, so the guest
-        // observes correct behaviour and can react. The call is recorded (see
-        // RunResult::unimplemented_syscalls) so it is visible, never silent.
         if (sr.status == SyscallStatus::kUnimplemented) {
             ++result.unimplemented_syscalls;
         }
@@ -408,14 +373,12 @@ StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
             result_value = alu::logical_xor(a, b, width, state.flags);
             break;
         case Opcode::kCmp:
-            // CMP computes flags exactly like SUB but discards the result.
             (void)alu::sub(a, b, width, state.flags);
             break;
         default:
             break;
         }
 
-        // CMP writes nothing; every other op writes back to dst.
         if (insn.opcode != Opcode::kCmp) {
             if (!write_operand(insn.dst, state, memory, result_value)) {
                 return fault("alu: destination memory fault");
@@ -442,19 +405,13 @@ StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
     case Opcode::kJmp:
         state.rip = insn.dst.imm;
         result.status = StepStatus::kOk;
-        result.message.clear();
         return result;
 
     case Opcode::kJcc:
-        if (alu::evaluate(insn.condition, state.flags)) {
-            state.rip = insn.dst.imm;
-        } else {
-            state.rip = next_rip;
-        }
+        state.rip = alu::evaluate(insn.condition, state.flags) ? insn.dst.imm : next_rip;
         return result;
 
     case Opcode::kPush: {
-        // push r64: rsp -= 8; [rsp] = r
         const std::uint64_t rsp = state.reg(Gpr::kRsp) - 8;
         std::uint8_t buffer[8];
         const std::uint64_t value = state.reg(insn.dst.reg);
@@ -469,10 +426,6 @@ StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
     }
 
     case Opcode::kPop: {
-        // pop r64: value = [rsp]; rsp += 8; dst = value.
-        // Ordering matters for `pop rsp` (0x5C): on real x86-64 hardware the
-        // popped qword overwrites RSP after the increment, so RSP becomes
-        // [old_rsp] rather than old_rsp + 8.
         const std::uint64_t rsp = state.reg(Gpr::kRsp);
         std::uint8_t buffer[8] = {};
         if (!memory.read(rsp, buffer, 8)) {
@@ -488,12 +441,6 @@ StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
     }
 
     case Opcode::kRet:
-        // There is no CALL instruction in the subset yet, so RET has no return
-        // address to pop. Rather than fabricate a stack pop, it is modelled as
-        // "stop here" (kHalted), consistently with the Tier 1 translator
-        // (translator.cpp) which also treats RET as a block-terminating halt.
-        // rip is left on the RET instruction, exactly like HLT. When CALL lands,
-        // both tiers must be changed together and this comment updated.
         result.status = StepStatus::kHalted;
         result.message = "ret (top-level return)";
         return result;
@@ -504,12 +451,92 @@ StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
     return result;
 }
 
+} // namespace
+
+StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
+    StepResult result;
+
+    std::uint8_t code[15] = {};
+    std::size_t available = 0;
+    for (std::size_t n = sizeof(code); n >= 1; --n) {
+        if (memory.fetch(state.rip, code, n)) {
+            available = n;
+            break;
+        }
+    }
+    if (available == 0) {
+        result.status = StepStatus::kFault;
+        result.message = "instruction fetch fault at rip";
+        return result;
+    }
+
+    const DecodeResult decoded = decode(code, available, state.rip);
+    result.instruction = decoded.instruction;
+    if (!decoded.ok()) {
+        result.status = StepStatus::kUnsupported;
+        result.decode_error = decoded.error;
+        result.message = to_string(decoded.error);
+        return result;
+    }
+
+    const FastStepOutcome fast = execute_decoded(state, memory, decoded.instruction, syscalls);
+    result.status = fast.status;
+    result.unimplemented_syscalls = fast.unimplemented_syscalls;
+    result.exited_via_syscall = fast.exited_via_syscall;
+    result.exit_code = fast.exit_code;
+    if (fast.message != nullptr) {
+        result.message = fast.message;
+    }
+    return result;
+}
+
 RunResult run_program(Memory& memory, GuestState state, std::uint64_t max_steps,
                       SyscallHandler* syscalls) {
     RunResult out;
     out.state = state;
+
+    // Direct-mapped Tier 0 decoded-instruction cache: eliminates redundant 15-byte
+    // fetch + variable-length x86-64 decoding inside guest loops while remaining
+    // 100% sound under mmap/mprotect/munmap/self-modifying writes via `code_epoch()`.
+    struct DecodedSlot {
+        std::uint64_t pc = 0;
+        std::uint64_t epoch = 0;
+        Instruction insn{};
+    };
+    constexpr std::size_t kDecodeCacheSize = 2048;
+    constexpr std::size_t kDecodeCacheMask = kDecodeCacheSize - 1;
+    std::vector<DecodedSlot> icache(kDecodeCacheSize);
+
     for (std::uint64_t i = 0; i < max_steps; ++i) {
-        const StepResult r = step(out.state, memory, syscalls);
+        const std::uint64_t pc = out.state.rip;
+        const std::uint64_t epoch = memory.code_epoch();
+        DecodedSlot& slot = icache[pc & kDecodeCacheMask];
+        if (epoch == 0 || slot.epoch != epoch || slot.pc != pc) {
+            std::uint8_t code[15] = {};
+            std::size_t available = 0;
+            for (std::size_t n = sizeof(code); n >= 1; --n) {
+                if (memory.fetch(pc, code, n)) {
+                    available = n;
+                    break;
+                }
+            }
+            if (available == 0) {
+                out.status = RunStatus::kFault;
+                out.message = "instruction fetch fault at rip";
+                return out;
+            }
+            const DecodeResult decoded = decode(code, available, pc);
+            if (!decoded.ok()) {
+                out.status = RunStatus::kUnsupported;
+                out.message = to_string(decoded.error);
+                return out;
+            }
+            slot.pc = pc;
+            slot.epoch = epoch;
+            slot.insn = decoded.instruction;
+        }
+
+        const FastStepOutcome r = execute_decoded(out.state, memory, slot.insn, syscalls);
         out.unimplemented_syscalls += r.unimplemented_syscalls;
         switch (r.status) {
         case StepStatus::kOk:
@@ -520,15 +547,21 @@ RunResult run_program(Memory& memory, GuestState state, std::uint64_t max_steps,
             out.status = RunStatus::kOk;
             out.exited_via_syscall = r.exited_via_syscall;
             out.exit_code = r.exit_code;
-            out.message = r.message;
+            if (r.message != nullptr) {
+                out.message = r.message;
+            }
             return out;
         case StepStatus::kFault:
             out.status = RunStatus::kFault;
-            out.message = r.message;
+            if (r.message != nullptr) {
+                out.message = r.message;
+            }
             return out;
         case StepStatus::kUnsupported:
             out.status = RunStatus::kUnsupported;
-            out.message = r.message;
+            if (r.message != nullptr) {
+                out.message = r.message;
+            }
             return out;
         }
     }

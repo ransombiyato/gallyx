@@ -39,12 +39,20 @@ namespace hyperion {
 
 // A guest program counter range mapped to one generated block.
 struct CachedBlock {
-    std::unique_ptr<ExecMem> memory; // generated AArch64 code
+    void* entry = nullptr; // generated AArch64 code inside `TranslationCache::arena_`
     BlockExit exit = BlockExit::kFallThrough;
     std::uint64_t start = 0;                 // first guest PC covered
     std::uint64_t target = 0;                // predicted successor (see BlockTranslation)
     std::size_t guest_instruction_count = 0; // instructions retired per execution
     std::size_t code_bytes = 0;              // size of the generated AArch64 code
+
+    // Inline 2-way direct block-chaining cache (reset on `invalidate_all()`):
+    // skips even direct-mapped array indexing when consecutive blocks repeat
+    // the same fall-through / taken edge across multi-block control flow.
+    mutable std::uint64_t chain_pc0 = 0;
+    mutable const CachedBlock* chain_block0 = nullptr;
+    mutable std::uint64_t chain_pc1 = 0;
+    mutable const CachedBlock* chain_block1 = nullptr;
 };
 
 // The translation cache and dispatcher.
@@ -107,6 +115,7 @@ private:
     // direct-mapped cache.
     void install(const CachedBlock* block);
 
+    ExecArena arena_;
     std::unordered_map<std::uint64_t, std::unique_ptr<CachedBlock>> blocks_;
 
     // Direct-mapped dispatch cache: a small power-of-two table indexed by the

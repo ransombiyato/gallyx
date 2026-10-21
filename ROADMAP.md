@@ -5,8 +5,9 @@ demonstrated by evidence**, not merely by the existence of code.
 
 Status legend: ✅ complete · 🟡 in progress · ⬜ not started
 
-**Overall: Phases 0–1 complete; Phases 2–6 in progress (Phase 6 has seven
-syscall slices landed).**
+**Overall: Phases 0–4 complete; Phases 5–6 substantially advanced (Tier 1 11.2×
+faster, Tier 0 3.5× faster, static ELF64 loader + SysV stack + 42 syscalls across
+eleven slices implemented).**
 
 | Phase | Title | Status |
 | --- | --- | --- |

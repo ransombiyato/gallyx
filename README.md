@@ -11,23 +11,23 @@ Android 10, 8 GB RAM, no root and no KVM**. Development and testing also happen
 on other Linux hosts, so target-device compatibility is *measured, not
 assumed* — see [`docs/target-environment.md`](docs/target-environment.md).
 
-> **Status: Phase 5 (performance measurement and optimization) active; Phase 6
-> (Linux ABI and syscall compatibility) ten slices implemented.** The repository
-> builds, its tests pass, and a documented subset of x86-64 instructions executes
-> through generated AArch64 code, verified against the reference interpreter
-> under `qemu-user`. There are **two execution tiers**: the reference interpreter
-> (Tier 0) and a translation cache that runs whole programs through generated
-> AArch64 code (Tier 1). **Ten syscall slices** are implemented in both tiers:
-> `write`/`exit`/`exit_group`; the guest address space with
-> `mmap`/`mprotect`/`munmap`/`brk`; a guest descriptor table with
-> `read`/`openat`/`close`/`lseek`/`fstat`; `getcwd`/`getrandom`; the process
-> identity getters; `newfstatat`; `access`/`readlink`; `readlinkat`;
-> `getdents64`; and `statx` (guest paths are
-> forwarded to the host kernel — Hyperion is **not a sandbox**). Every other
-> syscall returns `-ENOSYS`. There is
-> **no block chaining and no cache invalidation yet**, so
-> only hand-written raw blobs run — no real Linux program does. See
-> [`STATUS.md`](STATUS.md) for the exact current state and
+> **Status: Phase 5 (performance measurement and optimization) and Phase 6
+> (Linux ABI, ELF64 loading, and syscall compatibility) active.** The repository
+> builds clean across GCC and Clang with `-Wall -Wextra -Wpedantic`, passes
+> ASan + UBSan and full `clang-tidy` static analysis, and executes both raw
+> x86-64 blobs and **static x86-64 Linux ELF64 executables** (`ET_EXEC` and
+> static-PIE `ET_DYN` with a System V AMD64 `argc/argv/envp/auxv` stack) across
+> **two execution tiers**: the reference interpreter with a 2048-slot epoch-keyed
+> decoded-instruction cache (Tier 0) and an AArch64 dynamic binary translator
+> (`ExecArena` W^X code cache, 2-way inline block chaining, hardware `NZCV`
+> branch fusion, native self-loop superblocks, and epoch-based invalidation on
+> code/permission changes — Tier 1). **42 Linux syscalls** across **eleven slices**
+> are implemented and CI-checked against `docs/syscalls/inventory.tsv` (including
+> unbuffered refcounted `OpenFileDescription` descriptors, `dup`/`dup2`/`dup3`/
+> `fcntl`, `pread64`/`pwrite64`/`readv`/`writev`, `uname` reporting `"x86_64"`,
+> `clock_gettime`/`gettimeofday`, `arch_prctl`, `set_tid_address`,
+> `set_robust_list`, and `prlimit64`). Every other syscall returns `-ENOSYS`.
+> See [`STATUS.md`](STATUS.md) for the exact current state and
 > [`ROADMAP.md`](ROADMAP.md) for the staged plan.
 >
 > **Scope note (2026-10-19).** Kernel/system-mode emulation is no longer ruled
@@ -47,18 +47,19 @@ assumed* — see [`docs/target-environment.md`](docs/target-environment.md).
 | AArch64 cross-build + qemu-user validation pipeline | Implemented, passing |
 | Host capability probe (arch, page size, cache line, W^X) | Implemented |
 | Host benchmark harness (JSON, repeated-run statistics) | Implemented (host-only) |
-| One-line installer + `hyperion` command | Implemented |
-| x86-64 decoder (documented subset) | Implemented, differential-tested |
-| Guest-state model + reference interpreter | Implemented, differential-tested |
-| AArch64 encoder (checked, binutils-verified) | Implemented |
-| W^X executable memory | Implemented |
-| x86-64 → AArch64 instruction translation | **Partial** — register/immediate ALU ops only |
-| Multi-instruction program translation + code cache | Implemented (Phase 4) — block-at-a-time dispatcher |
-| Linux syscall layer | **Partial** (Phase 6, ten slices) — 27 numbers implemented (`read`/`write`/`close`/`fstat`/`lseek`/`mmap`/`mprotect`/`munmap`/`brk`/`access`/`openat`/`newfstatat`/`getrandom`/`getcwd`/`readlink`/`readlinkat`/`getdents64`/`statx`/identity getters/`exit`/`exit_group`); `-ENOSYS` otherwise. See `STATUS.md` §4 for the full list |
-| Guest address space (mmap/brk) | **Implemented** (Phase 6) — permissioned regions, page-granular, reserved heap window, per-mapping size cap (D-029) |
-| Guest descriptor table (read/openat/close/lseek/fstat) | **Implemented** (Phase 6) — handler-owned; `adopt()` attaches a host stream; `openat` opens handler-owned streams (`AT_FDCWD` only) |
-| Register allocation | **Implemented within a block** (Phase 5, D-021) — guests registers are spilled back to `GuestState` at each block exit, so no value survives a block boundary in a host register |
-| Block chaining, cache invalidation | **Not started** (Phase 5/7) |
+| One-line installer + `hyperion` command | Implemented (`info <exe>`, `run <exe>`, `status`, `doctor`, `build`, `test`, `bench`, `cross-test`) |
+| Static ELF64 x86-64 loader + SysV stack | **Implemented** (`ET_EXEC` + static-PIE `ET_DYN`, `PT_LOAD` W^X + BSS zero-fill, `argc`/`argv`/`envp`/`auxv`) |
+| x86-64 decoder (documented subset) | Implemented, hardware-differential-tested (`MOV`, `LEA`, `ADD`, `SUB`, `CMP`, `TEST`, `AND`, `OR`, `XOR`, `INC`, `DEC`, `PUSH`, `POP`, `JMP`, `Jcc rel8/rel32`, `NOP`, `HLT`, `RET`, `SYSCALL`; `[rip+disp32]` & SIB addressing) |
+| Guest-state model + reference interpreter | Implemented, hardware-differential-tested; 2048-slot epoch-keyed decoded-instruction cache (**3.47×** narrow / **2.90×** wide speedup) |
+| AArch64 encoder (checked, binutils-verified) | Implemented (incl. shifted `imm12`, `add_shifted`, `mvn`, `tbz`/`tbnz`, forward/backward branch patching) |
+| W^X executable memory (`ExecMem` + `ExecArena`) | Implemented — single-block `ExecMem` plus multi-page W^X bump `ExecArena` |
+| x86-64 → AArch64 instruction translation | **Partial** — register/immediate ALU + `MOV` + `LEA` (`[rip+disp32]` & scaled SIB) + `TEST` + `JMP`/`Jcc rel8/rel32` + `SYSCALL`/`HLT` |
+| Multi-instruction program translation + code cache | Implemented — `TranslationCache` with `ExecArena`, hardware `NZCV` condition fusion, self-loop superblocks, 2-way inline chaining, and `code_epoch` invalidation (**11.19×** narrow / **11.16×** wide Tier 1 speedup) |
+| Linux syscall layer | **Partial** (Phase 6, eleven slices) — **42 numbers** implemented & CI-checked against `docs/syscalls/inventory.tsv`; `-ENOSYS` otherwise. See `STATUS.md` for the full list |
+| Guest address space (mmap/brk/NX) | **Implemented** (Phase 6) — page-granular `split_region_at()` `mprotect`/`munmap`, enforced `MemPerm::kExec` fetch permissions, reserved heap window, per-mapping size cap (D-029) |
+| Guest descriptor table (unbuffered POSIX `OpenFileDescription`) | **Implemented** (Phase 6) — refcounted `OpenFileDescription` supporting `dup`/`dup2`/`dup3`/`fcntl`, positional `pread64`/`pwrite64`, scatter/gather `readv`/`writev`, and `adopt()` |
+| Register allocation | **Implemented within a block** (Phase 5, D-021) — hottest guest registers kept in `x19..x28` across block bodies and self-loop superblocks |
+| Block chaining & cache invalidation | **Implemented** — 2-way inline C++ dispatch chaining + native self-loop superblocks + `Memory::code_epoch()` cache invalidation on executable writes / `mprotect` / `munmap` |
 
 The translation row is deliberately narrow: the translator lowers a specific,
 listed set of instructions (`mov`, `add`, `sub`, `and`, `or`, `xor`, `cmp`,

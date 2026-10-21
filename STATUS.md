@@ -2,31 +2,25 @@
 
 **Last updated:** 2026-10-21
 **Current phase:** Phase 5 (performance measurement and optimization) — active;
-Phase 6 (Linux ABI and syscall compatibility) — tenth slice implemented
-**Repository state:** buildable, tested, documented, CI green. **Two execution
-tiers exist: the reference interpreter (Tier 0) and a translation cache that runs
-whole programs through generated AArch64 code (Tier 1).** Phase 4's exit criteria
-are met and recorded. Phase 5 has begun with a *measured baseline before any
-optimisation*: on AArch64 under `qemu-user`, Tier 1 is ~12.8× faster than Tier 0
-on a fixed loop workload (BENCHMARKS.md §4.2), and **six optimizations are now
-accepted and measured** (parity fast path, dead-`rip` elimination, flag
-liveness, direct-mapped dispatch, ALU immediate folding, guest-register
-allocation — BENCHMARKS.md §4.2.1–4.2.6). Phase 6's syscall inventory is
-complete and validated
-(docs/syscalls/), and **ten syscall slices are implemented in both tiers**: the
-first (`write`/`exit`/`exit_group`), the second, which added the guest
-address space and `mmap`/`mprotect`/`munmap`/`brk`, the third, which added a
-guest descriptor table with `read`/`close`/`lseek`, the fourth, which added
-`openat`/`fstat`, the fifth, which added the process-identity getters
-(`getpid`/`gettid`/`getuid`/`geteuid`/`getgid`/`getegid`/`getppid`), `getcwd`
-and `getrandom`, the sixth, which added `newfstatat` (glibc's
-`stat`/`lstat` entry point), the seventh, which added `access` and
-`readlink`, the eighth, which added `readlinkat`, and the ninth, which added
-`getdents64` (directory listing, via `openat` now honouring
-`O_DIRECTORY`/`O_NONBLOCK`/`O_CLOEXEC`), and the tenth, which added `statx`.
-Unimplemented numbers still
-return `-ENOSYS` explicitly. The guest instruction subset remains small; see
-COMPATIBILITY.md.**
+Phase 6 (Linux ABI, ELF64 loading, and syscall compatibility) — eleventh slice implemented
+**Repository state:** buildable, tested, documented, all CI/sanitizer/cross-test/`clang-tidy`
+gates green. **Two execution tiers exist: the reference interpreter with a
+2048-slot epoch-keyed decoded-instruction cache (Tier 0) and a W^X `ExecArena`
+translation cache with hardware `NZCV` condition fusion, native self-loop
+superblocks, 2-way inline block chaining, and `Memory::code_epoch()` cache
+invalidation (Tier 1).** Static x86-64 Linux ELF64 executables (`ET_EXEC` and
+static-PIE `ET_DYN` with a System V AMD64 `argc/argv/envp/auxv` initial stack)
+and raw blobs inspect and execute via `hyperion info <exe>` and
+`hyperion run <exe>`. Phase 6's syscall inventory is validated bidirectionally
+against C++ handler code (`tools/gen_syscall_inventory.py --check`), with
+**42 syscalls across eleven slices implemented** (`read`, `write`, `close`,
+`fstat`, `lseek`, `mmap`, `mprotect`, `munmap`, `brk`, `pread64`, `pwrite64`,
+`readv`, `writev`, `access`, `dup`, `dup2`, `getpid`, `exit`, `uname`, `fcntl`,
+`getcwd`, `readlink`, `gettimeofday`, `getuid`, `getgid`, `geteuid`, `getegid`,
+`getppid`, `arch_prctl`, `gettid`, `getdents64`, `set_tid_address`,
+`clock_gettime`, `exit_group`, `openat`, `newfstatat`, `readlinkat`,
+`set_robust_list`, `dup3`, `prlimit64`, `getrandom`, `statx`). Unimplemented
+numbers return `-ENOSYS` explicitly. See `COMPATIBILITY.md` for exact ISA scope.
 
 This is the first file a returning agent should read. It records exactly what
 works, what was last verified, and what to do next.
@@ -60,32 +54,22 @@ works, what was last verified, and what to do next.
 | 14. `readlinkat`(267) (eighth slice) | **Implemented & tested** — glibc's modern `readlink` entry point. Shares the `readlink` body (no NUL terminator, silent truncation, `bufsiz == 0` is `-EINVAL`); `AT_FDCWD` only, any other `dirfd` is `-ENOSYS` and counted as unimplemented |
 | 15. `getdents64`(217) (ninth slice) | **Implemented & tested** — directory listing, the highest-frequency implementable syscall in the trace sample (3941 calls). The `linux_dirent64` record is a fixed UAPI layout identical on x86-64 and AArch64, so host entries are forwarded verbatim (D-030); the kernel's own `-EBADF`/`-ENOTDIR`/`-EINVAL` come through unchanged. `openat` now honours `O_DIRECTORY`/`O_NONBLOCK`/`O_CLOEXEC` (glibc's `opendir` flags) |
 | 16. `statx`(332) (tenth slice) | **Implemented & tested** — the modern, extensible stat (950 calls). `struct statx` is built only from fixed-width `__u32`/`__u64` fields, so its layout is identical on x86-64 and AArch64 and the host's bytes are copied into the guest verbatim (the `linux_dirent64` reasoning, D-030); `AT_FDCWD` only, `AT_SYMLINK_NOFOLLOW` the sole honoured flag |
-| 17. Broader syscall coverage (`arch_prctl`/`set_tid_address`/`rseq`/…) | **Not started** — next slice |
+| 17. Static ELF64 loader + SysV AMD64 stack + unbuffered POSIX descriptors | **Implemented & tested** — `elf_loader.{hpp,cpp}` loads `ET_EXEC` and static-PIE `ET_DYN` with W^X `PT_LOAD` mappings, BSS zeroing, and 16-byte aligned `argc`/`argv`/`envp`/`auxv` (`AT_PHDR`/`AT_PHENT`/`AT_PHNUM`/`AT_PAGESZ`/`AT_ENTRY`/`AT_RANDOM`); `OpenFileDescription` replaces buffered `FILE*` fd entries |
+| 18. Startup, TLS, clock, resource, dup/fcntl, and scatter/positional I/O (eleventh slice) | **Implemented & tested** — adds `pread64`(17), `pwrite64`(18), `readv`(19), `writev`(20), `dup`(32), `dup2`(33), `dup3`(292), `fcntl`(72), `uname`(63, always advertising `"x86_64"`), `gettimeofday`(96), `clock_gettime`(228), `arch_prctl`(158, `ARCH_SET_FS`/`ARCH_GET_FS`), `set_tid_address`(218), `set_robust_list`(273), and `prlimit64`(302); **42 implemented syscalls total** |
 
-**Implemented-syscall status (verified).** Twenty-four numbers are implemented
-today: `read`(0), `write`(1), `close`(3), `fstat`(5), `lseek`(8), `mmap`(9),
-`mprotect`(10), `munmap`(11), `brk`(12), `access`(21), `getpid`(39), `exit`(60),
-`getcwd`(79), `readlink`(89), `getuid`(102), `getgid`(104), `geteuid`(107),
-`getegid`(108), `getppid`(110), `gettid`(186), `exit_group`(231), `openat`(257),
-`newfstatat`(262), `readlinkat`(267), `getdents64`(217), `getrandom`(318).
-Everything
-else returns `-ENOSYS`. `mmap` is scoped: anonymous
-private mappings only. `mprotect`/`munmap` require a fully-mapped, page-aligned
-range. `read`/`close`/`lseek`/`openat`/`fstat` operate on a handler-owned guest
-descriptor table (guest fd → host stream); the handler never `fclose`s a borrowed
-stream, and it *does* close a stream it opened via `openat`. `openat` supports
-`AT_FDCWD` and a bounded guest pathname; any other `dirfd`, or an unhandled flag,
-returns `-ENOSYS` and is counted as unimplemented. `newfstatat` shares that
-`AT_FDCWD` boundary and the `fstat` guest-`struct stat` builder. `access`,
-`readlink`, `readlinkat` and `getdents64` are path queries over the same bounded
-reader (the last on an opened directory descriptor). The identity
-getters and `getcwd`/`getrandom` are pure forwards to the host with bounded guest
-buffers; `gettid` reports the host thread id because Hyperion is single-threaded
-today (a documented approximation, revisited when `clone` lands). This is **not a
-sandbox**: `openat`/`newfstatat`/`access`/`readlink`/`readlinkat`/`getdents64`
-forward to the host kernel, so the guest can touch whatever the host process may
-(SECURITY.md). The inventory marks these twenty-seven `implemented` and all others
-`not-started`; the validator enforces the status vocabulary.
+**Implemented-syscall status (verified automatically by `tools/gen_syscall_inventory.py --check`).**
+Forty-two numbers are implemented today: `read`(0), `write`(1), `close`(3),
+`fstat`(5), `lseek`(8), `mmap`(9), `mprotect`(10), `munmap`(11), `brk`(12),
+`pread64`(17), `pwrite64`(18), `readv`(19), `writev`(20), `access`(21),
+`dup`(32), `dup2`(33), `getpid`(39), `exit`(60), `uname`(63), `fcntl`(72),
+`getcwd`(79), `readlink`(89), `gettimeofday`(96), `getuid`(102), `getgid`(104),
+`geteuid`(107), `getegid`(108), `getppid`(110), `arch_prctl`(158), `gettid`(186),
+`getdents64`(217), `set_tid_address`(218), `clock_gettime`(228), `exit_group`(231),
+`openat`(257), `newfstatat`(262), `readlinkat`(267), `set_robust_list`(273),
+`dup3`(292), `prlimit64`(302), `getrandom`(318), `statx`(332). Everything else
+returns `-ENOSYS` explicitly and is enforced bidirectionally between
+`src/core/syscall.cpp`, `docs/syscalls/inventory.tsv`, and the generated tier
+Markdown files by `ctest` (`syscall.inventory_valid`).
 
 **Address-space facts (verified).** `GuestAddressSpace` is the guest's virtual
 memory: a set of regions with `MemPerm` (read/write/exec) and page-granular
@@ -117,7 +101,7 @@ each. Distribution: U4=39, U3=75, U2=32, U1=14, E1=8, E2=100, E3=107.
 | 6. Optimization 4: direct-mapped dispatch | **Done & measured** — BENCHMARKS.md §4.2.4; 99.9985% dispatch hit rate |
 | 7. Optimization 5: ALU immediate folding | **Done & measured** — BENCHMARKS.md §4.2.5; −2 words on the size-guard program |
 | 8. Optimization 6: guest-register allocation | **Done & measured** — BENCHMARKS.md §4.2.6; −15% Tier 1 time / −1.9% code on the wide workload, with a profitability guard |
-| 9. Block chaining | **Not started** |
+| 9. Optimization 7: `ExecArena` + 2-way inline block chaining + hardware `NZCV` fusion + self-loop superblocks + Tier 0 icache | **Done & measured** — BENCHMARKS.md §4.2.8; **11.19×** faster Tier 1 narrow (`3.18 ns/insn`, smaller `344 B` code), **11.16×** faster Tier 1 wide (`0.94 ns/insn`), **3.47× / 2.90×** faster native Tier 0 |
 | 10. Multi-tier compilation | **Not started** |
 
 **Baseline (must not be silently changed).** Fixed guest loop, 200,000

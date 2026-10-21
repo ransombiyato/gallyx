@@ -5,6 +5,23 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Audits, ISA/ELF64 expansion, Tier 0/1 optimizations, and 15 additional Phase 6 syscalls
+
+### Fixed
+- **Critical codegen bug (`adds_imm`/`subs_imm` `shift12`):** `aarch64_encoder.cpp` hardcoded `sh = 0` (`bit 22`) on flag-setting shifted immediates and `translator.cpp` dropped `shift12`, miscompiling e.g. `add rax, 0x1000` into `add rax, 1` when `AF` was dead. Verified bit-for-bit against GNU binutils 2.44 and guarded by `translator.shifted_imm12_folded_alu_matches_interpreter`.
+- **Critical decoder/interpreter bugs:** fixed `pop rsp` stack adjustment order (`rsp` set to popped value rather than old `rsp + 8`), `SIB mod=00, base=5` (`[disp32]` / `[index*scale + disp32]`), `0x90` with `REX.B == 1` (`xchg r8, rax`), multiple REX prefixes + 15-byte `DecodeError::kTooLong` architectural length limit, and single-instruction `syscall`/`hlt` translation.
+- **Address space & NX hazards:** enforced `MemPerm::kExec` on instruction fetch (`Memory::fetch`), preserved existing heap data across page-crossing `set_brk()` calls, honoured `max_map_bytes_`, split mapped regions at page boundaries for sub-region `mprotect`/`munmap`, and added `Memory::code_epoch()` cache invalidation in Tier 0 and Tier 1.
+- **Unbuffered POSIX file descriptors:** replaced buffered `std::FILE*` fd slots with refcounted `OpenFileDescription` descriptors and fixed zero-extended 32-bit `mov edi, AT_FDCWD` handling across all `*at` syscalls.
+- **Syscall inventory CI enforcement:** upgraded `tools/gen_syscall_inventory.py --check` to cross-check `src/core/syscall.cpp` (`MinimalSyscallHandler::handle` and `is_minimal_syscall`), `docs/syscalls/inventory.tsv`, and generated Markdown tables bidirectionally.
+
+### Added
+- **Static ELF64 loader & SysV AMD64 stack (`elf_loader.{hpp,cpp}`):** loads static `ET_EXEC` and static-PIE `ET_DYN` x86-64 binaries with page-aligned W^X `PT_LOAD` mappings, BSS zero-fill, and 16-byte aligned `argc`/`argv`/`envp`/`auxv` stacks; wired into `hyperion info <exe>` and `hyperion run <exe>`.
+- **Expanded x86-64 ISA subset:** `[rip + disp32]` addressing, `LEA` (`0x8D`, Tier 0 & Tier 1), `TEST` (`0x85`, `0xA9`, `0xF7 /0`, Tier 0 & Tier 1), near `Jcc rel32` (`0x0F 0x80..0x8F`, Tier 0 & Tier 1), and accumulator-immediate ALU forms (`0x05..0x3D`).
+- **Tier 1 & Tier 0 performance engine:** multi-page W^X `ExecArena`, 2-way inline block chaining, hardware `NZCV` condition fusion (`ADD/SUB/CMP/INC/DEC/AND/OR/XOR/TEST -> Jcc`), native self-loop superblocks (**11.19×** narrow / **11.16×** wide Tier 1 speedup), `strb wzr` flag clearing (`OPT-001`), 5-instruction `mvn`+`ubfx` parity (`OPT-002`), MRU region cache, and Tier 0 2048-slot epoch-keyed decoded-instruction cache (**3.47×** narrow / **2.90×** wide speedup).
+- **15 additional Linux syscalls (42 total across 11 slices):** `pread64`(17), `pwrite64`(18), `readv`(19), `writev`(20), `dup`(32), `dup2`(33), `uname`(63, always advertising `"x86_64"`), `fcntl`(72), `gettimeofday`(96), `arch_prctl`(158), `set_tid_address`(218), `clock_gettime`(228), `set_robust_list`(273), `dup3`(292), and `prlimit64`(302).
+
+---
+
 ## [Unreleased] — Phase 6, tenth syscall slice: `statx`(332)
 
 ### Added

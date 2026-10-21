@@ -173,6 +173,7 @@ ElfInfo inspect_elf(const std::uint8_t* bytes, std::size_t size) {
         }
         if (seg.type == kPtInterp) {
             info.has_interp = true;
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
             const auto* start = reinterpret_cast<const char*>(bytes + seg.offset);
             const std::size_t max_len = static_cast<std::size_t>(seg.filesz);
             const std::size_t actual_len =
@@ -365,6 +366,7 @@ std::uint64_t setup_linux_x86_64_stack(GuestAddressSpace& address_space,
             return 0;
         }
         cursor -= len;
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         if (!address_space.write(cursor, reinterpret_cast<const std::uint8_t*>(s.c_str()), len)) {
             return 0;
         }

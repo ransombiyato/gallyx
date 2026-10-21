@@ -5,6 +5,27 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — interpreter fetch-truncation fix
+
+### Fixed — truncated instruction near a region end was silently mis-decoded
+- `interpreter.cpp` `step()` always passed a 15-byte window to `decode()`. When
+  fewer than 15 bytes were readable (rip near the end of a mapped region) it
+  zero-padded the window but still told the decoder the size was 15, so a
+  genuinely truncated instruction could be decoded from zero padding as a valid
+  instruction and executed with wrong semantics — a silent mis-execution
+  (P1). `step()` now tracks the number of bytes actually read and passes that
+  true count to `decode()`, so a truncated instruction is reported as
+  `kUnsupported`/`kTruncated` and rip is not advanced. A complete instruction
+  that merely sits at the end of a region still executes.
+- The Tier 1 translation cache already passed the true available count, so this
+  was an interpreter-only defect; the two tiers now agree.
+- Corrected the misleading RET comment in `step()` (it claimed RET pops the
+  return address; it does not) and pinned the real "top-level RET halts, stack
+  untouched" behaviour with a test. Four new regression tests in
+  `tests/unit/test_interpreter.cpp`.
+
+---
+
 ## [Unreleased] — Phase 6 (access + readlink)
 
 ### Added — `access`(21) and `readlink`(89) (seventh syscall slice)

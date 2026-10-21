@@ -285,33 +285,28 @@ StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
     StepResult result;
 
     // Fetch. The subset has no instruction longer than 15 bytes, so a 15-byte
-    // window is always sufficient and never reads beyond a mapped page for a
-    // well-formed program.
+    // window is always sufficient. `available` is the number of bytes actually
+    // read: near the end of a mapped region a full window may not be readable,
+    // and the decoder must be given the *true* byte count so it can report a
+    // genuinely truncated instruction rather than decoding zero padding as a
+    // valid instruction (a silent mis-execution). We shrink the request until a
+    // read succeeds; only a complete failure to read even one byte is a fetch
+    // fault.
     std::uint8_t code[15] = {};
-    if (!memory.read(state.rip, code, sizeof(code))) {
-        // A short read is acceptable only if the instruction fits; try a
-        // smaller window so we do not fault merely because rip is near the end
-        // of a mapped region.
-        bool fetched = false;
-        for (std::size_t n = 15; n >= 1; --n) {
-            if (memory.read(state.rip, code, n)) {
-                fetched = true;
-                // Zero the rest so the decoder sees a truncated stream rather
-                // than stale bytes, if the instruction needs more.
-                for (std::size_t i = n; i < sizeof(code); ++i) {
-                    code[i] = 0;
-                }
-                break;
-            }
-        }
-        if (!fetched) {
-            result.status = StepStatus::kFault;
-            result.message = "instruction fetch fault at rip";
-            return result;
+    std::size_t available = 0;
+    for (std::size_t n = sizeof(code); n >= 1; --n) {
+        if (memory.read(state.rip, code, n)) {
+            available = n;
+            break;
         }
     }
+    if (available == 0) {
+        result.status = StepStatus::kFault;
+        result.message = "instruction fetch fault at rip";
+        return result;
+    }
 
-    const DecodeResult decoded = decode(code, sizeof(code), state.rip);
+    const DecodeResult decoded = decode(code, available, state.rip);
     result.instruction = decoded.instruction;
     if (!decoded.ok()) {
         result.status = StepStatus::kUnsupported;
@@ -488,8 +483,12 @@ StepResult step(GuestState& state, Memory& memory, SyscallHandler* syscalls) {
     }
 
     case Opcode::kRet:
-        // Modelled as: pop the return address into rip. This keeps RET usable
-        // in test programs without modelling the call frame.
+        // There is no CALL instruction in the subset yet, so RET has no return
+        // address to pop. Rather than fabricate a stack pop, it is modelled as
+        // "stop here" (kHalted), consistently with the Tier 1 translator
+        // (translator.cpp) which also treats RET as a block-terminating halt.
+        // rip is left on the RET instruction, exactly like HLT. When CALL lands,
+        // both tiers must be changed together and this comment updated.
         result.status = StepStatus::kHalted;
         result.message = "ret (top-level return)";
         return result;

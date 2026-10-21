@@ -329,3 +329,60 @@ HYPERION_TEST("interpreter", "condition_evaluation_table") {
     HYPERION_CHECK(hyperion::alu::evaluate(hyperion::Condition::kL, g));
     HYPERION_CHECK(hyperion::alu::evaluate(hyperion::Condition::kB, g) == false);
 }
+
+HYPERION_TEST("interpreter", "truncated_instruction_at_region_end_is_reported_not_zero_padded") {
+    // Regression: a 2-byte opcode placed at the very last byte of a mapped
+    // region. The full 15-byte fetch window fails, but the decoder must be told
+    // the true number of readable bytes so it reports a *truncated* instruction
+    // rather than decoding zero padding (which could look like a valid
+    // instruction and silently mis-execute).
+    FlatMemory memory(kBase, 1);
+    memory.data()[0] = 0x0F; // the first byte of a 2-byte opcode, nothing after
+    GuestState state;
+    state.rip = kBase;
+    const auto r = hyperion::step(state, memory);
+    HYPERION_CHECK(r.status == StepStatus::kUnsupported);
+    HYPERION_CHECK(r.decode_error == hyperion::DecodeError::kTruncated);
+    HYPERION_CHECK_EQ(state.rip, kBase); // nothing executed
+}
+
+HYPERION_TEST("interpreter", "multi_byte_instruction_spanning_region_end_is_reported") {
+    // mov rax, imm64 (10 bytes) with only 3 bytes mapped: must be reported as
+    // truncated, not decoded from zero padding as "mov rax, 0".
+    FlatMemory memory(kBase, 3);
+    const std::uint8_t code[3] = {0x48, 0xB8, 0x34};
+    std::memcpy(memory.data(), code, sizeof(code));
+    GuestState state;
+    state.rip = kBase;
+    const auto r = hyperion::step(state, memory);
+    HYPERION_CHECK(r.status == StepStatus::kUnsupported);
+    HYPERION_CHECK(r.decode_error == hyperion::DecodeError::kTruncated);
+}
+
+HYPERION_TEST("interpreter", "last_byte_of_a_region_can_hold_a_one_byte_instruction") {
+    // The complement of the truncation case: a complete 1-byte instruction as
+    // the final mapped byte must still execute (we must not fault merely because
+    // a full 15-byte window is unavailable).
+    FlatMemory memory(kBase, 1);
+    memory.data()[0] = 0xF4; // hlt
+    GuestState state;
+    state.rip = kBase;
+    const auto r = hyperion::step(state, memory);
+    HYPERION_CHECK(r.status == StepStatus::kHalted);
+}
+
+HYPERION_TEST("interpreter", "ret_at_top_level_halts_without_touching_the_stack") {
+    // RET has no CALL to return from: Hyperion models it as "stop here". The
+    // stack pointer and memory must be untouched (an earlier comment claimed RET
+    // pops the return address; it does not, and this pins the real behaviour).
+    FlatMemory memory(kBase, 4096);
+    memory.data()[0] = 0xC3; // ret
+    GuestState state;
+    state.rip = kBase;
+    state.reg(Gpr::kRsp) = kBase + 0x800;
+    const std::uint64_t rsp_before = state.reg(Gpr::kRsp);
+    const auto r = hyperion::step(state, memory);
+    HYPERION_CHECK(r.status == StepStatus::kHalted);
+    HYPERION_CHECK_EQ(state.rip, kBase); // halted at the ret, not advanced
+    HYPERION_CHECK_EQ(state.reg(Gpr::kRsp), rsp_before);
+}

@@ -5,6 +5,18 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — README/ROADMAP still described the pre-Phase-4 CLI
+
+### Fixed
+- `README.md`'s install section still told users `hyperion run` "does not work
+  yet, on purpose" and "prints NOT IMPLEMENTED and exits 2". It has run blobs
+  through both tiers since Phase 3/4. Rewritten to describe what actually
+  happens, including the x86-64-host interpreter fallback.
+- `ROADMAP.md`'s overall-status line said "Phase 0 complete" while its own table
+  marked Phase 1 complete.
+
+---
+
 ## [Unreleased] — decoder misreported a truncated SIB byte
 
 ### Fixed

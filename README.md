@@ -147,11 +147,14 @@ less install.sh && bash install.sh
 
 To remove it again: `bash install.sh --uninstall --prefix ~/.local`.
 
-> **`hyperion run` does not work yet, on purpose.** Single instructions can be
-> translated and executed, but there is no basic-block translation or code cache
-> (Phase 4), so a whole guest program cannot run. It prints `NOT IMPLEMENTED`
-> and exits 2. A command that silently did nothing would be worse than one that
-> says so. `hyperion bench` measures the host machine, not any emulation.
+> **`hyperion run` works, with a small instruction subset.** It loads a
+> flat x86-64 blob (not an ELF executable — there is no ELF loader yet),
+> translates it basic block by basic block into AArch64, and executes it. On an
+> x86-64 host, where generated AArch64 code cannot run, it says so on stderr and
+> falls back to the reference interpreter. `--tier=0` forces the interpreter,
+> `--tier=1` forces generated code. Because there is no ELF loader, no block
+> chaining and no cache invalidation yet, no real Linux program runs end to end.
+> `hyperion bench` measures the host machine, not any emulation.
 
 ### Build from source
 

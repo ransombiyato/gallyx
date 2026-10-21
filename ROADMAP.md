@@ -5,8 +5,8 @@ demonstrated by evidence**, not merely by the existence of code.
 
 Status legend: ✅ complete · 🟡 in progress · ⬜ not started
 
-**Overall: Phase 0 complete; Phases 2–6 in progress (Phase 6 has seven syscall
-slices landed).**
+**Overall: Phases 0–1 complete; Phases 2–6 in progress (Phase 6 has seven
+syscall slices landed).**
 
 | Phase | Title | Status |
 | --- | --- | --- |

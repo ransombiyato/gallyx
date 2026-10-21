@@ -752,3 +752,38 @@ per-mapping, not a total-address-space limit: many mappings under the cap can
 still sum large, and a total-commit limit remains open (Phase 10, SECURITY.md
 R5). `map_image` (the program loader) is not capped, because the image is
 supplied by the host harness, not the guest.
+
+---
+
+## D-030 — `getdents64` forwards the host directory buffer verbatim
+
+**Context.** `getdents64`(217) is the most frequent syscall in the trace sample
+that was still unimplemented (3941 calls, `docs/syscalls/U4.md`) and the one
+that turns `opendir`/`readdir` from "returns -ENOSYS" into working code. The
+obvious question is whether the result must be rebuilt field by field, as
+`fstat`/`newfstatat` do for `struct stat`.
+
+**Decision.** Forward the host's bytes verbatim. `struct linux_dirent64` is a
+fixed UAPI layout — `u64 d_ino; s64 d_off; u16 d_reclen; u8 d_type; char
+d_name[]`, `sizeof == 24` — and, unlike `struct stat`, it is **identical on
+x86-64 and AArch64**. There is no ABI-sensitive translation to perform, so the
+handler reads entries from the host directory fd and copies them into the guest
+buffer unchanged. This also inherits the kernel's exact error semantics for
+free: `-EBADF` (not open), `-ENOTDIR` (not a directory), `-EINVAL` (`count`
+smaller than one 24-byte record) — verified on the host, including that `count
+== 23` is `-EINVAL` and `count == 24` succeeds.
+
+**Consequences.** Directory listing works in both tiers with no layout risk. The
+guest `count` is clamped to a bounded read (8 KiB) before the host call, so a
+huge request cannot drive one unbounded allocation (the same rule as `read`);
+a short read is the correct result and the guest simply calls again. Because the
+record layout is shared, this is a deliberate exception to the "rebuild
+ABI-sensitive structures field by field" rule (D-027): the rule applies when the
+host and guest layouts *differ*, which here they do not.
+
+**Related change.** `openat` now honours `O_DIRECTORY` (guest `0x10000`, host
+AArch64 `0x4000` — translated explicitly, never passed through), `O_NONBLOCK`
+and `O_CLOEXEC`. glibc's `opendir` opens with `O_RDONLY|O_NONBLOCK|O_DIRECTORY|
+O_CLOEXEC`, so without this a directory could never be opened and `getdents64`
+would be unreachable. Flags still outside the set (`O_NOFOLLOW`, `O_PATH`, …)
+remain `-ENOSYS`.

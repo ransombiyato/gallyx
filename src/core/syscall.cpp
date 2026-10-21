@@ -13,6 +13,7 @@
 #include <string>
 #include <sys/random.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -168,6 +169,47 @@ std::int64_t do_read(GuestState& s, Memory& memory, const std::vector<GuestDescr
     return static_cast<std::int64_t>(done);
 }
 
+// getdents64(fd, dirp, count): read directory entries into the guest buffer.
+//
+// `struct linux_dirent64` is a fixed UAPI layout (u64 d_ino; s64 d_off; u16
+// d_reclen; u8 d_type; char d_name[]; sizeof == 24) that is identical on x86-64
+// and AArch64, unlike `struct stat`. The entries can therefore be forwarded
+// from the host verbatim rather than rebuilt field by field. The host kernel
+// also supplies the exact error behaviour for free: -EBADF for a descriptor
+// that is not open, -ENOTDIR for one that is not a directory, and -EINVAL when
+// `count` is smaller than one entry.
+std::int64_t do_getdents64(GuestState& s, Memory& memory,
+                           const std::vector<GuestDescriptor>& files) {
+    const std::int64_t fd = static_cast<std::int64_t>(arg(s, 0));
+    const std::uint64_t buf = arg(s, 1);
+    const std::uint64_t count = arg(s, 2);
+
+    std::FILE* f = lookup_stream(files, fd);
+    if (f == nullptr) {
+        return -kEbadf;
+    }
+    // A buffer smaller than one dirent is EINVAL, as the kernel reports. Checked
+    // before the host read so a doomed call never consumes directory entries.
+    constexpr std::uint64_t kDirent64Size = 24; // sizeof(struct linux_dirent64)
+    if (count < kDirent64Size) {
+        return -kEinval;
+    }
+    // The guest controls `count`; clamp the host read so a huge request cannot
+    // drive one unbounded allocation. A short read is the correct result and the
+    // guest simply calls again.
+    constexpr std::size_t kMaxGetdents = 8192;
+    const std::size_t want = static_cast<std::size_t>(count < kMaxGetdents ? count : kMaxGetdents);
+    std::array<std::uint8_t, kMaxGetdents> entries{};
+    const long got = ::syscall(SYS_getdents64, ::fileno(f), entries.data(), want);
+    if (got < 0) {
+        return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+    }
+    if (!memory.write(buf, entries.data(), static_cast<std::size_t>(got))) {
+        return -kEfault;
+    }
+    return static_cast<std::int64_t>(got);
+}
+
 // close(fd): drop the guest descriptor. A stream the handler opened is closed;
 // one the embedder adopted is only removed from the guest's view (its owner
 // closes it).
@@ -277,11 +319,20 @@ OpenFlags translate_open_flags(std::uint64_t flags) {
     if ((flags & open_flags::kOExcl) != 0) {
         r.host |= O_EXCL;
     }
-    // Anything outside the honoured set (O_DIRECTORY, O_NONBLOCK, O_CLOEXEC, …)
-    // is not silently ignored: the call is reported unimplemented.
+    if ((flags & open_flags::kODirectory) != 0) {
+        r.host |= O_DIRECTORY;
+    }
+    if ((flags & open_flags::kONonblock) != 0) {
+        r.host |= O_NONBLOCK;
+    }
+    // O_CLOEXEC is accepted: the handler always adds it, so honouring the
+    // guest's request is a no-op, not a semantic change.
+    // Anything outside the honoured set (O_NOFOLLOW, O_PATH, O_TMPFILE, …) is
+    // not silently ignored: the call is reported unimplemented.
     constexpr std::uint64_t kHonoured = open_flags::kOAccmode | open_flags::kOCreat |
                                         open_flags::kOTrunc | open_flags::kOAppend |
-                                        open_flags::kOExcl;
+                                        open_flags::kOExcl | open_flags::kODirectory |
+                                        open_flags::kONonblock | open_flags::kOCloseexec;
     if ((flags & ~kHonoured) != 0) {
         return {0, false};
     }
@@ -697,6 +748,12 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
         result.status = SyscallStatus::kHandled;
         return result;
     }
+    case sysno::kGetdents64: {
+        const std::int64_t r = do_getdents64(state, memory, files_);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
     case sysno::kClose: {
         const std::int64_t r = do_close(state, files_);
         state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
@@ -851,7 +908,7 @@ bool is_minimal_syscall(std::uint64_t number) {
            number == sysno::kGetuid || number == sysno::kGeteuid || number == sysno::kGetgid ||
            number == sysno::kGetegid || number == sysno::kGetppid || number == sysno::kGetcwd ||
            number == sysno::kGetrandom || number == sysno::kReadlink || number == sysno::kAccess ||
-           number == sysno::kReadlinkat;
+           number == sysno::kReadlinkat || number == sysno::kGetdents64;
 }
 
 } // namespace hyperion

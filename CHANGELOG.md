@@ -5,6 +5,33 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 6, ninth syscall slice: `getdents64`(217)
+
+### Added
+- `getdents64(217)` in both tiers: directory listing, the highest-frequency
+  implementable syscall in the trace sample (3941 calls). The `struct
+  linux_dirent64` record is a fixed UAPI layout identical on x86-64 and AArch64,
+  so host entries are forwarded verbatim rather than rebuilt field by field
+  (D-030); the kernel's own `-EBADF`/`-ENOTDIR`/`-EINVAL` come through unchanged,
+  and the guest `count` is clamped to a bounded read.
+- `openat` now honours `O_DIRECTORY` (guest `0x10000`, translated to the host
+  AArch64 `0x4000`), `O_NONBLOCK` and `O_CLOEXEC` — glibc's `opendir` flag set,
+  without which a directory could never be opened.
+- Tests `getdents64_lists_a_directory_through_openat`,
+  `getdents64_on_a_regular_file_is_enotdir`,
+  `getdents64_bad_fd_is_ebadf_and_small_count_is_einval`,
+  `getdents64_bad_buffer_is_efault`, `getdents64_is_advertised_as_minimal`,
+  `openat_accepts_the_directory_flags`.
+- `docs/syscalls/inventory.tsv`: `getdents64` moved from `not-started` to
+  `implemented`; regenerated `docs/syscalls/U4.md`.
+
+### Changed
+- `DECISIONS.md` D-030 records why `linux_dirent64` is forwarded verbatim
+  (shared layout) while `struct stat` is rebuilt field by field (D-027).
+- The syscall layer now implements 26 numbers across nine slices.
+
+---
+
 ## [Unreleased] — Phase 6, eighth syscall slice: `readlinkat`(267)
 
 ### Added

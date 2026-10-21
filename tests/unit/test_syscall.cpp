@@ -8,10 +8,12 @@
 // capturing output sink so nothing leaks into the test runner's stdout. The
 // tests that require executing generated AArch64 code are guarded on
 // __aarch64__, matching the rest of the suite.
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -685,9 +687,10 @@ HYPERION_TEST("syscall", "openat_unhandled_flag_is_unimplemented") {
     MinimalSyscallHandler handler;
     FlatMemory memory = program({});
     put_cstr(memory, kBase + 0x400, ".");
-    // O_DIRECTORY (0x10000) is outside the honoured set: not silently dropped.
+    // O_NOFOLLOW (0x20000) is outside the honoured set: not silently dropped.
+    // (O_DIRECTORY/O_NONBLOCK/O_CLOEXEC are honoured as of the getdents64 slice.)
     GuestState s =
-        syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, kBase + 0x400, 0x10000, 0});
+        syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, kBase + 0x400, 0x20000, 0});
     const auto r = handler.handle(s, memory);
     HYPERION_CHECK(r.status == SyscallStatus::kUnimplemented);
     HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnosys));
@@ -1040,6 +1043,164 @@ HYPERION_TEST("syscall", "readlinkat_rejects_zero_size_and_bad_pointer") {
 
 HYPERION_TEST("syscall", "readlinkat_is_advertised_as_minimal") {
     HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kReadlinkat));
+}
+
+// --- getdents64 (ninth slice) ----------------------------------------------
+
+// A temporary directory with one known file inside, removed on destruction.
+struct TempDir {
+    std::string path;
+    TempDir() {
+        char tmpl[] = "/tmp/hyperion_getdents_XXXXXX";
+        char* made = ::mkdtemp(tmpl);
+        if (made != nullptr) {
+            path = made;
+            const std::string child = path + "/known_entry";
+            const int fd = ::open(child.c_str(), O_CREAT | O_WRONLY | O_CLOEXEC, 0600);
+            if (fd >= 0) {
+                ::close(fd);
+            }
+        }
+    }
+    ~TempDir() {
+        if (!path.empty()) {
+            ::unlink((path + "/known_entry").c_str());
+            ::rmdir(path.c_str());
+        }
+    }
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
+};
+
+// Parse the linux_dirent64 records in `buf` and return their names.
+std::vector<std::string> parse_dirent_names(const std::uint8_t* buf, std::size_t len) {
+    std::vector<std::string> names;
+    std::size_t off = 0;
+    while (off + 24 <= len) {
+        std::uint16_t reclen = 0;
+        std::memcpy(&reclen, buf + off + 16, sizeof(reclen));
+        if (reclen < 24 || off + reclen > len) {
+            break; // malformed; stop rather than read out of bounds
+        }
+        const char* name = reinterpret_cast<const char*>(buf + off + 19);
+        names.emplace_back(name, ::strnlen(name, reclen - 19));
+        off += reclen;
+    }
+    return names;
+}
+
+HYPERION_TEST("syscall", "getdents64_lists_a_directory_through_openat") {
+    TempDir dir;
+    HYPERION_CHECK(!dir.path.empty());
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, dir.path.c_str());
+
+    // opendir-style open: O_RDONLY | O_NONBLOCK | O_DIRECTORY. These flags must
+    // now be honoured, not reported unimplemented.
+    const std::uint64_t flags = hyperion::open_flags::kORdonly | hyperion::open_flags::kONonblock |
+                                hyperion::open_flags::kODirectory;
+    GuestState o =
+        syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, kBase + 0x400, flags, 0});
+    HYPERION_CHECK(handler.handle(o, memory).status == SyscallStatus::kHandled);
+    const std::int64_t gfd = static_cast<std::int64_t>(o.reg(Gpr::kRax));
+    HYPERION_CHECK(gfd >= 3);
+
+    GuestState g = syscall_state(hyperion::sysno::kGetdents64,
+                                 {static_cast<std::uint64_t>(gfd), kBase + 0x800, 4096});
+    const hyperion::SyscallResult r = handler.handle(g, memory);
+    HYPERION_CHECK(r.status == SyscallStatus::kHandled);
+    const std::int64_t got = static_cast<std::int64_t>(g.reg(Gpr::kRax));
+    HYPERION_CHECK(got > 0);
+
+    std::vector<std::uint8_t> buf(static_cast<std::size_t>(got));
+    HYPERION_CHECK(memory.read(kBase + 0x800, buf.data(), buf.size()));
+    const std::vector<std::string> names = parse_dirent_names(buf.data(), buf.size());
+    HYPERION_CHECK(std::find(names.begin(), names.end(), ".") != names.end());
+    HYPERION_CHECK(std::find(names.begin(), names.end(), "..") != names.end());
+    HYPERION_CHECK(std::find(names.begin(), names.end(), "known_entry") != names.end());
+}
+
+HYPERION_TEST("syscall", "getdents64_on_a_regular_file_is_enotdir") {
+    TempFile tf;
+    HYPERION_CHECK(tf.fd >= 0);
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, tf.path.c_str());
+
+    GuestState o = syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, kBase + 0x400,
+                                                            hyperion::open_flags::kORdonly, 0});
+    HYPERION_CHECK(handler.handle(o, memory).status == SyscallStatus::kHandled);
+    const std::int64_t gfd = static_cast<std::int64_t>(o.reg(Gpr::kRax));
+
+    GuestState g = syscall_state(hyperion::sysno::kGetdents64,
+                                 {static_cast<std::uint64_t>(gfd), kBase + 0x800, 4096});
+    HYPERION_CHECK(handler.handle(g, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(g.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnotdir));
+}
+
+HYPERION_TEST("syscall", "getdents64_bad_fd_is_ebadf_and_small_count_is_einval") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+
+    GuestState bad = syscall_state(hyperion::sysno::kGetdents64, {42, kBase + 0x800, 4096});
+    handler.handle(bad, memory);
+    HYPERION_CHECK_EQ(bad.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEbadf));
+
+    TempDir dir;
+    HYPERION_CHECK(!dir.path.empty());
+    put_cstr(memory, kBase + 0x400, dir.path.c_str());
+    GuestState o = syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, kBase + 0x400,
+                                                            hyperion::open_flags::kODirectory, 0});
+    HYPERION_CHECK(handler.handle(o, memory).status == SyscallStatus::kHandled);
+    const std::int64_t gfd = static_cast<std::int64_t>(o.reg(Gpr::kRax));
+
+    // A buffer smaller than one dirent (24 bytes) is EINVAL, as the kernel says.
+    GuestState small = syscall_state(hyperion::sysno::kGetdents64,
+                                     {static_cast<std::uint64_t>(gfd), kBase + 0x800, 20});
+    handler.handle(small, memory);
+    HYPERION_CHECK_EQ(small.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEinval));
+}
+
+HYPERION_TEST("syscall", "getdents64_bad_buffer_is_efault") {
+    TempDir dir;
+    HYPERION_CHECK(!dir.path.empty());
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, dir.path.c_str());
+
+    GuestState o = syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, kBase + 0x400,
+                                                            hyperion::open_flags::kODirectory, 0});
+    HYPERION_CHECK(handler.handle(o, memory).status == SyscallStatus::kHandled);
+    const std::int64_t gfd = static_cast<std::int64_t>(o.reg(Gpr::kRax));
+
+    // A valid directory but an unmapped destination buffer.
+    GuestState g = syscall_state(hyperion::sysno::kGetdents64,
+                                 {static_cast<std::uint64_t>(gfd), kBase + kMemSize + 4096, 4096});
+    handler.handle(g, memory);
+    HYPERION_CHECK_EQ(g.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEfault));
+}
+
+HYPERION_TEST("syscall", "getdents64_is_advertised_as_minimal") {
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kGetdents64));
+}
+
+HYPERION_TEST("syscall", "openat_accepts_the_directory_flags") {
+    TempDir dir;
+    HYPERION_CHECK(!dir.path.empty());
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, dir.path.c_str());
+
+    // O_DIRECTORY | O_NONBLOCK | O_CLOEXEC are now honoured, so a directory
+    // opens as a handled call rather than being reported unimplemented.
+    const std::uint64_t flags = hyperion::open_flags::kORdonly | hyperion::open_flags::kONonblock |
+                                hyperion::open_flags::kODirectory |
+                                hyperion::open_flags::kOCloseexec;
+    GuestState s =
+        syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, kBase + 0x400, flags, 0});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK(static_cast<std::int64_t>(s.reg(Gpr::kRax)) >= 3);
 }
 
 // --- Process-identity getters, getcwd, getrandom (fifth slice) -------------

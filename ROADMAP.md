@@ -282,7 +282,7 @@ optimization decisions.
 
 ---
 
-## Phase 6 — Linux ABI and syscall compatibility 🟡 (eight slices implemented)
+## Phase 6 — Linux ABI and syscall compatibility 🟡 (nine slices implemented)
 
 **Objective.** Run real Linux guest programs.
 
@@ -350,8 +350,13 @@ file descriptors, signals, threading, futexes. Feature matrix + integration test
   (D-028).
 - ✅ **`readlinkat`(267) (eighth slice).** glibc's modern `readlink` entry point;
   shares the `readlink` body, `AT_FDCWD` only.
+- ✅ **`getdents64`(217) (ninth slice).** Directory listing — the highest-frequency
+  implementable syscall in the trace sample (3941 calls). The `linux_dirent64`
+  record is a shared UAPI layout, so host entries are forwarded verbatim (D-030);
+  `openat` now honours `O_DIRECTORY`/`O_NONBLOCK`/`O_CLOEXEC`, glibc's `opendir`
+  flags.
 - ⬜ The remaining U4 syscalls a program needs to start (`arch_prctl`,
-  `getdents64`, `set_tid_address`, `set_robust_list`, …) — **next**.
+  `set_tid_address`, `set_robust_list`, …) — **next**.
 - ⬜ Signals, threads, futexes.
 
 **Exit criteria.** A clearly defined set of real Linux guest programs works

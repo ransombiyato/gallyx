@@ -247,7 +247,7 @@
 214	epoll_ctl_old	E3	not-started	Obsolete epoll control.	provisional
 215	epoll_wait_old	E3	not-started	Obsolete epoll wait.	provisional
 216	remap_file_pages	E3	not-started	Create a nonlinear mapping (deprecated).	provisional
-217	getdents64	U4	not-started	Read directory entries (modern struct layout).	trace:3941
+217	getdents64	U4	implemented	Read directory entries (modern struct layout).	trace:3941
 218	set_tid_address	U4	not-started	Register a clear_child_tid address.	trace:17
 219	restart_syscall	E1	not-started	Restart an interrupted syscall (kernel-issued).	provisional
 220	semtimedop	E2	not-started	System V semaphore op with timeout.	provisional

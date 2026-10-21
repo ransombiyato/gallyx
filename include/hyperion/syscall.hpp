@@ -69,6 +69,7 @@ inline constexpr std::uint64_t kGeteuid = 107;
 inline constexpr std::uint64_t kGetegid = 108;
 inline constexpr std::uint64_t kGetppid = 110;
 inline constexpr std::uint64_t kGettid = 186;
+inline constexpr std::uint64_t kGetdents64 = 217;
 inline constexpr std::uint64_t kExitGroup = 231;
 inline constexpr std::uint64_t kOpenat = 257;
 inline constexpr std::uint64_t kNewfstatat = 262;
@@ -87,6 +88,16 @@ inline constexpr std::uint64_t kOCreat = 0x40;
 inline constexpr std::uint64_t kOTrunc = 0x200;
 inline constexpr std::uint64_t kOAppend = 0x400;
 inline constexpr std::uint64_t kOExcl = 0x80;
+// O_DIRECTORY: fail unless the path names a directory. Its *guest* value
+// (0x10000) differs from the host's on AArch64 (0x4000), so it is translated
+// explicitly rather than passed through.
+inline constexpr std::uint64_t kODirectory = 0x10000;
+// O_NONBLOCK: non-blocking I/O. Same value on both ABIs, but translated
+// explicitly for the same reason.
+inline constexpr std::uint64_t kONonblock = 0x800;
+// O_CLOEXEC: accepted and ignored; the handler always opens with O_CLOEXEC so a
+// guest descriptor never leaks into a host child.
+inline constexpr std::uint64_t kOCloseexec = 0x80000;
 } // namespace open_flags
 
 // AT_FDCWD: a relative pathname is resolved against the current working

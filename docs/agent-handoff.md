@@ -66,7 +66,7 @@ held in callee-saved host registers, with a profitability guard that declines
 allocation on tiny blocks), but there is no cross-block allocation or spilling.
 The syscall layer exists and is a **partial slice**: `read`/`write`/`close`/
 `fstat`/`lseek`/`exit`/`exit_group`, `mmap`/`mprotect`/`munmap`/`brk`,
-`openat`, `newfstatat`, `access`, `readlink`, `readlinkat`, and the process-identity getters
+`openat`, `newfstatat`, `access`, `readlink`, `readlinkat`, `getdents64`, and the process-identity getters
 plus `getcwd`/`getrandom` are implemented, everything else returns `-ENOSYS`. `openat` is limited
 to `AT_FDCWD` and a bounded guest pathname, and it forwards to the host kernel —
 Hyperion is **not a sandbox** (SECURITY.md, DECISIONS.md D-025). The identity
@@ -188,9 +188,10 @@ the second (the guest address space plus `mmap`/`mprotect`/`munmap`/`brk`),
 the third (a guest descriptor table plus `read`/`close`/`lseek`),
 the fourth (`openat`/`fstat`), the fifth (the process-identity getters plus
 `getcwd`/`getrandom`), the sixth (`newfstatat`, glibc's stat entry point), and
-the seventh (`access`/`readlink`), and the eighth (`readlinkat`).
+the seventh (`access`/`readlink`), the eighth (`readlinkat`), and the ninth
+(`getdents64`).
 The next concrete step is the remaining U4/E1 syscalls a real program needs to
-start (`arch_prctl`, `getdents64`, `statx`, `readlinkat`),
+start (`arch_prctl`, `statx`, `set_tid_address`),
 then memory operands in the code generator.** Guest state, the
 decoder, the reference interpreter, the subset contract (`COMPATIBILITY.md` §2),
 the hardware differential, the AArch64 encoder, executable memory,
@@ -289,11 +290,17 @@ and pass.
 13. ~~Implement `access`(21) and `readlink`(89).~~ **Done & tested.** Both
     forward to the host over the shared bounded `read_guest_cstr`; `readlink`
     mirrors the kernel's no-terminator/truncate semantics and clamps a huge
-    `bufsiz`. Five new tests; both numbers marked `implemented` (24 of 375).
-14. **Next (Phase 6): the remaining U4/E1 syscalls a real program needs to
+    `bufsiz`. Five new tests; both numbers marked `implemented`.
+14. ~~Implement `readlinkat`(267).~~ **Done & tested.** Shares the `readlink`
+    body, `AT_FDCWD` only (25 of 375 implemented).
+15. ~~Implement `getdents64`(217).~~ **Done & tested.** Directory listing, the
+    highest-frequency implementable syscall in the trace sample. Host entries are
+    forwarded verbatim (shared `linux_dirent64` layout, D-030); `openat` now
+    honours `O_DIRECTORY`/`O_NONBLOCK`/`O_CLOEXEC` so `opendir` can open a
+    directory. Six new tests (26 of 375 implemented).
+16. **Next (Phase 6): the remaining U4/E1 syscalls a real program needs to
     start.** `arch_prctl`(158) (FS/GS base — needed before glibc startup, and the
-    one that needs a new `GuestState.fs_base` field), `getdents64`(217),
-    `readlinkat`(267), `set_tid_address`(218),
+    one that needs a new `GuestState.fs_base` field), `set_tid_address`(218),
     `rseq`(334), `prlimit64`(302) and `statx`(332) (its own field-by-field
     layout). Reuse the `newfstatat`/`fstat` shared guest-`struct stat` builder
     where applicable. Validate every guest buffer against the address space
@@ -301,12 +308,12 @@ and pass.
     number's `status` in `docs/syscalls/inventory.tsv` to `implemented`,
     regenerate (`python3 tools/gen_syscall_inventory.py`), add a focused test per
     call, and update STATUS.md §0e.
-15. **Then (Phase 6/7): memory operands in the code generator.** The AArch64
+17. **Then (Phase 6/7): memory operands in the code generator.** The AArch64
     generator is register-only (`translator.cpp validate_body` rejects any
     memory operand), so Tier 1 stops honestly at the first load/store. Every
     real program loads and stores, so this is the gating item for running
     anything nontrivial in Tier 1, and it pairs naturally with `read`/`openat`.
-16. **Also open (Phase 5): block chaining.** Today every block exit returns to
+18. **Also open (Phase 5): block chaining.** Today every block exit returns to
     the dispatcher for a lookup. Link a block's exit directly to its successor's
     generated code so a hot loop stays in generated code, guarded by the same
     authoritative-`rip` rule, with the dispatcher as the fallback for any

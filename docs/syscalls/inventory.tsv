@@ -51,7 +51,7 @@
 18	pwrite64	U3	not-started	Write at an offset without moving the file offset.	provisional
 19	readv	U3	not-started	Scatter read into multiple buffers.	provisional
 20	writev	U3	not-started	Gather write from multiple buffers.	provisional
-21	access	U3	not-started	Check file accessibility (legacy).	trace:45
+21	access	U3	implemented	Check file accessibility (legacy).	trace:45
 22	pipe	U2	not-started	Create an unnamed pipe.	provisional
 23	select	U2	not-started	Wait for readiness on a descriptor set (legacy).	provisional
 24	sched_yield	U3	not-started	Yield the processor.	provisional
@@ -119,7 +119,7 @@
 86	link	U2	not-started	Create a hard link.	provisional
 87	unlink	U4	not-started	Remove a file.	provisional
 88	symlink	U2	not-started	Create a symbolic link.	provisional
-89	readlink	U4	not-started	Read a symbolic link target.	trace:392
+89	readlink	U4	implemented	Read a symbolic link target.	trace:392
 90	chmod	U3	not-started	Change a file's mode.	provisional
 91	fchmod	U3	not-started	Change a descriptor's mode.	provisional
 92	chown	U2	not-started	Change a file's owner.	provisional

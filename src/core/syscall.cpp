@@ -433,6 +433,62 @@ std::int64_t do_newfstatat(GuestState& s, Memory& memory) {
     return write_guest_stat(memory, buf, st);
 }
 
+// readlink(pathname, buf, bufsiz): copy a symlink's target into the guest
+// buffer. As readlink(2): the result is *not* NUL-terminated, a target longer
+// than bufsiz is silently truncated (not an error), and a zero bufsiz is
+// -EINVAL. The path is read with the same bounded reader as openat.
+std::int64_t do_readlink(GuestState& s, Memory& memory) {
+    const std::uint64_t path_addr = arg(s, 0);
+    const std::uint64_t buf = arg(s, 1);
+    const std::uint64_t bufsiz = arg(s, 2);
+
+    if (bufsiz == 0) {
+        return -kEinval;
+    }
+    std::string path;
+    const std::int64_t rc = read_guest_cstr(memory, path_addr, path);
+    if (rc != 0) {
+        return rc;
+    }
+    // The host reader writes at most bufsiz bytes and never terminates; a huge
+    // guest bufsiz is clamped to a sane maximum rather than allocating it.
+    constexpr std::size_t kMaxTarget = 4096;
+    std::array<char, kMaxTarget> target{};
+    const std::size_t want = static_cast<std::size_t>(bufsiz < kMaxTarget ? bufsiz : kMaxTarget);
+    const ssize_t got = ::readlink(path.c_str(), target.data(), want);
+    if (got < 0) {
+        return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+    }
+    if (!memory.write(buf, reinterpret_cast<const std::uint8_t*>(target.data()),
+                      static_cast<std::size_t>(got))) {
+        return -kEfault;
+    }
+    return static_cast<std::int64_t>(got);
+}
+
+// access(pathname, mode): check whether the host process may access a path.
+// mode is F_OK (0) or a mask of R_OK/W_OK/X_OK. Any other bit is -EINVAL, as
+// the kernel does. This forwards to the host, so it reports the *host
+// process's* access, consistent with the openat policy (DECISIONS.md D-025).
+std::int64_t do_access(GuestState& s, Memory& memory) {
+    const std::uint64_t path_addr = arg(s, 0);
+    const std::uint64_t mode = arg(s, 1);
+
+    constexpr std::uint64_t kModeMask = 0x7; // R_OK|W_OK|X_OK
+    if ((mode & ~kModeMask) != 0) {
+        return -kEinval;
+    }
+    std::string path;
+    const std::int64_t rc = read_guest_cstr(memory, path_addr, path);
+    if (rc != 0) {
+        return rc;
+    }
+    if (::access(path.c_str(), static_cast<int>(mode)) != 0) {
+        return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+    }
+    return 0;
+}
+
 // Translate the guest PROT_* bits into the address space's MemPerm. Unknown bits
 // are ignored, as the kernel does; PROT_NONE (no bits) maps to kNone.
 MemPerm prot_to_perm(std::uint64_t prot) {
@@ -655,6 +711,18 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
         result.status = (r == -kEnosys) ? SyscallStatus::kUnimplemented : SyscallStatus::kHandled;
         return result;
     }
+    case sysno::kReadlink: {
+        const std::int64_t r = do_readlink(state, memory);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kAccess: {
+        const std::int64_t r = do_access(state, memory);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
     case sysno::kLseek: {
         const std::int64_t r = do_lseek(state, files_);
         state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
@@ -759,7 +827,7 @@ bool is_minimal_syscall(std::uint64_t number) {
            number == sysno::kNewfstatat || number == sysno::kGetpid || number == sysno::kGettid ||
            number == sysno::kGetuid || number == sysno::kGeteuid || number == sysno::kGetgid ||
            number == sysno::kGetegid || number == sysno::kGetppid || number == sysno::kGetcwd ||
-           number == sysno::kGetrandom;
+           number == sysno::kGetrandom || number == sysno::kReadlink || number == sysno::kAccess;
 }
 
 } // namespace hyperion

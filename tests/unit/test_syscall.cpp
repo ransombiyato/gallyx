@@ -864,6 +864,106 @@ HYPERION_TEST("syscall", "newfstatat_is_advertised_as_minimal") {
     HYPERION_CHECK(!hyperion::is_minimal_syscall(hyperion::sysno::kNewfstatat + 1000));
 }
 
+// --- access(21) and readlink(89) (seventh slice) ---------------------------
+
+HYPERION_TEST("syscall", "access_reports_a_real_file_and_enoent_for_a_missing_one") {
+    TempFile tf;
+    HYPERION_CHECK(tf.fd >= 0);
+
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, tf.path.c_str());
+
+    GuestState ok = syscall_state(hyperion::sysno::kAccess, {kBase + 0x400, 0 /*F_OK*/});
+    HYPERION_CHECK(handler.handle(ok, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(ok.reg(Gpr::kRax), std::uint64_t{0});
+
+    put_cstr(memory, kBase + 0x500, "/nonexistent/hyperion/path/xyzzy");
+    GuestState missing = syscall_state(hyperion::sysno::kAccess, {kBase + 0x500, 0});
+    handler.handle(missing, memory);
+    HYPERION_CHECK_EQ(missing.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEnoent));
+}
+
+HYPERION_TEST("syscall", "access_bad_mode_is_einval_and_bad_path_pointer_is_efault") {
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, "/tmp");
+
+    // Bit 0x8 is not a valid access mode.
+    GuestState bad = syscall_state(hyperion::sysno::kAccess, {kBase + 0x400, 0x8});
+    handler.handle(bad, memory);
+    HYPERION_CHECK_EQ(bad.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEinval));
+
+    GuestState fault = syscall_state(hyperion::sysno::kAccess, {0xDEADBEEF0000ULL, 0});
+    handler.handle(fault, memory);
+    HYPERION_CHECK_EQ(fault.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEfault));
+}
+
+HYPERION_TEST("syscall", "readlink_copies_the_target_without_a_terminator") {
+    char link_path[] = "/tmp/hyperion_readlink_XXXXXX";
+    const int fd = ::mkstemp(link_path);
+    HYPERION_CHECK(fd >= 0);
+    ::close(fd);
+    ::unlink(link_path);
+    HYPERION_CHECK(::symlink("/tmp/hyperion/target", link_path) == 0);
+
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, link_path);
+
+    GuestState s = syscall_state(hyperion::sysno::kReadlink, {kBase + 0x400, kBase + 0x800, 64});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    const char* expected = "/tmp/hyperion/target";
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), static_cast<std::uint64_t>(std::strlen(expected)));
+
+    std::uint8_t got[64] = {};
+    HYPERION_CHECK(memory.read(kBase + 0x800, got, std::strlen(expected)));
+    HYPERION_CHECK_EQ(
+        std::strncmp(reinterpret_cast<const char*>(got), expected, std::strlen(expected)), 0);
+
+    ::unlink(link_path);
+}
+
+HYPERION_TEST("syscall", "readlink_truncates_a_long_target_and_rejects_zero_size") {
+    char link_path[] = "/tmp/hyperion_readlink2_XXXXXX";
+    const int fd = ::mkstemp(link_path);
+    HYPERION_CHECK(fd >= 0);
+    ::close(fd);
+    ::unlink(link_path);
+    HYPERION_CHECK(::symlink("/tmp/hyperion/target", link_path) == 0);
+
+    MinimalSyscallHandler handler;
+    FlatMemory memory = program({});
+    put_cstr(memory, kBase + 0x400, link_path);
+
+    // A short buffer truncates to its size, and that is not an error.
+    GuestState trunc = syscall_state(hyperion::sysno::kReadlink, {kBase + 0x400, kBase + 0x800, 4});
+    HYPERION_CHECK(handler.handle(trunc, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(trunc.reg(Gpr::kRax), std::uint64_t{4});
+
+    // bufsiz 0 is EINVAL, as readlink(2) documents.
+    GuestState zero = syscall_state(hyperion::sysno::kReadlink, {kBase + 0x400, kBase + 0x800, 0});
+    handler.handle(zero, memory);
+    HYPERION_CHECK_EQ(zero.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEinval));
+
+    // A non-symlink path is EINVAL on Linux.
+    TempFile plain;
+    HYPERION_CHECK(plain.fd >= 0);
+    put_cstr(memory, kBase + 0x500, plain.path.c_str());
+    GuestState notlink =
+        syscall_state(hyperion::sysno::kReadlink, {kBase + 0x500, kBase + 0x800, 64});
+    handler.handle(notlink, memory);
+    HYPERION_CHECK_EQ(notlink.reg(Gpr::kRax), static_cast<std::uint64_t>(-hyperion::kEinval));
+
+    ::unlink(link_path);
+}
+
+HYPERION_TEST("syscall", "access_and_readlink_are_advertised_as_minimal") {
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kAccess));
+    HYPERION_CHECK(hyperion::is_minimal_syscall(hyperion::sysno::kReadlink));
+    HYPERION_CHECK(!hyperion::is_minimal_syscall(hyperion::sysno::kAccess + 1000));
+}
+
 // --- Process-identity getters, getcwd, getrandom (fifth slice) -------------
 
 HYPERION_TEST("syscall", "identity_getters_forward_to_the_host") {

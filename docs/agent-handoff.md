@@ -66,8 +66,8 @@ held in callee-saved host registers, with a profitability guard that declines
 allocation on tiny blocks), but there is no cross-block allocation or spilling.
 The syscall layer exists and is a **partial slice**: `read`/`write`/`close`/
 `fstat`/`lseek`/`exit`/`exit_group`, `mmap`/`mprotect`/`munmap`/`brk`,
-`openat`, `newfstatat`, and the process-identity getters plus
-`getcwd`/`getrandom` are implemented, everything else returns `-ENOSYS`. `openat` is limited
+`openat`, `newfstatat`, `access`, `readlink`, and the process-identity getters
+plus `getcwd`/`getrandom` are implemented, everything else returns `-ENOSYS`. `openat` is limited
 to `AT_FDCWD` and a bounded guest pathname, and it forwards to the host kernel —
 Hyperion is **not a sandbox** (SECURITY.md, DECISIONS.md D-025). The identity
 getters return the host process's ids (Hyperion runs the guest in-process);
@@ -182,14 +182,15 @@ build.
 **Phases 0–4 are closed. Phase 5 is active (six optimizations accepted and
 measured: parity fast path, dead-`rip` elimination, flag liveness, direct-mapped
 dispatch, ALU immediate folding, guest-register allocation). Phase 6's syscall
-inventory is complete and CI-validated, and **six** syscall slices are
+inventory is complete and CI-validated, and **seven** syscall slices are
 implemented and tested in both tiers: the first (`write`/`exit`/`exit_group`),
 the second (the guest address space plus `mmap`/`mprotect`/`munmap`/`brk`),
 the third (a guest descriptor table plus `read`/`close`/`lseek`),
 the fourth (`openat`/`fstat`), the fifth (the process-identity getters plus
-`getcwd`/`getrandom`), and the sixth (`newfstatat`, glibc's stat entry point).
+`getcwd`/`getrandom`), the sixth (`newfstatat`, glibc's stat entry point), and
+the seventh (`access`/`readlink`).
 The next concrete step is the remaining U4/E1 syscalls a real program needs to
-start (`arch_prctl`, `getdents64`, `access`, `readlink`, `statx`),
+start (`arch_prctl`, `getdents64`, `statx`, `readlinkat`),
 then memory operands in the code generator.** Guest state, the
 decoder, the reference interpreter, the subset contract (`COMPATIBILITY.md` §2),
 the hardware differential, the AArch64 encoder, executable memory,
@@ -285,10 +286,14 @@ and pass.
     into a shared `write_guest_stat`, so the ABI-sensitive layout lives in one
     place. Seven new tests, including a dangling-symlink case proving
     follow-vs-nofollow. 22 of 375 implemented.
-13. **Next (Phase 6): the remaining U4/E1 syscalls a real program needs to
+13. ~~Implement `access`(21) and `readlink`(89).~~ **Done & tested.** Both
+    forward to the host over the shared bounded `read_guest_cstr`; `readlink`
+    mirrors the kernel's no-terminator/truncate semantics and clamps a huge
+    `bufsiz`. Five new tests; both numbers marked `implemented` (24 of 375).
+14. **Next (Phase 6): the remaining U4/E1 syscalls a real program needs to
     start.** `arch_prctl`(158) (FS/GS base — needed before glibc startup, and the
     one that needs a new `GuestState.fs_base` field), `getdents64`(217),
-    `access`(21), `readlink`(89)/`readlinkat`(267), `set_tid_address`(218),
+    `readlinkat`(267), `set_tid_address`(218),
     `rseq`(334), `prlimit64`(302) and `statx`(332) (its own field-by-field
     layout). Reuse the `newfstatat`/`fstat` shared guest-`struct stat` builder
     where applicable. Validate every guest buffer against the address space
@@ -296,12 +301,12 @@ and pass.
     number's `status` in `docs/syscalls/inventory.tsv` to `implemented`,
     regenerate (`python3 tools/gen_syscall_inventory.py`), add a focused test per
     call, and update STATUS.md §0e.
-14. **Then (Phase 6/7): memory operands in the code generator.** The AArch64
+15. **Then (Phase 6/7): memory operands in the code generator.** The AArch64
     generator is register-only (`translator.cpp validate_body` rejects any
     memory operand), so Tier 1 stops honestly at the first load/store. Every
     real program loads and stores, so this is the gating item for running
     anything nontrivial in Tier 1, and it pairs naturally with `read`/`openat`.
-15. **Also open (Phase 5): block chaining.** Today every block exit returns to
+16. **Also open (Phase 5): block chaining.** Today every block exit returns to
     the dispatcher for a lookup. Link a block's exit directly to its successor's
     generated code so a hot loop stays in generated code, guarded by the same
     authoritative-`rip` rule, with the dispatcher as the fallback for any
@@ -311,11 +316,11 @@ and pass.
     make a candidate look good. Add a deterministic guard for whatever the
     change should move (e.g. dispatcher lookups per run), since `qemu-user`
     timing is noisy (DECISIONS.md D-020).
-16. **Keep the oracle.** Run each multi-instruction program through both the
+17. **Keep the oracle.** Run each multi-instruction program through both the
     generated blocks and the interpreter's `run_program`, and require the final
     `GuestState` to match bit-for-bit. A mismatch must fail loudly; there is no
     tolerance for "close enough".
-17. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
+18. Everything runs on the real AArch64 path for free: the `cross.aarch64_tests`
     pipeline builds the tests for AArch64, runs them under `qemu-user`, and runs
     the CLI smoke test with `HYPERION_EMULATOR`, so generated code is exercised in
     CI without the target device.

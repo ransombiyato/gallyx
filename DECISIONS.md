@@ -679,6 +679,29 @@ through the validated address space (`-EFAULT`).
 
 ---
 
+## D-028 — `access`/`readlink` forward to the host, with kernel-faithful edge cases
+
+**Context.** `access`(21) and `readlink`(89) are common startup probes (glibc and
+shells use them heavily). Both are inherently host-relative: the answer depends
+on the host process's credentials and the host filesystem, exactly like
+`openat` (D-025).
+
+**Decision.** Forward both to the host. `access` restricts `mode` to the four
+defined bits and returns `-EINVAL` for anything else. `readlink` mirrors the
+kernel's surprising-but-documented behaviour: no NUL terminator, silent
+truncation when the target exceeds `bufsiz`, and `-EINVAL` for `bufsiz == 0` or
+a non-symlink path. Both read the path with the existing bounded
+`read_guest_cstr`, and `readlink` clamps the guest `bufsiz` to 4096 rather than
+allocating a guest-controlled buffer.
+
+**Consequences.** No new policy: these are the same "forward to the host, never
+silently do the wrong thing" rules as the rest of the file layer. `access` is
+explicitly *not* a security boundary (a guest could re-`openat` anyway). The `at`
+variants (`readlinkat`/`faccessat`) remain unimplemented and are listed in
+STATUS.md's limitations.
+
+---
+
 ## D-027 — One guest `struct stat` writer shared by `fstat` and `newfstatat`
 
 **Context.** `fstat`(5) already built the guest (x86-64) `struct stat` field by

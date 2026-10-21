@@ -5,6 +5,22 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — Phase 6 (access + readlink)
+
+### Added — `access`(21) and `readlink`(89) (seventh syscall slice)
+- `access`(21): forwards to the host with `mode` restricted to `F_OK`/`R_OK`/
+  `W_OK`/`X_OK` (any other bit is `-EINVAL`, as the kernel does). Reports the
+  host process's permissions, consistent with the `openat` policy (D-025).
+- `readlink`(89): copies a symlink target into the guest buffer. As readlink(2):
+  the result is not NUL-terminated, a target longer than `bufsiz` is truncated
+  (not an error), and `bufsiz == 0` is `-EINVAL`. Both use the shared bounded
+  `read_guest_cstr`, and a huge guest `bufsiz` is clamped rather than allocated.
+- Five new unit tests (`syscall.access_*`, `syscall.readlink_*`). Inventory:
+  `access` and `readlink` moved from `not-started` to `implemented` (24 of 375).
+  Docs regenerated (0 errors/warnings).
+
+---
+
 ## [Unreleased] — Phase 6 (newfstatat)
 
 ### Added — `newfstatat`(262) (sixth syscall slice)

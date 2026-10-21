@@ -13,8 +13,9 @@
 //   write(2), read(2), close(2), lseek(2), openat(2), fstat(2), exit(2),
 //   exit_group(2), the memory syscalls mmap(2), mprotect(2), munmap(2), brk(2),
 //   the process-identity getters getpid(2), gettid(2), getuid(2), geteuid(2),
-//   getgid(2), getegid(2), getppid(2), getcwd(2), and getrandom(2), and the
-//   path-metadata call newfstatat(2).
+//   getgid(2), getegid(2), getppid(2), getcwd(2), and getrandom(2), the
+//   path-metadata call newfstatat(2), and the path queries access(2) and
+//   readlink(2).
 // Every other syscall number returns -ENOSYS explicitly. Nothing silently
 // succeeds. openat() is limited to AT_FDCWD and a guest pathname; fstat() and
 // newfstatat() write the *guest's* (x86-64) struct stat layout, not the host's.
@@ -57,9 +58,11 @@ inline constexpr std::uint64_t kMmap = 9;
 inline constexpr std::uint64_t kMprotect = 10;
 inline constexpr std::uint64_t kMunmap = 11;
 inline constexpr std::uint64_t kBrk = 12;
+inline constexpr std::uint64_t kAccess = 21;
 inline constexpr std::uint64_t kGetpid = 39;
 inline constexpr std::uint64_t kExit = 60;
 inline constexpr std::uint64_t kGetcwd = 79;
+inline constexpr std::uint64_t kReadlink = 89;
 inline constexpr std::uint64_t kGetuid = 102;
 inline constexpr std::uint64_t kGetgid = 104;
 inline constexpr std::uint64_t kGeteuid = 107;

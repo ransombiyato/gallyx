@@ -55,13 +55,9 @@ enum class OperandKind : std::uint8_t {
     kMemory,
 };
 
-// A decoded memory operand: base + index*scale + disp.
-//
-// Note the deliberate restriction: base and index are 64-bit general-purpose
-// registers with no RIP-relative form. RIP-relative addressing is common in
-// real code and is a Phase 2 follow-up; rejecting it now keeps the decoder
-// honest about what it actually handles.
+// A decoded memory operand: (rip | base) + index*scale + disp.
 struct MemoryOperand {
+    bool rip_relative = false;
     bool has_base = false;
     Gpr base = Gpr::kRax;
     bool has_index = false;
@@ -84,19 +80,21 @@ struct Operand {
 // lists exactly these, and the decoder accepts nothing else.
 enum class Opcode : std::uint8_t {
     kMov,     // MOV  r/m, r  |  MOV r, r/m  |  MOV r, imm
-    kAdd,     // ADD  r/m, r
-    kSub,     // SUB  r/m, r
-    kCmp,     // CMP  r/m, r
-    kAnd,     // AND  r/m, r
-    kOr,      // OR   r/m, r
-    kXor,     // XOR  r/m, r
+    kLea,     // LEA  r, m
+    kAdd,     // ADD  r/m, r  |  r/m, imm  |  rax, imm
+    kSub,     // SUB  r/m, r  |  r/m, imm  |  rax, imm
+    kCmp,     // CMP  r/m, r  |  r/m, imm  |  rax, imm
+    kTest,    // TEST r/m, r  |  r/m, imm  |  rax, imm
+    kAnd,     // AND  r/m, r  |  r/m, imm  |  rax, imm
+    kOr,      // OR   r/m, r  |  r/m, imm  |  rax, imm
+    kXor,     // XOR  r/m, r  |  r/m, imm  |  rax, imm
     kInc,     // INC  r/m
     kDec,     // DEC  r/m
     kNop,     // NOP
     kRet,     // RET
     kHlt,     // HLT
-    kJmp,     // JMP rel32
-    kJcc,     // Jcc rel8 (condition in the low nibble of the opcode)
+    kJmp,     // JMP rel8 | rel32
+    kJcc,     // Jcc rel8 | rel32 (condition in the low nibble of the opcode)
     kPush,    // PUSH r64
     kPop,     // POP  r64
     kSyscall, // SYSCALL (0F 05): guest Linux system call

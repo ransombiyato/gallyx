@@ -1625,3 +1625,124 @@ HYPERION_TEST("syscall", "zero_extended_32bit_at_fdcwd_and_unbuffered_rdwr_file_
 
     ::unlink(tmpl);
 }
+
+HYPERION_TEST("syscall", "phase6_extended_syscalls_dup_fcntl_iov_pread_uname_clock_and_tls") {
+    Captured cap;
+    MinimalSyscallHandler handler(sink_to(cap));
+    FlatMemory memory(kBase, 8192);
+
+    // 1. arch_prctl ARCH_SET_FS / ARCH_GET_FS + set_tid_address + set_robust_list
+    GuestState s = syscall_state(hyperion::sysno::kArchPrctl,
+                                 {hyperion::arch_prctl_code::kSetFs, 0x700012340000ULL});
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(s.reg(Gpr::kRax), 0ULL);
+    HYPERION_CHECK_EQ(s.fs_base, 0x700012340000ULL);
+
+    s.reg(Gpr::kRax) = hyperion::sysno::kArchPrctl;
+    s.reg(Gpr::kRdi) = hyperion::arch_prctl_code::kGetFs;
+    s.reg(Gpr::kRsi) = kBase + 0x100;
+    HYPERION_CHECK(handler.handle(s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(read_u64(memory, kBase + 0x100), 0x700012340000ULL);
+
+    GuestState tid_s = syscall_state(hyperion::sysno::kSetTidAddress, {kBase + 0x108});
+    HYPERION_CHECK(handler.handle(tid_s, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK(tid_s.reg(Gpr::kRax) > 0);
+
+    GuestState bad_rl = syscall_state(hyperion::sysno::kSetRobustList, {kBase + 0x110, 16});
+    HYPERION_CHECK(handler.handle(bad_rl, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(static_cast<std::int64_t>(bad_rl.reg(Gpr::kRax)), -hyperion::kEinval);
+
+    GuestState ok_rl = syscall_state(hyperion::sysno::kSetRobustList, {kBase + 0x110, 24});
+    HYPERION_CHECK(handler.handle(ok_rl, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(ok_rl.reg(Gpr::kRax), 0ULL);
+
+    // 2. uname always advertises "Linux" + guest machine "x86_64"
+    GuestState un = syscall_state(hyperion::sysno::kUname, {kBase + 0x200});
+    HYPERION_CHECK(handler.handle(un, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(un.reg(Gpr::kRax), 0ULL);
+    char sysname[65] = {};
+    char machine[65] = {};
+    HYPERION_CHECK(memory.read(kBase + 0x200, reinterpret_cast<std::uint8_t*>(sysname), 65));
+    HYPERION_CHECK(memory.read(kBase + 0x200 + 260, reinterpret_cast<std::uint8_t*>(machine), 65));
+    HYPERION_CHECK_EQ(std::string(sysname), std::string("Linux"));
+    HYPERION_CHECK_EQ(std::string(machine), std::string("x86_64"));
+
+    // 3. clock_gettime + gettimeofday + prlimit64
+    GuestState clk =
+        syscall_state(hyperion::sysno::kClockGettime, {1 /*CLOCK_MONOTONIC*/, kBase + 0x400});
+    HYPERION_CHECK(handler.handle(clk, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(clk.reg(Gpr::kRax), 0ULL);
+
+    GuestState gtod = syscall_state(hyperion::sysno::kGettimeofday, {kBase + 0x420, kBase + 0x440});
+    HYPERION_CHECK(handler.handle(gtod, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(gtod.reg(Gpr::kRax), 0ULL);
+
+    GuestState rlim =
+        syscall_state(hyperion::sysno::kPrlimit64, {0, 3 /*RLIMIT_STACK*/, 0, kBase + 0x460});
+    HYPERION_CHECK(handler.handle(rlim, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(rlim.reg(Gpr::kRax), 0ULL);
+    HYPERION_CHECK(read_u64(memory, kBase + 0x460) > 0);
+
+    // 4. writev on stdout + dup/dup2/dup3/fcntl/pwrite64/pread64/readv on a real file
+    const char part1[] = "Hello, ";
+    const char part2[] = "writev!\n";
+    HYPERION_CHECK(memory.write(kBase + 0x500, reinterpret_cast<const std::uint8_t*>(part1), 7));
+    HYPERION_CHECK(memory.write(kBase + 0x510, reinterpret_cast<const std::uint8_t*>(part2), 8));
+    auto write_u64 = [&](std::uint64_t addr, std::uint64_t v) {
+        std::uint8_t b[8];
+        for (int i = 0; i < 8; ++i) {
+            b[i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF);
+        }
+        HYPERION_CHECK(memory.write(addr, b, 8));
+    };
+    write_u64(kBase + 0x540, kBase + 0x500);
+    write_u64(kBase + 0x548, 7);
+    write_u64(kBase + 0x550, kBase + 0x510);
+    write_u64(kBase + 0x558, 8);
+    GuestState wv = syscall_state(hyperion::sysno::kWritev, {1, kBase + 0x540, 2});
+    HYPERION_CHECK(handler.handle(wv, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(wv.reg(Gpr::kRax), 15ULL);
+    HYPERION_CHECK_EQ(cap.out, std::string("Hello, writev!\n"));
+
+    TempFile tf;
+    HYPERION_CHECK(tf.fd >= 0);
+    put_cstr(memory, kBase + 0x600, tf.path.c_str());
+    GuestState op = syscall_state(hyperion::sysno::kOpenat, {hyperion::kAtFdcwd, kBase + 0x600,
+                                                             hyperion::open_flags::kORdwr, 0});
+    HYPERION_CHECK(handler.handle(op, memory).status == SyscallStatus::kHandled);
+    const std::uint64_t fd_a = op.reg(Gpr::kRax);
+
+    GuestState d1 = syscall_state(hyperion::sysno::kDup, {fd_a});
+    HYPERION_CHECK(handler.handle(d1, memory).status == SyscallStatus::kHandled);
+    const std::uint64_t fd_b = d1.reg(Gpr::kRax);
+    HYPERION_CHECK(fd_b != fd_a);
+
+    GuestState d3 =
+        syscall_state(hyperion::sysno::kDup3, {fd_a, 10, hyperion::open_flags::kOCloseexec});
+    HYPERION_CHECK(handler.handle(d3, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(d3.reg(Gpr::kRax), 10ULL);
+
+    GuestState gf_a =
+        syscall_state(hyperion::sysno::kFcntl, {fd_a, hyperion::fcntl_cmd::kGetfd, 0});
+    GuestState gf_10 = syscall_state(hyperion::sysno::kFcntl, {10, hyperion::fcntl_cmd::kGetfd, 0});
+    HYPERION_CHECK(handler.handle(gf_a, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK(handler.handle(gf_10, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(gf_a.reg(Gpr::kRax), 0ULL);
+    HYPERION_CHECK_EQ(gf_10.reg(Gpr::kRax), 1ULL);
+
+    // Positional pwrite64/pread64 leave file offset untouched at 0.
+    GuestState pw = syscall_state(hyperion::sysno::kPwrite64, {fd_a, kBase + 0x500, 7, 4});
+    HYPERION_CHECK(handler.handle(pw, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(pw.reg(Gpr::kRax), 7ULL);
+
+    GuestState ls = syscall_state(hyperion::sysno::kLseek, {fd_b, 0, hyperion::seek::kCur});
+    HYPERION_CHECK(handler.handle(ls, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(ls.reg(Gpr::kRax), 0ULL);
+
+    GuestState pr = syscall_state(hyperion::sysno::kPread64, {fd_b, kBase + 0x700, 7, 4});
+    HYPERION_CHECK(handler.handle(pr, memory).status == SyscallStatus::kHandled);
+    HYPERION_CHECK_EQ(pr.reg(Gpr::kRax), 7ULL);
+    char check_buf[8] = {};
+    HYPERION_CHECK(memory.read(kBase + 0x700, reinterpret_cast<std::uint8_t*>(check_buf), 7));
+    HYPERION_CHECK_EQ(std::string(check_buf), std::string("Hello, "));
+}

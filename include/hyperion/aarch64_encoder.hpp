@@ -67,6 +67,7 @@ class Encoder {
 public:
     // --- data processing (register) -------------------------------------
     void add(Width w, Reg rd, Reg rn, Reg rm);
+    void add_shifted(Width w, Reg rd, Reg rn, Reg rm, Shift shift, unsigned amount);
     void sub(Width w, Reg rd, Reg rn, Reg rm);
     void and_(Width w, Reg rd, Reg rn, Reg rm);
     void orr(Width w, Reg rd, Reg rn, Reg rm);

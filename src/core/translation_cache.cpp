@@ -183,6 +183,7 @@ RunResult TranslationCache::run(Memory& memory, GuestState state, std::uint64_t 
         }
 
         const std::uint64_t max_runs = remaining / block->guest_instruction_count;
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         const auto fn = reinterpret_cast<CachedBlockFn>(block->entry);
         const RawBlockReturn ret = fn(&out.state, max_runs);
         const auto status = static_cast<BlockResult>(ret.status);

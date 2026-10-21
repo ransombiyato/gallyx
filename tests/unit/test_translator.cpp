@@ -681,6 +681,32 @@ HYPERION_TEST("translator", "shifted_imm12_folded_alu_matches_interpreter") {
     HYPERION_CHECK(r.state.flags.zf);
 }
 
+HYPERION_TEST("translator", "lea_test_and_near_jcc_match_interpreter") {
+    // Exercises Tier 1 translation of:
+    //   - `lea rsi, [rip + 0x20]` (`48 8D 35 20 00 00 00`)
+    //   - `lea ecx, [rbx + rdx*8 - 16]` (`8D 4C D3 F0`)
+    //   - `dec rcx; test rcx, rcx; jnz loop` self-loop superblock
+    //   - `0F 84` near `je rel32`
+    const std::vector<std::uint8_t> program = {
+        0x48, 0x8D, 0x35, 0x20, 0x00, 0x00, 0x00, // [0..6]   lea rsi, [rip + 0x20]
+        0x8D, 0x4C, 0xD3, 0xF0,                   // [7..10]  lea ecx, [rbx + rdx*8 - 16]
+        // loop at [11]:
+        0x48, 0x01, 0xF0,                   // [11..13] add rax, rsi
+        0x48, 0xFF, 0xC9,                   // [14..16] dec rcx
+        0x48, 0x85, 0xC9,                   // [17..19] test rcx, rcx
+        0x75, 0xF5,                         // [20..21] jnz loop (-11 -> [11])
+        0x0F, 0x84, 0x04, 0x00, 0x00, 0x00, // [22..27] je done (+4 -> [32])
+        0x48, 0x83, 0xC0, 0x63,             // [28..31] add rax, 99 (skipped)
+        0xF4,                               // [32]     hlt
+    };
+
+    GuestState initial;
+    initial.rip = kBase;
+    initial.reg(Gpr::kRbx) = 0x9999999900000010ULL;
+    initial.reg(Gpr::kRdx) = 3; // ecx = 0x10 + 24 - 16 = 24 iterations
+    check_program_matches(program, initial);
+}
+
 #else
 
 HYPERION_TEST("translator", "differential_mov_and_alu") {
@@ -736,6 +762,10 @@ HYPERION_TEST("translator", "dead_flags_are_not_computed") {
 }
 
 HYPERION_TEST("translator", "shifted_imm12_folded_alu_matches_interpreter") {
+    HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
+}
+
+HYPERION_TEST("translator", "lea_test_and_near_jcc_match_interpreter") {
     HYPERION_SKIP("generated code is AArch64; requires an AArch64 host to run");
 }
 

@@ -141,9 +141,11 @@ bool decode_rm_operand(Reader& r, const Modrm& m, const Rex& rex, OperandSize si
             mem.base = gpr_from(static_cast<std::uint8_t>(base_bits | (rex.b ? 8 : 0)));
         }
     } else if (m.rm == 5 && m.mod == 0) {
-        // RIP-relative addressing (mod=00, rm=101). Common in real code, but
-        // not modelled yet; reject explicitly rather than mis-compute.
-        return false;
+        // RIP-relative addressing (mod=00, rm=101): [RIP + disp32]. Per Intel
+        // SDM Vol. 2A Table 2-7, REX.B is ignored here ([r13] uses mod=01,
+        // disp8=0). Resolved relative to the end of the instruction so any
+        // trailing immediate bytes are accounted for.
+        mem.rip_relative = true;
     } else {
         mem.has_base = true;
         mem.base = gpr_from(static_cast<std::uint8_t>(m.rm | (rex.b ? 8 : 0)));
@@ -151,7 +153,7 @@ bool decode_rm_operand(Reader& r, const Modrm& m, const Rex& rex, OperandSize si
 
     switch (m.mod) {
     case 0:
-        if (sib_disp32) {
+        if (sib_disp32 || mem.rip_relative) {
             mem.disp = r.i32();
         }
         break;
@@ -249,12 +251,16 @@ const char* to_string(Opcode opcode) {
     switch (opcode) {
     case Opcode::kMov:
         return "mov";
+    case Opcode::kLea:
+        return "lea";
     case Opcode::kAdd:
         return "add";
     case Opcode::kSub:
         return "sub";
     case Opcode::kCmp:
         return "cmp";
+    case Opcode::kTest:
+        return "test";
     case Opcode::kAnd:
         return "and";
     case Opcode::kOr:
@@ -336,7 +342,10 @@ std::string operand_to_string(const Operand& op) {
     case OperandKind::kMemory: {
         std::string s = "[";
         bool need_plus = false;
-        if (op.mem.has_base) {
+        if (op.mem.rip_relative) {
+            s += "rip";
+            need_plus = true;
+        } else if (op.mem.has_base) {
             s += to_string(op.mem.base);
             need_plus = true;
         }
@@ -557,6 +566,14 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
             alu = Opcode::kCmp;
             is_alu_acc_imm = true;
             break;
+        case 0x85:
+            alu = Opcode::kTest;
+            is_alu_modrm = true;
+            break;
+        case 0xA9:
+            alu = Opcode::kTest;
+            is_alu_acc_imm = true;
+            break;
         default:
             break;
         }
@@ -607,6 +624,62 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
             finish(alu);
             return result;
         }
+    }
+
+    // --- 0x8D: LEA r32/r64, m ----------------------------------------------
+    if (opcode == 0x8D) {
+        Modrm m;
+        const std::uint8_t modrm = r.u8();
+        m.mod = static_cast<std::uint8_t>(modrm >> 6);
+        m.reg = static_cast<std::uint8_t>((modrm >> 3) & 0x7);
+        m.rm = static_cast<std::uint8_t>(modrm & 0x7);
+        if (m.mod == 3) {
+            // Intel SDM Vol. 2A ("LEA"): register source encoding raises #UD.
+            result.error = r.truncated() ? DecodeError::kTruncated : DecodeError::kUnsupportedModrm;
+            return result;
+        }
+        Operand rm_op;
+        if (!decode_rm_operand(r, m, rex, op_size, rm_op)) {
+            result.error = r.truncated() ? DecodeError::kTruncated : DecodeError::kUnsupportedModrm;
+            return result;
+        }
+        Operand reg_op;
+        reg_op.kind = OperandKind::kRegister;
+        reg_op.size = op_size;
+        reg_op.reg = reg_field(m, rex);
+        insn.dst = reg_op;
+        insn.src = rm_op;
+        insn.has_src = true;
+        finish(Opcode::kLea);
+        return result;
+    }
+
+    // --- 0xF7 /0: TEST r/m32/64, imm32 -------------------------------------
+    if (opcode == 0xF7) {
+        Modrm m;
+        const std::uint8_t modrm = r.u8();
+        m.mod = static_cast<std::uint8_t>(modrm >> 6);
+        m.reg = static_cast<std::uint8_t>((modrm >> 3) & 0x7);
+        m.rm = static_cast<std::uint8_t>(modrm & 0x7);
+        if (m.reg != 0) {
+            result.error = r.truncated() ? DecodeError::kTruncated : DecodeError::kUnknownOpcode;
+            return result;
+        }
+        Operand rm_op;
+        if (!decode_rm_operand(r, m, rex, op_size, rm_op)) {
+            result.error = r.truncated() ? DecodeError::kTruncated : DecodeError::kUnsupportedModrm;
+            return result;
+        }
+        Operand imm;
+        if (!read_alu_immediate(r, op_size, imm)) {
+            result.error = DecodeError::kTruncated;
+            return result;
+        }
+        insn.dst = rm_op;
+        insn.src = imm;
+        insn.has_src = true;
+        finish(Opcode::kTest);
+        return result;
     }
 
     // --- 0x81/0x83: ALU group 1, r/m, imm ----------------------------------
@@ -724,9 +797,7 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
         return result;
     }
 
-    // --- 0x0F 0x05 SYSCALL -------------------------------------------------
-    // The only two-byte opcode in the subset. No operands: the number is in
-    // rax and the arguments in rdi/rsi/rdx/r10/r8/r9 (see syscall.hpp).
+    // --- 0x0F escape: 0x05 SYSCALL, 0x80..0x8F Jcc rel32 -------------------
     if (opcode == 0x0F) {
         const std::uint8_t second = r.u8();
         if (r.truncated()) {
@@ -737,8 +808,18 @@ DecodeResult decode(const std::uint8_t* code, std::size_t size, std::uint64_t ad
             finish(Opcode::kSyscall);
             return result;
         }
-        // 0x0F 0x80..0x8F (Jcc rel32) is not in the subset; anything else under
-        // the 0x0F escape is likewise outside it.
+        if (second >= 0x80 && second <= 0x8F) {
+            const std::int32_t rel = r.i32();
+            Operand target;
+            target.kind = OperandKind::kImmediate;
+            target.size = OperandSize::k64;
+            const std::uint64_t next = address + static_cast<std::uint64_t>(r.position());
+            target.imm = static_cast<std::uint64_t>(static_cast<std::int64_t>(next) + rel);
+            insn.dst = target;
+            insn.condition = static_cast<Condition>(second & 0x0F);
+            finish(Opcode::kJcc);
+            return result;
+        }
         result.error = DecodeError::kUnknownOpcode;
         return result;
     }

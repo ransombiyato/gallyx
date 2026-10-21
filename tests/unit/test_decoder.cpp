@@ -156,11 +156,51 @@ HYPERION_TEST("decoder", "rejects_lock_prefix") {
     HYPERION_CHECK(r.error == DecodeError::kUnsupportedPrefix);
 }
 
-HYPERION_TEST("decoder", "rejects_rip_relative") {
-    // 48 8B 05 <disp32> = mov rax, [rip+disp] — common, but not modelled yet.
-    const auto r = dec({0x48, 0x8B, 0x05, 0x00, 0x00, 0x00, 0x00});
-    HYPERION_CHECK(!r.ok());
-    HYPERION_CHECK(r.error == DecodeError::kUnsupportedModrm);
+HYPERION_TEST("decoder", "decodes_rip_relative_and_lea_and_test_and_near_jcc") {
+    // 48 8B 05 10 00 00 00 = mov rax, [rip + 0x10]
+    const auto mov_rip = dec({0x48, 0x8B, 0x05, 0x10, 0x00, 0x00, 0x00});
+    HYPERION_CHECK(mov_rip.ok());
+    HYPERION_CHECK(mov_rip.instruction.opcode == Opcode::kMov);
+    HYPERION_CHECK(mov_rip.instruction.src.kind == OperandKind::kMemory);
+    HYPERION_CHECK(mov_rip.instruction.src.mem.rip_relative);
+    HYPERION_CHECK(!mov_rip.instruction.src.mem.has_base);
+    HYPERION_CHECK_EQ(mov_rip.instruction.src.mem.disp, std::int64_t{0x10});
+
+    // REX.B (0x49) is ignored for mod=00, rm=101 per Intel SDM Vol. 2A Table 2-7.
+    const auto rexb_rip = dec({0x49, 0x8B, 0x05, 0xF8, 0xFF, 0xFF, 0xFF});
+    HYPERION_CHECK(rexb_rip.ok());
+    HYPERION_CHECK(rexb_rip.instruction.src.mem.rip_relative);
+    HYPERION_CHECK_EQ(rexb_rip.instruction.src.mem.disp, std::int64_t{-8});
+
+    // 48 8D 35 20 00 00 00 = lea rsi, [rip + 0x20]
+    const auto lea_rip = dec({0x48, 0x8D, 0x35, 0x20, 0x00, 0x00, 0x00});
+    HYPERION_CHECK(lea_rip.ok());
+    HYPERION_CHECK(lea_rip.instruction.opcode == Opcode::kLea);
+    HYPERION_CHECK(lea_rip.instruction.dst.reg == Gpr::kRsi);
+    HYPERION_CHECK(lea_rip.instruction.src.mem.rip_relative);
+    HYPERION_CHECK_EQ(lea_rip.instruction.src.mem.disp, std::int64_t{0x20});
+
+    // LEA with mod == 3 (register source) raises #UD on x86-64.
+    const auto lea_reg = dec({0x48, 0x8D, 0xC3});
+    HYPERION_CHECK(!lea_reg.ok());
+    HYPERION_CHECK(lea_reg.error == DecodeError::kUnsupportedModrm);
+
+    // 48 85 C0 = test rax, rax; F7 C1 78 56 34 12 = test ecx, 0x12345678
+    const auto test_rr = dec({0x48, 0x85, 0xC0});
+    HYPERION_CHECK(test_rr.ok());
+    HYPERION_CHECK(test_rr.instruction.opcode == Opcode::kTest);
+    const auto test_imm = dec({0xF7, 0xC1, 0x78, 0x56, 0x34, 0x12});
+    HYPERION_CHECK(test_imm.ok());
+    HYPERION_CHECK(test_imm.instruction.opcode == Opcode::kTest);
+    HYPERION_CHECK_EQ(test_imm.instruction.src.imm, 0x12345678ULL);
+
+    // 0F 85 80 01 00 00 = jne rel32 (+0x180 from end of 6-byte insn)
+    const auto jcc_near = dec({0x0F, 0x85, 0x80, 0x01, 0x00, 0x00});
+    HYPERION_CHECK(jcc_near.ok());
+    HYPERION_CHECK(jcc_near.instruction.opcode == Opcode::kJcc);
+    HYPERION_CHECK(jcc_near.instruction.condition == hyperion::Condition::kNe);
+    HYPERION_CHECK_EQ(jcc_near.instruction.length, std::uint8_t{6});
+    HYPERION_CHECK_EQ(jcc_near.instruction.dst.imm, 0x1000ULL + 6 + 0x180);
 }
 
 HYPERION_TEST("decoder", "rejects_unknown_opcode") {

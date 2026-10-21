@@ -84,6 +84,7 @@ struct GuestState {
     std::uint64_t gpr[kGprCount] = {};
     std::uint64_t rip = 0;
     Flags flags{};
+    std::uint64_t fs_base = 0; // IA32_FS_BASE (set via arch_prctl ARCH_SET_FS)
 
     std::uint64_t& reg(Gpr r) { return gpr[static_cast<std::size_t>(r)]; }
     std::uint64_t reg(Gpr r) const { return gpr[static_cast<std::size_t>(r)]; }

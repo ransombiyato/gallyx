@@ -9,11 +9,14 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <fcntl.h>
 #include <string>
 #include <sys/random.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -119,19 +122,10 @@ std::int64_t alloc_fd(std::vector<GuestDescriptor>& files,
     return static_cast<std::int64_t>(files.size() - 1);
 }
 
-// write(fd, buf, count): write `count` guest bytes through an open guest
-// descriptor (sink-routed stdout/stderr, unbuffered kernel file descriptor
-// opened via openat, or an adopted host FILE*).
-std::int64_t do_write(GuestState& s, Memory& memory, const MinimalSyscallHandler::OutputSink& sink,
-                      const std::vector<GuestDescriptor>& files) {
-    const std::int32_t fd = arg_i32(s, 0);
-    const std::uint64_t buf = arg(s, 1);
-    const std::uint64_t count = arg(s, 2);
-
-    const OpenFileDescription* ofd = lookup_ofd(files, fd);
-    if (ofd == nullptr) {
-        return -kEbadf;
-    }
+std::int64_t write_segment(const OpenFileDescription& ofd, Memory& memory,
+                           const MinimalSyscallHandler::OutputSink& sink, std::uint64_t buf,
+                           std::uint64_t count, bool& short_transfer) {
+    short_transfer = false;
     if (count == 0) {
         return 0;
     }
@@ -145,41 +139,103 @@ std::int64_t do_write(GuestState& s, Memory& memory, const MinimalSyscallHandler
         if (!memory.read(buf + done, chunk.data(), n)) {
             return done > 0 ? static_cast<std::int64_t>(done) : -kEfault;
         }
-        if (ofd->sink_fd >= 0) {
+        if (ofd.sink_fd >= 0) {
             if (sink) {
-                const long wrote = sink(ofd->sink_fd, chunk.data(), n);
+                const long wrote = sink(ofd.sink_fd, chunk.data(), n);
                 if (wrote < 0) {
                     return done > 0 ? static_cast<std::int64_t>(done) : -kEbadf;
                 }
                 done += static_cast<std::uint64_t>(wrote);
                 if (static_cast<std::size_t>(wrote) < n) {
+                    short_transfer = true;
                     break;
                 }
             } else {
                 done += n;
             }
-        } else if (ofd->host_fd >= 0) {
-            const ssize_t wrote = ::write(ofd->host_fd, chunk.data(), n);
+        } else if (ofd.host_fd >= 0) {
+            const ssize_t wrote = ::write(ofd.host_fd, chunk.data(), n);
             if (wrote < 0) {
                 const std::int64_t err = -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
                 return done > 0 ? static_cast<std::int64_t>(done) : err;
             }
             done += static_cast<std::uint64_t>(wrote);
             if (static_cast<std::size_t>(wrote) < n) {
+                short_transfer = true;
                 break;
             }
-        } else if (ofd->stream != nullptr) {
-            const std::size_t wrote = std::fwrite(chunk.data(), 1, n, ofd->stream);
+        } else if (ofd.stream != nullptr) {
+            const std::size_t wrote = std::fwrite(chunk.data(), 1, n, ofd.stream);
             if (wrote == 0) {
                 return done > 0 ? static_cast<std::int64_t>(done) : -kEbadf;
             }
-            std::fflush(ofd->stream);
+            std::fflush(ofd.stream);
             done += wrote;
             if (wrote < n) {
+                short_transfer = true;
                 break;
             }
         } else {
             return -kEbadf;
+        }
+    }
+    return static_cast<std::int64_t>(done);
+}
+
+// write(fd, buf, count): write `count` guest bytes through an open guest
+// descriptor (sink-routed stdout/stderr, unbuffered kernel file descriptor
+// opened via openat, or an adopted host FILE*).
+std::int64_t do_write(GuestState& s, Memory& memory, const MinimalSyscallHandler::OutputSink& sink,
+                      const std::vector<GuestDescriptor>& files) {
+    const std::int32_t fd = arg_i32(s, 0);
+    const std::uint64_t buf = arg(s, 1);
+    const std::uint64_t count = arg(s, 2);
+
+    const OpenFileDescription* ofd = lookup_ofd(files, fd);
+    if (ofd == nullptr) {
+        return -kEbadf;
+    }
+    bool short_transfer = false;
+    return write_segment(*ofd, memory, sink, buf, count, short_transfer);
+}
+
+std::int64_t read_segment(const OpenFileDescription& ofd, Memory& memory, std::uint64_t buf,
+                          std::uint64_t count, bool& short_transfer) {
+    short_transfer = false;
+    if (count == 0) {
+        return 0;
+    }
+
+    constexpr std::size_t kChunk = 4096;
+    std::array<std::uint8_t, kChunk> chunk{};
+    std::uint64_t done = 0;
+    while (done < count) {
+        const std::size_t n =
+            static_cast<std::size_t>((count - done) < kChunk ? (count - done) : kChunk);
+        std::size_t got = 0;
+        if (ofd.host_fd >= 0) {
+            const ssize_t rc = ::read(ofd.host_fd, chunk.data(), n);
+            if (rc < 0) {
+                const std::int64_t err = -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+                return done > 0 ? static_cast<std::int64_t>(done) : err;
+            }
+            got = static_cast<std::size_t>(rc);
+        } else if (ofd.stream != nullptr) {
+            got = std::fread(chunk.data(), 1, n, ofd.stream);
+        } else {
+            return -kEbadf;
+        }
+        if (got == 0) {
+            short_transfer = true;
+            break; // EOF
+        }
+        if (!memory.write(buf + done, chunk.data(), got)) {
+            return -kEfault;
+        }
+        done += got;
+        if (got < n) {
+            short_transfer = true;
+            break;
         }
     }
     return static_cast<std::int64_t>(done);
@@ -196,6 +252,24 @@ std::int64_t do_read(GuestState& s, Memory& memory, const std::vector<GuestDescr
     if (ofd == nullptr) {
         return -kEbadf;
     }
+    bool short_transfer = false;
+    return read_segment(*ofd, memory, buf, count, short_transfer);
+}
+
+// pread64(fd, buf, count, offset): positional read preserving file offset.
+std::int64_t do_pread64(GuestState& s, Memory& memory, const std::vector<GuestDescriptor>& files) {
+    const std::int32_t fd = arg_i32(s, 0);
+    const std::uint64_t buf = arg(s, 1);
+    const std::uint64_t count = arg(s, 2);
+    const auto offset = static_cast<std::int64_t>(arg(s, 3));
+
+    const OpenFileDescription* ofd = lookup_ofd(files, fd);
+    if (ofd == nullptr) {
+        return -kEbadf;
+    }
+    if (offset < 0) {
+        return -kEinval;
+    }
     if (count == 0) {
         return 0;
     }
@@ -206,21 +280,27 @@ std::int64_t do_read(GuestState& s, Memory& memory, const std::vector<GuestDescr
     while (done < count) {
         const std::size_t n =
             static_cast<std::size_t>((count - done) < kChunk ? (count - done) : kChunk);
+        const auto cur_off = static_cast<off_t>(offset + static_cast<std::int64_t>(done));
         std::size_t got = 0;
         if (ofd->host_fd >= 0) {
-            const ssize_t rc = ::read(ofd->host_fd, chunk.data(), n);
+            const ssize_t rc = ::pread(ofd->host_fd, chunk.data(), n, cur_off);
             if (rc < 0) {
-                const std::int64_t err = -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+                const std::int64_t err = -static_cast<std::int64_t>(errno == 0 ? kEspipe : errno);
                 return done > 0 ? static_cast<std::int64_t>(done) : err;
             }
             got = static_cast<std::size_t>(rc);
         } else if (ofd->stream != nullptr) {
+            const long saved = std::ftell(ofd->stream);
+            if (saved < 0 || std::fseek(ofd->stream, static_cast<long>(cur_off), SEEK_SET) != 0) {
+                return -kEspipe;
+            }
             got = std::fread(chunk.data(), 1, n, ofd->stream);
+            (void)std::fseek(ofd->stream, saved, SEEK_SET);
         } else {
-            return -kEbadf;
+            return -kEspipe;
         }
         if (got == 0) {
-            break; // EOF
+            break;
         }
         if (!memory.write(buf + done, chunk.data(), got)) {
             return -kEfault;
@@ -231,6 +311,135 @@ std::int64_t do_read(GuestState& s, Memory& memory, const std::vector<GuestDescr
         }
     }
     return static_cast<std::int64_t>(done);
+}
+
+// pwrite64(fd, buf, count, offset): positional write preserving file offset.
+std::int64_t do_pwrite64(GuestState& s, Memory& memory, const std::vector<GuestDescriptor>& files) {
+    const std::int32_t fd = arg_i32(s, 0);
+    const std::uint64_t buf = arg(s, 1);
+    const std::uint64_t count = arg(s, 2);
+    const auto offset = static_cast<std::int64_t>(arg(s, 3));
+
+    const OpenFileDescription* ofd = lookup_ofd(files, fd);
+    if (ofd == nullptr) {
+        return -kEbadf;
+    }
+    if (offset < 0) {
+        return -kEinval;
+    }
+    if (count == 0) {
+        return 0;
+    }
+
+    constexpr std::size_t kChunk = 4096;
+    std::array<std::uint8_t, kChunk> chunk{};
+    std::uint64_t done = 0;
+    while (done < count) {
+        const std::size_t n =
+            static_cast<std::size_t>((count - done) < kChunk ? (count - done) : kChunk);
+        if (!memory.read(buf + done, chunk.data(), n)) {
+            return done > 0 ? static_cast<std::int64_t>(done) : -kEfault;
+        }
+        const auto cur_off = static_cast<off_t>(offset + static_cast<std::int64_t>(done));
+        if (ofd->host_fd >= 0) {
+            const ssize_t wrote = ::pwrite(ofd->host_fd, chunk.data(), n, cur_off);
+            if (wrote < 0) {
+                const std::int64_t err = -static_cast<std::int64_t>(errno == 0 ? kEspipe : errno);
+                return done > 0 ? static_cast<std::int64_t>(done) : err;
+            }
+            done += static_cast<std::uint64_t>(wrote);
+            if (static_cast<std::size_t>(wrote) < n) {
+                break;
+            }
+        } else if (ofd->stream != nullptr) {
+            const long saved = std::ftell(ofd->stream);
+            if (saved < 0 || std::fseek(ofd->stream, static_cast<long>(cur_off), SEEK_SET) != 0) {
+                return -kEspipe;
+            }
+            const std::size_t wrote = std::fwrite(chunk.data(), 1, n, ofd->stream);
+            std::fflush(ofd->stream);
+            (void)std::fseek(ofd->stream, saved, SEEK_SET);
+            if (wrote == 0) {
+                return done > 0 ? static_cast<std::int64_t>(done) : -kEbadf;
+            }
+            done += wrote;
+            if (wrote < n) {
+                break;
+            }
+        } else {
+            return -kEspipe;
+        }
+    }
+    return static_cast<std::int64_t>(done);
+}
+
+std::uint64_t get_u64_le(const std::uint8_t* p) {
+    std::uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) {
+        v |= static_cast<std::uint64_t>(p[i]) << (8 * i);
+    }
+    return v;
+}
+
+// readv(fd, iov, iovcnt) & writev(fd, iov, iovcnt): scatter/gather I/O over
+// 16-byte guest `struct iovec { uint64_t iov_base; uint64_t iov_len; }`.
+std::int64_t do_iov(GuestState& s, Memory& memory, const MinimalSyscallHandler::OutputSink& sink,
+                    const std::vector<GuestDescriptor>& files, bool is_write) {
+    constexpr std::int32_t kUioMaxIov = 1024;
+    constexpr std::uint64_t kMaxSsize = 0x7FFFFFFFFFFFFFFFULL;
+    const std::int32_t fd = arg_i32(s, 0);
+    const std::uint64_t iov_addr = arg(s, 1);
+    const std::int32_t iovcnt = arg_i32(s, 2);
+
+    const OpenFileDescription* ofd = lookup_ofd(files, fd);
+    if (ofd == nullptr) {
+        return -kEbadf;
+    }
+    if (iovcnt < 0 || iovcnt > kUioMaxIov) {
+        return -kEinval;
+    }
+    if (iovcnt == 0) {
+        return 0;
+    }
+
+    struct GuestIovec {
+        std::uint64_t base = 0;
+        std::uint64_t len = 0;
+    };
+    std::vector<GuestIovec> iovs(static_cast<std::size_t>(iovcnt));
+    std::uint64_t total_len = 0;
+    for (std::int32_t i = 0; i < iovcnt; ++i) {
+        std::uint8_t raw[16] = {};
+        if (!memory.read(iov_addr + static_cast<std::uint64_t>(i) * std::uint64_t{16}, raw,
+                         sizeof(raw))) {
+            return -kEfault;
+        }
+        iovs[static_cast<std::size_t>(i)].base = get_u64_le(raw);
+        iovs[static_cast<std::size_t>(i)].len = get_u64_le(raw + 8);
+        if (iovs[static_cast<std::size_t>(i)].len > kMaxSsize - total_len) {
+            return -kEinval;
+        }
+        total_len += iovs[static_cast<std::size_t>(i)].len;
+    }
+
+    std::int64_t total_done = 0;
+    for (const GuestIovec& vec : iovs) {
+        if (vec.len == 0) {
+            continue;
+        }
+        bool short_transfer = false;
+        const std::int64_t rc =
+            is_write ? write_segment(*ofd, memory, sink, vec.base, vec.len, short_transfer)
+                     : read_segment(*ofd, memory, vec.base, vec.len, short_transfer);
+        if (rc < 0) {
+            return total_done > 0 ? total_done : rc;
+        }
+        total_done += rc;
+        if (short_transfer) {
+            break;
+        }
+    }
+    return total_done;
 }
 
 // getdents64(fd, dirp, count): read directory entries into the guest buffer.
@@ -555,6 +764,7 @@ std::int64_t readlink_common(Memory& memory, std::uint64_t path_addr, std::uint6
     if (got < 0) {
         return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
     }
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     if (!memory.write(buf, reinterpret_cast<const std::uint8_t*>(target.data()),
                       static_cast<std::size_t>(got))) {
         return -kEfault;
@@ -714,6 +924,7 @@ std::int64_t do_getcwd(GuestState& s, Memory& memory) {
     if (len + 1 > size) {
         return -kErange;
     }
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     if (!memory.write(buf, reinterpret_cast<const std::uint8_t*>(path.data()), len + 1)) {
         return -kEfault;
     }
@@ -755,6 +966,275 @@ bool MinimalSyscallHandler::adopt(int guest_fd, std::FILE* stream) {
     return true;
 }
 
+namespace {
+
+std::int64_t do_dup(GuestState& s, std::vector<GuestDescriptor>& files) {
+    const std::int32_t oldfd = arg_i32(s, 0);
+    const GuestDescriptor* src = lookup_fd(files, oldfd);
+    if (src == nullptr) {
+        return -kEbadf;
+    }
+    return alloc_fd(files, src->desc, /*cloexec=*/false, /*min_fd=*/0);
+}
+
+std::int64_t do_dup2(GuestState& s, std::vector<GuestDescriptor>& files) {
+    constexpr std::int32_t kMaxGuestFds = 4096;
+    const std::int32_t oldfd = arg_i32(s, 0);
+    const std::int32_t newfd = arg_i32(s, 1);
+    const GuestDescriptor* src = lookup_fd(files, oldfd);
+    if (src == nullptr || newfd < 0 || newfd >= kMaxGuestFds) {
+        return -kEbadf;
+    }
+    if (oldfd == newfd) {
+        return newfd;
+    }
+    std::shared_ptr<OpenFileDescription> shared = src->desc;
+    const auto idx = static_cast<std::size_t>(newfd);
+    if (idx >= files.size()) {
+        files.resize(idx + 1);
+    }
+    files[idx] = GuestDescriptor{std::move(shared), /*cloexec=*/false};
+    return newfd;
+}
+
+std::int64_t do_dup3(GuestState& s, std::vector<GuestDescriptor>& files) {
+    constexpr std::int32_t kMaxGuestFds = 4096;
+    const std::int32_t oldfd = arg_i32(s, 0);
+    const std::int32_t newfd = arg_i32(s, 1);
+    const auto flags = static_cast<std::uint64_t>(static_cast<std::uint32_t>(arg(s, 2)));
+    const GuestDescriptor* src = lookup_fd(files, oldfd);
+    if (src == nullptr || newfd < 0 || newfd >= kMaxGuestFds) {
+        return -kEbadf;
+    }
+    if (oldfd == newfd || (flags & ~open_flags::kOCloseexec) != 0) {
+        return -kEinval;
+    }
+    std::shared_ptr<OpenFileDescription> shared = src->desc;
+    const auto idx = static_cast<std::size_t>(newfd);
+    if (idx >= files.size()) {
+        files.resize(idx + 1);
+    }
+    files[idx] = GuestDescriptor{std::move(shared), (flags & open_flags::kOCloseexec) != 0};
+    return newfd;
+}
+
+std::uint64_t host_to_guest_status_flags(int host_fl) {
+    std::uint64_t out = 0;
+    switch (host_fl & O_ACCMODE) {
+    case O_WRONLY:
+        out |= open_flags::kOWronly;
+        break;
+    case O_RDWR:
+        out |= open_flags::kORdwr;
+        break;
+    default:
+        out |= open_flags::kORdonly;
+        break;
+    }
+    if ((host_fl & O_APPEND) != 0) {
+        out |= open_flags::kOAppend;
+    }
+    if ((host_fl & O_NONBLOCK) != 0) {
+        out |= open_flags::kONonblock;
+    }
+    if ((host_fl & O_DIRECTORY) != 0) {
+        out |= open_flags::kODirectory;
+    }
+    return out;
+}
+
+std::int64_t do_fcntl(GuestState& s, std::vector<GuestDescriptor>& files) {
+    constexpr std::int64_t kMaxGuestFds = 4096;
+    const std::int32_t fd = arg_i32(s, 0);
+    const std::int32_t cmd = arg_i32(s, 1);
+    const std::uint64_t raw_arg = arg(s, 2);
+
+    const GuestDescriptor* entry = lookup_fd(files, fd);
+    if (entry == nullptr) {
+        return -kEbadf;
+    }
+
+    switch (cmd) {
+    case fcntl_cmd::kDupfd:
+    case fcntl_cmd::kDupfdCloexec: {
+        const auto min_fd = static_cast<std::int64_t>(raw_arg);
+        if (min_fd < 0 || min_fd >= kMaxGuestFds) {
+            return -kEinval;
+        }
+        return alloc_fd(files, entry->desc, cmd == fcntl_cmd::kDupfdCloexec,
+                        static_cast<std::size_t>(min_fd));
+    }
+    case fcntl_cmd::kGetfd:
+        return entry->cloexec ? 1 : 0;
+    case fcntl_cmd::kSetfd:
+        files[static_cast<std::size_t>(fd)].cloexec = (raw_arg & 1ULL) != 0;
+        return 0;
+    case fcntl_cmd::kGetfl: {
+        if (entry->desc->host_fd >= 0) {
+            const int fl = ::fcntl(entry->desc->host_fd, F_GETFL);
+            if (fl < 0) {
+                return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+            }
+            return static_cast<std::int64_t>(host_to_guest_status_flags(fl));
+        }
+        return static_cast<std::int64_t>(host_to_guest_status_flags(entry->desc->status_flags));
+    }
+    case fcntl_cmd::kSetfl: {
+        int new_host = 0;
+        if ((raw_arg & open_flags::kOAppend) != 0) {
+            new_host |= O_APPEND;
+        }
+        if ((raw_arg & open_flags::kONonblock) != 0) {
+            new_host |= O_NONBLOCK;
+        }
+        if (entry->desc->host_fd >= 0) {
+            if (::fcntl(entry->desc->host_fd, F_SETFL, new_host) < 0) {
+                return -static_cast<std::int64_t>(errno == 0 ? kEinval : errno);
+            }
+        }
+        entry->desc->status_flags = (entry->desc->status_flags & O_ACCMODE) | new_host;
+        return 0;
+    }
+    default:
+        return -kEnosys;
+    }
+}
+
+void copy_uts_field(std::uint8_t* dst, const char* src) {
+    if (src == nullptr) {
+        return;
+    }
+    const std::size_t n = std::strlen(src);
+    std::memcpy(dst, src, n < 64 ? n : 64);
+}
+
+// uname(buf): write 6 x 65 = 390-byte `new_utsname`, always reporting guest
+// machine architecture `"x86_64"` regardless of host CPU architecture.
+std::int64_t do_uname(GuestState& s, Memory& memory) {
+    struct utsname host_uts{};
+    if (::uname(&host_uts) != 0) {
+        return -static_cast<std::int64_t>(errno == 0 ? kEio : errno);
+    }
+    std::array<std::uint8_t, 390> raw{};
+    copy_uts_field(raw.data() + 0, "Linux");
+    copy_uts_field(raw.data() + 65, host_uts.nodename);
+    copy_uts_field(raw.data() + 130, host_uts.release);
+    copy_uts_field(raw.data() + 195, host_uts.version);
+    copy_uts_field(raw.data() + 260, "x86_64");
+    copy_uts_field(raw.data() + 325, "(none)");
+    if (!memory.write(arg(s, 0), raw.data(), raw.size())) {
+        return -kEfault;
+    }
+    return 0;
+}
+
+std::int64_t do_clock_gettime(GuestState& s, Memory& memory) {
+    const auto clk_id = static_cast<clockid_t>(arg_i32(s, 0));
+    const std::uint64_t tp_addr = arg(s, 1);
+    struct timespec ts{};
+    if (::clock_gettime(clk_id, &ts) != 0) {
+        return -static_cast<std::int64_t>(errno == 0 ? kEinval : errno);
+    }
+    if (tp_addr == 0) {
+        return -kEfault;
+    }
+    std::uint8_t raw[16] = {};
+    put_u64(raw, 0, static_cast<std::uint64_t>(static_cast<std::int64_t>(ts.tv_sec)));
+    put_u64(raw, 8, static_cast<std::uint64_t>(static_cast<std::int64_t>(ts.tv_nsec)));
+    if (!memory.write(tp_addr, raw, sizeof(raw))) {
+        return -kEfault;
+    }
+    return 0;
+}
+
+std::int64_t do_gettimeofday(GuestState& s, Memory& memory) {
+    const std::uint64_t tv_addr = arg(s, 0);
+    const std::uint64_t tz_addr = arg(s, 1);
+    if (tv_addr != 0) {
+        struct timespec ts{};
+        if (::clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+            return -static_cast<std::int64_t>(errno == 0 ? kEinval : errno);
+        }
+        std::uint8_t raw[16] = {};
+        put_u64(raw, 0, static_cast<std::uint64_t>(static_cast<std::int64_t>(ts.tv_sec)));
+        put_u64(raw, 8, static_cast<std::uint64_t>(static_cast<std::int64_t>(ts.tv_nsec / 1000)));
+        if (!memory.write(tv_addr, raw, sizeof(raw))) {
+            return -kEfault;
+        }
+    }
+    if (tz_addr != 0) {
+        const std::uint8_t zero[8] = {};
+        if (!memory.write(tz_addr, zero, sizeof(zero))) {
+            return -kEfault;
+        }
+    }
+    return 0;
+}
+
+std::int64_t do_arch_prctl(GuestState& s, Memory& memory) {
+    const std::uint64_t code = arg(s, 0);
+    const std::uint64_t addr = arg(s, 1);
+    switch (code) {
+    case arch_prctl_code::kSetFs:
+        s.fs_base = addr;
+        return 0;
+    case arch_prctl_code::kGetFs: {
+        std::uint8_t raw[8] = {};
+        put_u64(raw, 0, s.fs_base);
+        if (!memory.write(addr, raw, sizeof(raw))) {
+            return -kEfault;
+        }
+        return 0;
+    }
+    default:
+        return -kEinval;
+    }
+}
+
+std::int64_t do_prlimit64(GuestState& s, Memory& memory) {
+    constexpr std::int64_t kEsrch = 3;
+    const auto pid = static_cast<pid_t>(arg_i32(s, 0));
+    const auto resource = static_cast<std::uint32_t>(arg(s, 1));
+    const std::uint64_t new_addr = arg(s, 2);
+    const std::uint64_t old_addr = arg(s, 3);
+
+    if (pid != 0 && pid != ::getpid()) {
+        return -kEsrch;
+    }
+    if (resource >= 16u) {
+        return -kEinval;
+    }
+
+    struct rlimit64 new_lim{};
+    const struct rlimit64* new_ptr = nullptr;
+    if (new_addr != 0) {
+        std::uint8_t raw[16] = {};
+        if (!memory.read(new_addr, raw, sizeof(raw))) {
+            return -kEfault;
+        }
+        new_lim.rlim_cur = get_u64_le(raw);
+        new_lim.rlim_max = get_u64_le(raw + 8);
+        new_ptr = &new_lim;
+    }
+
+    struct rlimit64 old_lim{};
+    if (::syscall(SYS_prlimit64, 0, resource, new_ptr, &old_lim) != 0) {
+        return -static_cast<std::int64_t>(errno == 0 ? kEinval : errno);
+    }
+
+    if (old_addr != 0) {
+        std::uint8_t raw[16] = {};
+        put_u64(raw, 0, old_lim.rlim_cur);
+        put_u64(raw, 8, old_lim.rlim_max);
+        if (!memory.write(old_addr, raw, sizeof(raw))) {
+            return -kEfault;
+        }
+    }
+    return 0;
+}
+
+} // namespace
+
 SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
     SyscallResult result;
     result.number = state.reg(Gpr::kRax);
@@ -768,6 +1248,98 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
     }
     case sysno::kRead: {
         const std::int64_t r = do_read(state, memory, files_);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kPread64: {
+        const std::int64_t r = do_pread64(state, memory, files_);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kPwrite64: {
+        const std::int64_t r = do_pwrite64(state, memory, files_);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kReadv: {
+        const std::int64_t r = do_iov(state, memory, sink_, files_, /*is_write=*/false);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kWritev: {
+        const std::int64_t r = do_iov(state, memory, sink_, files_, /*is_write=*/true);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kDup: {
+        const std::int64_t r = do_dup(state, files_);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kDup2: {
+        const std::int64_t r = do_dup2(state, files_);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kDup3: {
+        const std::int64_t r = do_dup3(state, files_);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kFcntl: {
+        const std::int64_t r = do_fcntl(state, files_);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = (r == -kEnosys) ? SyscallStatus::kUnimplemented : SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kUname: {
+        const std::int64_t r = do_uname(state, memory);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kGettimeofday: {
+        const std::int64_t r = do_gettimeofday(state, memory);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kClockGettime: {
+        const std::int64_t r = do_clock_gettime(state, memory);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kArchPrctl: {
+        const std::int64_t r = do_arch_prctl(state, memory);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
+        result.status = SyscallStatus::kHandled;
+        return result;
+    }
+    case sysno::kSetTidAddress:
+        clear_child_tid_ = arg(state, 0);
+        state.reg(Gpr::kRax) = static_cast<std::uint64_t>(::gettid());
+        result.status = SyscallStatus::kHandled;
+        return result;
+    case sysno::kSetRobustList:
+        if (arg(state, 1) != 24ULL) {
+            state.reg(Gpr::kRax) = static_cast<std::uint64_t>(-kEinval);
+        } else {
+            robust_list_head_ = arg(state, 0);
+            state.reg(Gpr::kRax) = 0;
+        }
+        result.status = SyscallStatus::kHandled;
+        return result;
+    case sysno::kPrlimit64: {
+        const std::int64_t r = do_prlimit64(state, memory);
         state.reg(Gpr::kRax) = static_cast<std::uint64_t>(r);
         result.status = SyscallStatus::kHandled;
         return result;
@@ -918,14 +1490,20 @@ SyscallResult MinimalSyscallHandler::handle(GuestState& state, Memory& memory) {
 
 bool is_minimal_syscall(std::uint64_t number) {
     return number == sysno::kRead || number == sysno::kWrite || number == sysno::kClose ||
-           number == sysno::kFstat || number == sysno::kLseek || number == sysno::kExit ||
-           number == sysno::kExitGroup || number == sysno::kMmap || number == sysno::kMprotect ||
-           number == sysno::kMunmap || number == sysno::kBrk || number == sysno::kOpenat ||
-           number == sysno::kNewfstatat || number == sysno::kGetpid || number == sysno::kGettid ||
-           number == sysno::kGetuid || number == sysno::kGeteuid || number == sysno::kGetgid ||
-           number == sysno::kGetegid || number == sysno::kGetppid || number == sysno::kGetcwd ||
-           number == sysno::kGetrandom || number == sysno::kReadlink || number == sysno::kAccess ||
-           number == sysno::kReadlinkat || number == sysno::kGetdents64 || number == sysno::kStatx;
+           number == sysno::kFstat || number == sysno::kLseek || number == sysno::kPread64 ||
+           number == sysno::kPwrite64 || number == sysno::kReadv || number == sysno::kWritev ||
+           number == sysno::kDup || number == sysno::kDup2 || number == sysno::kDup3 ||
+           number == sysno::kFcntl || number == sysno::kUname || number == sysno::kGettimeofday ||
+           number == sysno::kClockGettime || number == sysno::kArchPrctl ||
+           number == sysno::kSetTidAddress || number == sysno::kSetRobustList ||
+           number == sysno::kPrlimit64 || number == sysno::kExit || number == sysno::kExitGroup ||
+           number == sysno::kMmap || number == sysno::kMprotect || number == sysno::kMunmap ||
+           number == sysno::kBrk || number == sysno::kOpenat || number == sysno::kNewfstatat ||
+           number == sysno::kGetpid || number == sysno::kGettid || number == sysno::kGetuid ||
+           number == sysno::kGeteuid || number == sysno::kGetgid || number == sysno::kGetegid ||
+           number == sysno::kGetppid || number == sysno::kGetcwd || number == sysno::kGetrandom ||
+           number == sysno::kReadlink || number == sysno::kAccess || number == sysno::kReadlinkat ||
+           number == sysno::kGetdents64 || number == sysno::kStatx;
 }
 
 } // namespace hyperion

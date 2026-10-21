@@ -212,10 +212,16 @@ int width_of(OperandSize size) {
     return 64;
 }
 
-// Effective address = base + index*scale + disp, all mod 2^64.
-std::uint64_t effective_address(const MemoryOperand& mem, const GuestState& state) {
+// Effective address = (rip | base) + index*scale + disp, all mod 2^64.
+// `next_rip` is the architectural RIP of the byte immediately following the
+// instruction (`insn.address + insn.length`), matching x86-64 RIP-relative
+// addressing even when trailing immediate bytes follow `disp32`.
+std::uint64_t effective_address(const MemoryOperand& mem, const GuestState& state,
+                                std::uint64_t next_rip) {
     std::uint64_t address = static_cast<std::uint64_t>(mem.disp);
-    if (mem.has_base) {
+    if (mem.rip_relative) {
+        address += next_rip;
+    } else if (mem.has_base) {
         address += state.reg(mem.base);
     }
     if (mem.has_index) {
@@ -225,7 +231,8 @@ std::uint64_t effective_address(const MemoryOperand& mem, const GuestState& stat
 }
 
 // Read an operand's current value. Returns false on a memory fault.
-bool read_operand(const Operand& op, const GuestState& state, Memory& memory, std::uint64_t& out) {
+bool read_operand(const Operand& op, const GuestState& state, Memory& memory,
+                  std::uint64_t next_rip, std::uint64_t& out) {
     switch (op.kind) {
     case OperandKind::kRegister:
         out = state.reg(op.reg);
@@ -234,7 +241,7 @@ bool read_operand(const Operand& op, const GuestState& state, Memory& memory, st
         out = op.imm;
         return true;
     case OperandKind::kMemory: {
-        const std::uint64_t address = effective_address(op.mem, state);
+        const std::uint64_t address = effective_address(op.mem, state, next_rip);
         std::uint8_t buffer[8] = {};
         const std::size_t bytes = static_cast<std::size_t>(width_of(op.size)) / 8;
         if (!memory.read(address, buffer, bytes)) {
@@ -255,7 +262,8 @@ bool read_operand(const Operand& op, const GuestState& state, Memory& memory, st
 // general-purpose register clears the upper 32 bits. 8- and 16-bit writes
 // merge into the low bits without clearing the rest, but those widths are not
 // in the subset, so this only handles 32 and 64.
-bool write_operand(const Operand& op, GuestState& state, Memory& memory, std::uint64_t value) {
+bool write_operand(const Operand& op, GuestState& state, Memory& memory, std::uint64_t next_rip,
+                   std::uint64_t value) {
     const int width = width_of(op.size);
     switch (op.kind) {
     case OperandKind::kRegister:
@@ -266,7 +274,7 @@ bool write_operand(const Operand& op, GuestState& state, Memory& memory, std::ui
         }
         return true;
     case OperandKind::kMemory: {
-        const std::uint64_t address = effective_address(op.mem, state);
+        const std::uint64_t address = effective_address(op.mem, state, next_rip);
         const std::size_t bytes = static_cast<std::size_t>(width) / 8;
         std::uint8_t buffer[8] = {};
         for (std::size_t i = 0; i < bytes; ++i) {
@@ -331,11 +339,19 @@ FastStepOutcome execute_decoded(GuestState& state, Memory& memory, const Instruc
 
     case Opcode::kMov: {
         std::uint64_t value = 0;
-        if (!read_operand(insn.src, state, memory, value)) {
+        if (!read_operand(insn.src, state, memory, next_rip, value)) {
             return fault("mov: source memory fault");
         }
-        if (!write_operand(insn.dst, state, memory, value)) {
+        if (!write_operand(insn.dst, state, memory, next_rip, value)) {
             return fault("mov: destination memory fault");
+        }
+        break;
+    }
+
+    case Opcode::kLea: {
+        const std::uint64_t addr = effective_address(insn.src.mem, state, next_rip);
+        if (!write_operand(insn.dst, state, memory, next_rip, addr)) {
+            return fault("lea: destination fault");
         }
         break;
     }
@@ -345,13 +361,14 @@ FastStepOutcome execute_decoded(GuestState& state, Memory& memory, const Instruc
     case Opcode::kAnd:
     case Opcode::kOr:
     case Opcode::kXor:
-    case Opcode::kCmp: {
+    case Opcode::kCmp:
+    case Opcode::kTest: {
         std::uint64_t a = 0;
         std::uint64_t b = 0;
-        if (!read_operand(insn.dst, state, memory, a)) {
+        if (!read_operand(insn.dst, state, memory, next_rip, a)) {
             return fault("alu: destination memory fault");
         }
-        if (!read_operand(insn.src, state, memory, b)) {
+        if (!read_operand(insn.src, state, memory, next_rip, b)) {
             return fault("alu: source memory fault");
         }
 
@@ -375,12 +392,15 @@ FastStepOutcome execute_decoded(GuestState& state, Memory& memory, const Instruc
         case Opcode::kCmp:
             (void)alu::sub(a, b, width, state.flags);
             break;
+        case Opcode::kTest:
+            (void)alu::logical_and(a, b, width, state.flags);
+            break;
         default:
             break;
         }
 
-        if (insn.opcode != Opcode::kCmp) {
-            if (!write_operand(insn.dst, state, memory, result_value)) {
+        if (insn.opcode != Opcode::kCmp && insn.opcode != Opcode::kTest) {
+            if (!write_operand(insn.dst, state, memory, next_rip, result_value)) {
                 return fault("alu: destination memory fault");
             }
         }
@@ -390,13 +410,13 @@ FastStepOutcome execute_decoded(GuestState& state, Memory& memory, const Instruc
     case Opcode::kInc:
     case Opcode::kDec: {
         std::uint64_t a = 0;
-        if (!read_operand(insn.dst, state, memory, a)) {
+        if (!read_operand(insn.dst, state, memory, next_rip, a)) {
             return fault("inc/dec: memory fault");
         }
         const std::uint64_t result_value = (insn.opcode == Opcode::kInc)
                                                ? alu::inc(a, width, state.flags)
                                                : alu::dec(a, width, state.flags);
-        if (!write_operand(insn.dst, state, memory, result_value)) {
+        if (!write_operand(insn.dst, state, memory, next_rip, result_value)) {
             return fault("inc/dec: memory fault");
         }
         break;

@@ -92,6 +92,18 @@ void Encoder::add(Width w, Reg rd, Reg rn, Reg rm) {
     emit(sf_of(w) | kAddSubRegBase | (rm << 16) | (rn << 5) | rd);
 }
 
+void Encoder::add_shifted(Width w, Reg rd, Reg rn, Reg rm, Shift shift, unsigned amount) {
+    validate_reg(rd);
+    validate_reg(rn);
+    validate_reg(rm);
+    const unsigned max_shift = (w == Width::k64) ? 63u : 31u;
+    if (amount > max_shift || shift == Shift::kRor) {
+        throw std::invalid_argument("Encoder::add_shifted: invalid shift");
+    }
+    emit(sf_of(w) | kAddSubRegBase | (static_cast<std::uint32_t>(shift) << 22) | (rm << 16) |
+         (amount << 10) | (rn << 5) | rd);
+}
+
 void Encoder::sub(Width w, Reg rd, Reg rn, Reg rm) {
     validate_reg(rd);
     validate_reg(rn);

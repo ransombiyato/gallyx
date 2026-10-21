@@ -212,6 +212,7 @@ void* ExecArena::allocate(const std::uint8_t* code, std::size_t size) {
     if (::mprotect(target->base + page_lo, span, PROT_READ | PROT_EXEC) != 0) {
         throw std::runtime_error("ExecArena: mprotect(RX) failed");
     }
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     __builtin___clear_cache(reinterpret_cast<char*>(dst), reinterpret_cast<char*>(dst + size));
     target->used = end_off;
     return dst;

@@ -173,6 +173,7 @@ std::uint8_t flags_written(Opcode op) {
     case Opcode::kAdd:
     case Opcode::kSub:
     case Opcode::kCmp:
+    case Opcode::kTest:
     case Opcode::kAnd:
     case Opcode::kOr:
     case Opcode::kXor:
@@ -229,6 +230,17 @@ void regs_read_write(const Instruction& insn, bool reads[kGprCount], bool writes
         }
         writes[static_cast<unsigned>(insn.dst.reg)] = true;
         break;
+    case Opcode::kLea:
+        if (insn.has_src && insn.src.kind == OperandKind::kMemory && !insn.src.mem.rip_relative) {
+            if (insn.src.mem.has_base) {
+                reads[static_cast<unsigned>(insn.src.mem.base)] = true;
+            }
+            if (insn.src.mem.has_index) {
+                reads[static_cast<unsigned>(insn.src.mem.index)] = true;
+            }
+        }
+        writes[static_cast<unsigned>(insn.dst.reg)] = true;
+        break;
     case Opcode::kAdd:
     case Opcode::kSub:
     case Opcode::kAnd:
@@ -241,6 +253,7 @@ void regs_read_write(const Instruction& insn, bool reads[kGprCount], bool writes
         writes[static_cast<unsigned>(insn.dst.reg)] = true;
         break;
     case Opcode::kCmp:
+    case Opcode::kTest:
         // Reads both operands, writes no register (only flags).
         reads[static_cast<unsigned>(insn.dst.reg)] = true;
         if (insn.has_src && insn.src.kind == OperandKind::kRegister) {
@@ -441,15 +454,18 @@ constexpr a64::Cond invert_cond(a64::Cond c) noexcept {
 // ADD where `C || Z` is not a single ARMv8 condition).
 bool try_nzcv_cond(Opcode prev_op, Condition cond, a64::Cond& out) noexcept {
     if (prev_op != Opcode::kAdd && prev_op != Opcode::kSub && prev_op != Opcode::kCmp &&
-        prev_op != Opcode::kInc && prev_op != Opcode::kDec) {
+        prev_op != Opcode::kInc && prev_op != Opcode::kDec && prev_op != Opcode::kAnd &&
+        prev_op != Opcode::kOr && prev_op != Opcode::kXor && prev_op != Opcode::kTest) {
         return false;
     }
     const std::uint8_t req = condition_flags(cond);
     if ((flags_written(prev_op) & req) != req) {
         return false; // e.g. JB/JBE after INC/DEC where CF comes from earlier
     }
-    const bool is_sub =
-        (prev_op == Opcode::kSub || prev_op == Opcode::kCmp || prev_op == Opcode::kDec);
+    // `SUBS` (emitted for SUB/CMP/DEC and via `CMP R, #0` for AND/OR/XOR/TEST)
+    // sets `(N, Z, !C, V) == (SF, ZF, CF, OF)` across all 14 non-parity x86
+    // conditions, including `C = 1 == !CF` and `V = 0 == OF` for logical ops.
+    const bool is_sub = (prev_op != Opcode::kAdd && prev_op != Opcode::kInc);
     switch (cond) {
     case Condition::kO:
         out = a64::Cond::kVs;
@@ -656,12 +672,90 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
         return TranslateError::kNone;
     }
 
+    case Opcode::kLea: {
+        const a64::Reg dst =
+            (ra != nullptr && ra->mapped(insn.dst.reg)) ? ra->host(insn.dst.reg) : kR;
+        if (insn.src.mem.rip_relative) {
+            std::uint64_t val =
+                (insn.address + insn.length) + static_cast<std::uint64_t>(insn.src.mem.disp);
+            if (bits == 32) {
+                val &= 0xFFFFFFFFULL;
+            }
+            e.mov_imm64(dst, val);
+        } else {
+            bool have_acc = false;
+            if (insn.src.mem.has_base) {
+                if (ra != nullptr && ra->mapped(insn.src.mem.base)) {
+                    e.mov_reg(a64::Width::k64, kT0, ra->host(insn.src.mem.base));
+                } else {
+                    load_gpr(e, insn.src.mem.base, kT0);
+                }
+                have_acc = true;
+            }
+            if (insn.src.mem.has_index) {
+                a64::Reg idx = kT1;
+                if (ra != nullptr && ra->mapped(insn.src.mem.index)) {
+                    idx = ra->host(insn.src.mem.index);
+                } else {
+                    load_gpr(e, insn.src.mem.index, kT1);
+                }
+                unsigned sh = 0;
+                switch (insn.src.mem.scale) {
+                case 2:
+                    sh = 1;
+                    break;
+                case 4:
+                    sh = 2;
+                    break;
+                case 8:
+                    sh = 3;
+                    break;
+                default:
+                    sh = 0;
+                    break;
+                }
+                e.add_shifted(a64::Width::k64, kT0, have_acc ? kT0 : a64::kXzr, idx,
+                              a64::Shift::kLsl, sh);
+                have_acc = true;
+            }
+            if (insn.src.mem.disp != 0) {
+                const auto disp_u64 = static_cast<std::uint64_t>(insn.src.mem.disp);
+                std::uint32_t imm12 = 0;
+                bool shift12 = false;
+                if (!have_acc) {
+                    e.mov_imm64(kT0, disp_u64);
+                    have_acc = true;
+                } else if (insn.src.mem.disp > 0 && encode_imm12(disp_u64, imm12, shift12)) {
+                    e.add_imm(a64::Width::k64, kT0, kT0, imm12, shift12);
+                } else if (insn.src.mem.disp < 0 && encode_imm12(0ULL - disp_u64, imm12, shift12)) {
+                    e.sub_imm(a64::Width::k64, kT0, kT0, imm12, shift12);
+                } else {
+                    e.mov_imm64(kT1, disp_u64);
+                    e.add(a64::Width::k64, kT0, kT0, kT1);
+                }
+            }
+            if (!have_acc) {
+                e.movz(a64::Width::k64, dst, 0);
+            } else {
+                e.mov_reg(w, dst, kT0);
+            }
+        }
+        if (dst == kR) {
+            store_gpr_rb(e, ra, kR, insn.dst.reg);
+        }
+        if (write_rip) {
+            emit_advance_rip(e, insn);
+        }
+        return TranslateError::kNone;
+    }
+
     case Opcode::kAdd:
     case Opcode::kSub:
     case Opcode::kAnd:
     case Opcode::kOr:
     case Opcode::kXor:
-    case Opcode::kCmp: {
+    case Opcode::kCmp:
+    case Opcode::kTest: {
         // Operate directly on the allocated host registers when both operands
         // are allocated; kA/kB/kR are used only as fallbacks. This is what turns
         // `add rdx, rax` into one `adds x, x, x` instead of load/load/add/store.
@@ -674,13 +768,14 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
                             insn.src.kind == OperandKind::kRegister && ra->mapped(insn.src.reg))
                                ? ra->host(insn.src.reg)
                                : kB;
-        // CMP is not a write, so its "result" is only needed for the flags.
-        const bool writes_dst = insn.opcode != Opcode::kCmp;
+        // CMP and TEST do not write a destination register; their result is
+        // computed solely for flags.
+        const bool writes_dst = insn.opcode != Opcode::kCmp && insn.opcode != Opcode::kTest;
         const a64::Reg R =
             (ra != nullptr && writes_dst && ra->mapped(insn.dst.reg)) ? ra->host(insn.dst.reg) : kR;
 
         const bool is_logical = insn.opcode == Opcode::kAnd || insn.opcode == Opcode::kOr ||
-                                insn.opcode == Opcode::kXor;
+                                insn.opcode == Opcode::kXor || insn.opcode == Opcode::kTest;
         const bool is_sub = insn.opcode == Opcode::kSub || insn.opcode == Opcode::kCmp;
 
         // Only flags that are written *and* read before being overwritten are
@@ -716,6 +811,7 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
         if (is_logical) {
             switch (insn.opcode) {
             case Opcode::kAnd:
+            case Opcode::kTest:
                 e.and_(w, R, A, B);
                 break;
             case Opcode::kOr:
@@ -843,9 +939,11 @@ TranslateError emit_one(a64::Encoder& e, const Instruction& insn, bool write_rip
 bool is_block_body_opcode(Opcode op) {
     switch (op) {
     case Opcode::kMov:
+    case Opcode::kLea:
     case Opcode::kAdd:
     case Opcode::kSub:
     case Opcode::kCmp:
+    case Opcode::kTest:
     case Opcode::kAnd:
     case Opcode::kOr:
     case Opcode::kXor:
@@ -862,6 +960,15 @@ bool is_block_body_opcode(Opcode op) {
 TranslateError validate_body(const Instruction& insn) {
     if (insn.dst.size != OperandSize::k32 && insn.dst.size != OperandSize::k64) {
         return TranslateError::kUnsupportedSize;
+    }
+    if (insn.opcode == Opcode::kLea) {
+        if (insn.dst.kind != OperandKind::kRegister) {
+            return TranslateError::kInternal;
+        }
+        if (!insn.has_src || insn.src.kind != OperandKind::kMemory) {
+            return TranslateError::kUnsupportedOperand;
+        }
+        return TranslateError::kNone;
     }
     if (insn.dst.kind == OperandKind::kMemory) {
         return TranslateError::kUnsupportedOperand;
@@ -1137,11 +1244,15 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
         const bool is32 = cmp_or_alu.dst.size == OperandSize::k32;
         const a64::Width w = is32 ? a64::Width::k32 : a64::Width::k64;
         const int bits = is32 ? 32 : 64;
+        const bool is_logical =
+            cmp_or_alu.opcode == Opcode::kAnd || cmp_or_alu.opcode == Opcode::kOr ||
+            cmp_or_alu.opcode == Opcode::kXor || cmp_or_alu.opcode == Opcode::kTest;
         const bool is_sub = cmp_or_alu.opcode == Opcode::kSub ||
                             cmp_or_alu.opcode == Opcode::kCmp || cmp_or_alu.opcode == Opcode::kDec;
         const bool is_inc_dec =
             cmp_or_alu.opcode == Opcode::kInc || cmp_or_alu.opcode == Opcode::kDec;
-        const bool writes_dst = cmp_or_alu.opcode != Opcode::kCmp;
+        const bool writes_dst =
+            cmp_or_alu.opcode != Opcode::kCmp && cmp_or_alu.opcode != Opcode::kTest;
         const a64::Reg R =
             (writes_dst && ra.mapped(cmp_or_alu.dst.reg)) ? ra.host(cmp_or_alu.dst.reg) : kLoopRes;
 
@@ -1151,12 +1262,31 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
             cmp_or_alu.has_src
                 ? ((bits == 32) ? (cmp_or_alu.src.imm & 0xFFFFFFFFULL) : cmp_or_alu.src.imm)
                 : 0ULL;
-        const bool loop_imm_folded = !is_inc_dec && cmp_or_alu.has_src &&
+        const bool loop_imm_folded = !is_logical && !is_inc_dec && cmp_or_alu.has_src &&
                                      cmp_or_alu.src.kind == OperandKind::kImmediate &&
                                      encode_imm12(loop_imm_val, loop_imm12, loop_shift12);
 
         load_gpr_rb(e, &ra, cmp_or_alu.dst.reg, kLoopA);
-        if (is_inc_dec) {
+        if (is_logical) {
+            const TranslateError err = load_source(e, cmp_or_alu.src, kLoopB, bits, &ra);
+            if (err != TranslateError::kNone) {
+                out.error = err;
+                return out;
+            }
+            switch (cmp_or_alu.opcode) {
+            case Opcode::kAnd:
+            case Opcode::kTest:
+                e.and_(w, R, kLoopA, kLoopB);
+                break;
+            case Opcode::kOr:
+                e.orr(w, R, kLoopA, kLoopB);
+                break;
+            default:
+                e.eor(w, R, kLoopA, kLoopB);
+                break;
+            }
+            e.cmp_imm(w, R, 0);
+        } else if (is_inc_dec) {
             if (is_sub) {
                 e.subs_imm(w, R, kLoopA, 1);
             } else {
@@ -1191,7 +1321,9 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
         e.b_cond(a64::Cond::kNe, loop_top);
 
         // Cold exit A: step budget (`x1 == max_runs`) exhausted on taken backedge.
-        if (is_inc_dec) {
+        if (is_logical) {
+            e.cmp_imm(w, R, 0);
+        } else if (is_inc_dec) {
             if (is_sub) {
                 e.subs_imm(w, a64::kXzr, kLoopA, 1);
             } else {
@@ -1226,7 +1358,9 @@ BlockTranslation translate_block(const std::uint8_t* code, std::size_t size,
         e.str(a64::Width::k64, kT0, kState, kRipOffset);
         const std::uint8_t exit_mask = flags_written(cmp_or_alu.opcode);
         const std::uint64_t af_imm = is_inc_dec ? 1ULL : loop_imm_val;
-        if (is_inc_dec || loop_imm_folded) {
+        if (is_logical) {
+            emit_flags_logical(e, w, exit_mask, R);
+        } else if (is_inc_dec || loop_imm_folded) {
             if ((exit_mask & kFbAf) != 0) {
                 if ((af_imm & 0xFULL) == 0) {
                     e.strb(a64::kXzr, kState, kAfOffset);

@@ -1,6 +1,6 @@
 # STATUS
 
-**Last updated:** 2026-10-19
+**Last updated:** 2026-10-21
 **Current phase:** Phase 5 (performance measurement and optimization) — active;
 Phase 6 (Linux ABI and syscall compatibility) — seventh slice implemented
 **Repository state:** buildable, tested, documented, CI green. **Two execution
@@ -447,13 +447,21 @@ removed `/usr`; the toolchain was restored from `tools/vendor/host-debs/` and
 
 | Suite | Command | Result |
 | --- | --- | --- |
-| Native | `scripts/dev.sh test` | 9/9 ctest passed (163 unit cases, 0 failed, 13 skipped) |
-| Cross (qemu-user) | `scripts/dev.sh cross-test` | 5/5 ctest passed (180 unit cases, 0 failed, 2 skipped) |
-| Clang | `scripts/dev.sh clang-build` | 9/9 passed (163 unit cases, 0 failed) |
-| ASan/UBSan | `scripts/dev.sh sanitize` | 9/9 passed (163 unit cases, 0 failed) |
+| Native | `scripts/dev.sh test` | 10/10 ctest passed (169 unit cases, 0 failed, 13 skipped) |
+| Cross (qemu-user) | `scripts/dev.sh cross-test` | 6/6 ctest passed (186 unit cases, 0 failed, 2 skipped) |
+| Clang | `scripts/dev.sh clang-build` | 10/10 passed (169 unit cases, 0 failed) |
+| ASan/UBSan | `scripts/dev.sh sanitize` | 10/10 passed (169 unit cases, 0 failed) |
 | Formatting | `scripts/dev.sh format` | clean (clang-format 19.1.7) |
-| Lint | `shellcheck scripts/*.sh` | clean |
+| Lint | `shellcheck scripts/*.sh tests/cli/*.sh` | clean |
 | Syscall inventory | `python3 tools/gen_syscall_inventory.py --check` | OK (0 errors, 0 warnings) |
+
+Re-verified after the `hyperion` wrapper fix: native **169/0**, 13 skipped
+(of 182); cross **186/0**, 2 skipped (of 188) under `qemu-user`; ASan/UBSan
+**169/0**; clang-build **169/0**; format clean; shellcheck clean (including the
+new `tests/cli/wrapper_test.sh`); syscall inventory valid. The new CTest case
+`cli.wrapper` runs in the native, clang and sanitizer suites and in the cross
+tree, and guards that the installed command never again denies an implemented
+feature or refuses `run`.
 
 Re-verified after the Phase 6 increment 7
 commit (`access` + `readlink`): native 163/0, cross 180/0

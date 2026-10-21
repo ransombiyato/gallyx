@@ -36,6 +36,17 @@ add_test(NAME cli.smoke
     COMMAND ${CMAKE_COMMAND} -E env bash
             "${CMAKE_CURRENT_SOURCE_DIR}/cli/cli_smoke.sh" $<TARGET_FILE:hyperion>)
 
+# --- `hyperion` wrapper test ------------------------------------------------
+#
+# The installed `hyperion` command (scripts/hyperion) is a thin front end over
+# the real binary. It is user-facing, so it must not drift from the CLI it wraps.
+add_test(NAME cli.wrapper
+    COMMAND ${CMAKE_COMMAND} -E env
+            HYPERION_SRC=${CMAKE_SOURCE_DIR}
+            HYPERION_BUILD_DIR=${CMAKE_BINARY_DIR}
+            bash "${CMAKE_CURRENT_SOURCE_DIR}/cli/wrapper_test.sh"
+            $<TARGET_FILE:hyperion>)
+
 # --- Differential tests (interpreter vs. real x86-64 hardware) ---------------
 #
 # Only meaningful on an x86-64 host. On other hosts (the AArch64 cross-test

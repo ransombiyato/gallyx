@@ -5,6 +5,23 @@ Meaningful changes by milestone. Format loosely follows
 
 ---
 
+## [Unreleased] — the `hyperion` command reported a stale status and refused `run`
+
+### Fixed
+- `scripts/hyperion` (the command installed by `install.sh`) hard-coded a Phase 1
+  status: it told users the x86-64 decoder, code generation and "the translator
+  itself" were NOT IMPLEMENTED, and its `run` verb printed `NOT IMPLEMENTED`
+  without ever calling the binary — even though `hyperion run <blob>` has worked
+  since Phase 3. `status` now reflects the real phase state and `run` delegates
+  to the built binary.
+- `install.sh`'s header comment and `ROADMAP.md`'s overall-status line repeated
+  the same stale claims.
+- Added `tests/cli/wrapper_test.sh` (CTest `cli.wrapper`) so the wrapper cannot
+  silently drift from the CLI again: it fails if `status` denies implemented
+  features or if `run` does not execute a blob.
+
+---
+
 ## [Unreleased] — documentation truth audit
 
 ### Fixed — stale docs that contradicted the implemented code

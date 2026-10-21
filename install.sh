@@ -22,9 +22,10 @@
 #   - it never touches anything outside the prefix (default ~/.local)
 #   - it does not modify your shell rc files
 #
-# Design note: this project is early (Phase 1). There is no translator yet, so
-# `hyperion` currently builds, tests and benchmarks the foundation. The command
-# surface is real; the emulation is not. See STATUS.md.
+# Design note: this project is early. There is no ELF loader yet, so `hyperion`
+# currently builds, tests and benchmarks the foundation and can run raw x86-64
+# code blobs (`hyperion run <file>`). The command surface is real; running a
+# real Linux program is not. See STATUS.md.
 set -euo pipefail
 
 REPO_SLUG="ransombiyato/hyperion-dbt"

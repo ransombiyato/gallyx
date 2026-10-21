@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Project HYPERION contributors
+#
+# `hyperion` wrapper test.
+#
+# scripts/hyperion is the user-facing command installed by install.sh. It is a
+# thin front end over the built binary, so it can silently drift out of date
+# (it once claimed the translator did not exist and refused `run`). This test
+# pins the two properties that matter:
+#
+#   1. `status` does not deny features that exist (the translator, code
+#      generation, instruction decoding).
+#   2. `run` reaches the real binary and executes a blob, instead of printing
+#      NOT IMPLEMENTED.
+#
+# Usage: wrapper_test.sh <path-to-hyperion-binary>
+#   HYPERION_SRC / HYPERION_BUILD_DIR  point the wrapper at the test build.
+set -euo pipefail
+
+BIN="${1:?usage: wrapper_test.sh <hyperion-binary>}"
+WRAPPER="$(dirname "${BASH_SOURCE[0]}")/../../scripts/hyperion"
+WRAPPER="$(cd "$(dirname "${WRAPPER}")" && pwd)/$(basename "${WRAPPER}")"
+
+fail() {
+    echo "wrapper test FAILED: $*" >&2
+    exit 1
+}
+
+# `status` must be honest: it may not claim the translator is absent.
+status="$(bash "${WRAPPER}" status)"
+if grep -qi 'no way to run an x86-64 program' <<<"$status"; then
+    fail "'status' still claims no x86-64 program can run"
+fi
+if grep -qiE '^[[:space:]]*- x86-64 instruction decoding$' <<<"$status"; then
+    fail "'status' still lists instruction decoding as NOT IMPLEMENTED"
+fi
+if ! grep -q 'run <exe>' <<<"$(bash "${WRAPPER}" help)"; then
+    fail "'help' does not advertise the run command"
+fi
+
+# `run` must delegate to the binary, not print NOT IMPLEMENTED.
+BLOB="$(mktemp)"
+trap 'rm -f "$BLOB"' EXIT
+printf '\xB8\x2a\x00\x00\x00\xF4' > "$BLOB" # mov eax, 42 ; hlt
+
+out="$(bash "${WRAPPER}" run "$BLOB" --tier=0 --dump 2>&1)" \
+    || fail "'run' exited non-zero"
+if grep -q 'NOT IMPLEMENTED' <<<"$out"; then
+    fail "'run' printed NOT IMPLEMENTED instead of delegating"
+fi
+grep -q '^status: ok$' <<<"$out" || fail "'run' did not report ok"
+grep -q 'rax =0x000000000000002a' <<<"$out" || fail "'run' produced the wrong rax"
+
+# Sanity: the wrapper is pointing at the binary we were handed.
+[[ -x "$BIN" ]] || fail "test binary '$BIN' is not executable"
+
+echo "wrapper ok: status honest, run delegates and executes"

@@ -81,13 +81,14 @@ paths
   src           print the source checkout path
   build-dir     print the build tree path
 
-translator (not implemented yet)
-  run <exe>     run an x86-64 Linux program  [NOT IMPLEMENTED]
+translator
+  run <exe>     execute a raw x86-64 code blob (tier 0/1)
   info <exe>    describe an x86-64 executable [NOT IMPLEMENTED]
 
   help          show this message
 
 'hyperion bench --help' shows the benchmark options.
+'hyperion run --help' shows the run options.
 EOF
 }
 
@@ -105,24 +106,33 @@ cmd_status() {
 Project HYPERION - status
 
 Phase 0  foundation                  COMPLETE
-Phase 1  baseline and benchmarks     IN PROGRESS
+Phase 1  baseline and benchmarks     COMPLETE
+Phase 2  minimal instruction exec    IN PROGRESS (subset)
+Phase 3  first native code gen       IN PROGRESS
+Phase 4  basic dynamic translator    CORE DONE
+Phase 5  performance and opt         IN PROGRESS
+Phase 6  Linux ABI / syscalls        IN PROGRESS (seven slices)
+Phase 7+ advanced CPU compatibility  NOT STARTED
 
 IMPLEMENTED
   - CMake build, CI, unit tests, cross tests, sanitizers
   - host probe (arch, kernel, page size, cache line)
   - benchmark harness with repeated-run statistics
   - AArch64 cross-build + test under qemu-user
+  - x86-64 decoder + reference interpreter for a documented subset
+  - AArch64 code generator and a block translation cache (tier 1)
+  - per-block guest-register allocation
+  - a slice of Linux syscalls (see 'hyperion doctor' / STATUS.md)
 
 NOT IMPLEMENTED
-  - x86-64 instruction decoding
-  - any code generation
-  - the translator itself
+  - loading a real ELF executable (only raw code blobs run)
+  - block chaining, cache invalidation, SIMD, signals, threads
+  - the `info` command
 
-There is no way to run an x86-64 program with this project yet. 'hyperion
-bench' measures the host machine, not any emulation. This is deliberate: the
-project is built in small, verified stages and the translator is Phase 3+.
-
-See STATUS.md and ROADMAP.md in the source checkout for the full picture.
+A raw x86-64 code blob runs with 'hyperion run <file>' (tier 1 on an AArch64
+host, tier 0 otherwise). A real Linux ELF program cannot run yet. 'hyperion
+bench' measures the host machine, not any emulation. See STATUS.md and
+ROADMAP.md in the source checkout for the full picture.
 EOF
 }
 
@@ -213,10 +223,16 @@ cmd_clean() {
 not_implemented() {
     say "NOT IMPLEMENTED: $1"
     say ""
-    say "There is no translator yet. Project HYPERION is being built in small,"
-    say "verified stages; instruction decoding is Phase 2 and native code"
-    say "generation is Phase 3. See ROADMAP.md."
+    say "A raw x86-64 code blob can be run with 'hyperion run <file>', but this"
+    say "command needs a real x86-64 ELF program. See ROADMAP.md."
     exit 2
+}
+
+cmd_run() {
+    need_build
+    local bin="${BUILD}/hyperion"
+    [ -x "${bin}" ] || die "hyperion binary not found at '${bin}' (run: hyperion build)"
+    exec "${bin}" run "$@"
 }
 
 case "${1:-}" in
@@ -231,7 +247,7 @@ case "${1:-}" in
     clean)              cmd_clean ;;
     src)                say "${SRC}" ;;
     build-dir)          say "${BUILD}" ;;
-    run)                not_implemented "running x86-64 programs" ;;
+    run)                shift; cmd_run "$@" ;;
     info)               not_implemented "inspecting x86-64 executables" ;;
     *)                  printf 'error: unknown command %s\n\n' "$1" >&2; cmd_help >&2; exit 1 ;;
 esac
